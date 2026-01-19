@@ -163,33 +163,33 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: RoyalBit Ref ${{ steps.version.outputs.version }}
+          name: Möllendorff Ref ${{ steps.version.outputs.version }}
           body: |
-            ## RoyalBit Ref ${{ steps.version.outputs.version }}
+            ## Möllendorff Ref ${{ steps.version.outputs.version }}
 
             ### Installation
 
             **macOS (Apple Silicon)**
             ```bash
-            curl -L https://github.com/royalbit/ref/releases/download/${{ steps.version.outputs.version }}/ref-aarch64-apple-darwin.tar.gz | tar xz
+            curl -L https://github.com/mollendorff-ai/ref/releases/download/${{ steps.version.outputs.version }}/ref-aarch64-apple-darwin.tar.gz | tar xz
             sudo mv ref /usr/local/bin/
             ```
 
             **macOS (Intel)**
             ```bash
-            curl -L https://github.com/royalbit/ref/releases/download/${{ steps.version.outputs.version }}/ref-x86_64-apple-darwin.tar.gz | tar xz
+            curl -L https://github.com/mollendorff-ai/ref/releases/download/${{ steps.version.outputs.version }}/ref-x86_64-apple-darwin.tar.gz | tar xz
             sudo mv ref /usr/local/bin/
             ```
 
             **Linux (x64)**
             ```bash
-            curl -L https://github.com/royalbit/ref/releases/download/${{ steps.version.outputs.version }}/ref-x86_64-unknown-linux-musl.tar.gz | tar xz
+            curl -L https://github.com/mollendorff-ai/ref/releases/download/${{ steps.version.outputs.version }}/ref-x86_64-unknown-linux-musl.tar.gz | tar xz
             sudo mv ref /usr/local/bin/
             ```
 
             **Linux (ARM64)**
             ```bash
-            curl -L https://github.com/royalbit/ref/releases/download/${{ steps.version.outputs.version }}/ref-aarch64-unknown-linux-musl.tar.gz | tar xz
+            curl -L https://github.com/mollendorff-ai/ref/releases/download/${{ steps.version.outputs.version }}/ref-aarch64-unknown-linux-musl.tar.gz | tar xz
             sudo mv ref /usr/local/bin/
             ```
 

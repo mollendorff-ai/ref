@@ -1,4 +1,4 @@
-# RoyalBit Asimov Roadmap
+# Möllendorff Asimov Roadmap
 #
 # WHAT to build - milestones only
 #
@@ -15,7 +15,7 @@ current:
   summary: "Rebrand & Release Infrastructure"
   goal: "REBRAND_RELEASE"
   deliverables:
-    - "[x] Rebrand: ref-tools → ref (CLI) / RoyalBit Ref (product)"
+    - "[x] Rebrand: ref-tools → ref (CLI) / Möllendorff Ref (product)"
     - "[x] Cargo.toml: crates.io publishing metadata"
     - "[x] GitHub Actions: CI workflow (test, lint, build)"
     - "[x] GitHub Actions: Release workflow (multi-arch)"

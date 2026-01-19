@@ -1,11 +1,11 @@
 [package]
-name = "royalbit-ref"
+name = "mollendorff-ref"
 version = "1.1.0"
 edition = "2021"
-authors = ["RoyalBit Inc. <admin@royalbit.ca>"]
+authors = ["Möllendorff Group Inc. <admin@mollendorff.ai>"]
 description = "Reference verification tools with headless Chrome"
 license = "Elastic-2.0"
-repository = "https://github.com/royalbit/ref"
+repository = "https://github.com/mollendorff-ai/ref"
 keywords = ["cli", "web", "scraper", "headless", "chrome"]
 categories = ["command-line-utilities", "web-programming"]
 readme = "README.md"

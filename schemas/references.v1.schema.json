@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://royalbit.ca/schemas/references.v1.schema.json",
+  "$id": "https://mollendorff.ai/schemas/references.v1.schema.json",
   "title": "references.yaml",
-  "description": "Schema for RoyalBit Ref reference tracking and verification",
+  "description": "Schema for Möllendorff Ref reference tracking and verification",
   "type": "object",
   "required": ["meta", "references"],
   "properties": {

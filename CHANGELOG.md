@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to RoyalBit Ref.
+All notable changes to Möllendorff Ref.
 
 ## [1.1.0] - 2025-01-02
 
@@ -8,7 +8,7 @@ Rebrand & Release Infrastructure.
 
 ### Added
 
-- Rebrand: ref-tools → ref (CLI) / RoyalBit Ref (product)
+- Rebrand: ref-tools → ref (CLI) / Möllendorff Ref (product)
 - Cargo.toml: crates.io publishing metadata
 - GitHub Actions: CI workflow (test, lint, build)
 - GitHub Actions: Release workflow (multi-arch)

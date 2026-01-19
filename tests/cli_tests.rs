@@ -1,4 +1,4 @@
-//! E2E tests for RoyalBit Ref CLI
+//! E2E tests for Möllendorff Ref CLI
 
 #![allow(deprecated)] // cargo_bin deprecation - will update when assert_cmd stabilizes replacement
 

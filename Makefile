@@ -1,4 +1,4 @@
-# RoyalBit Ref - Reference verification toolkit
+# Möllendorff Ref - Reference verification toolkit
 # Build targets for optimized static binaries
 
 .PHONY: help build install install-release uninstall lint format test clean pre-commit
@@ -35,7 +35,7 @@ KVELDULF := kveldulf
 # ═══════════════════════════════════════════════════════════════════════════════
 
 help:
-	@echo "RoyalBit Ref - Build Commands"
+	@echo "Möllendorff Ref - Build Commands"
 	@echo ""
 	@echo "Build & Install:"
 	@echo "  make build              - Build for current platform"

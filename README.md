@@ -1,4 +1,4 @@
-# RoyalBit Ref
+# Möllendorff Ref
 
 > 📌 **R&D Prototype** — Interpret claims as hypotheses, not proven facts.
 
@@ -23,26 +23,26 @@ From releases:
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/royalbit/ref/releases/latest/download/ref-aarch64-apple-darwin.tar.gz | tar xz
+curl -L https://github.com/mollendorff-ai/ref/releases/latest/download/ref-aarch64-apple-darwin.tar.gz | tar xz
 sudo mv ref /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/royalbit/ref/releases/latest/download/ref-x86_64-apple-darwin.tar.gz | tar xz
+curl -L https://github.com/mollendorff-ai/ref/releases/latest/download/ref-x86_64-apple-darwin.tar.gz | tar xz
 sudo mv ref /usr/local/bin/
 
 # Linux (x64)
-curl -L https://github.com/royalbit/ref/releases/latest/download/ref-x86_64-unknown-linux-musl.tar.gz | tar xz
+curl -L https://github.com/mollendorff-ai/ref/releases/latest/download/ref-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo mv ref /usr/local/bin/
 
 # Linux (ARM64)
-curl -L https://github.com/royalbit/ref/releases/latest/download/ref-aarch64-unknown-linux-musl.tar.gz | tar xz
+curl -L https://github.com/mollendorff-ai/ref/releases/latest/download/ref-aarch64-unknown-linux-musl.tar.gz | tar xz
 sudo mv ref /usr/local/bin/
 ```
 
 From crates.io:
 
 ```bash
-cargo install royalbit-ref
+cargo install mollendorff-ref
 ```
 
 ## Usage
@@ -161,4 +161,4 @@ ref fetch https://example.com 2>/dev/null | jq .
 
 ## License
 
-[Elastic License 2.0](LICENSE) - RoyalBit Inc.
+[Elastic License 2.0](LICENSE) - Möllendorff Group Inc.

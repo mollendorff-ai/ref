@@ -1,4 +1,4 @@
-//! RoyalBit Ref CLI
+//! Möllendorff Ref CLI
 //!
 //! LLM-optimized reference tools with headless Chrome.
 //! Bypasses bot protection (403/999) that blocks curl/wget.
@@ -29,9 +29,9 @@ use verify_refs::{run_verify_refs, VerifyRefsArgs};
 
 #[derive(Parser)]
 #[command(name = "ref")]
-#[command(author = "RoyalBit Inc.")]
+#[command(author = "Möllendorff Group Inc.")]
 #[command(version)]
-#[command(about = "RoyalBit Ref - LLM-optimized reference toolkit")]
+#[command(about = "Möllendorff Ref - LLM-optimized reference toolkit")]
 #[command(
     long_about = "Reference verification and web fetching for AI agents.\nBypasses bot protection (403/999) that blocks curl/wget.\nAll output is JSON for LLM consumption."
 )]

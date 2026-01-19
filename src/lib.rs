@@ -1,4 +1,4 @@
-//! RoyalBit Ref: LLM-optimized reference toolkit
+//! Möllendorff Ref: LLM-optimized reference toolkit
 //!
 //! JSON output for agents, not humans.
 //! Bypasses bot protection via headless Chrome.

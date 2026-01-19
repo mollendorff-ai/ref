@@ -11,7 +11,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-const GITHUB_REPO: &str = "royalbit/ref";
+const GITHUB_REPO: &str = "mollendorff-ai/ref";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Args)]
