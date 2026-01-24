@@ -21,8 +21,8 @@ BIN_WINDOWS     := target/$(TARGET_WINDOWS)/release/ref.exe
 # Output directory for release binaries
 DIST_DIR := dist
 
-# Install directory (~/bin on all machines)
-INSTALL_DIR := $(HOME)/bin
+# Install directory (default Cargo bin)
+INSTALL_DIR := $(HOME)/.cargo/bin
 
 # Tool detection
 HAS_UPX := $(shell command -v upx 2> /dev/null)
@@ -148,10 +148,10 @@ deploy-kveldulf:
 	@rsync -az --delete --exclude='target/' --exclude='.git/' . $(KVELDULF):~/src/ref/
 	@echo "  2. Building on $(KVELDULF)..."
 	@ssh $(KVELDULF) "cd ~/src/ref && cargo build --release"
-	@echo "  3. Installing to ~/bin..."
-	@ssh $(KVELDULF) "mkdir -p ~/bin && install -m 755 ~/src/ref/target/release/ref ~/bin/ref"
+	@echo "  3. Installing to ~/.cargo/bin..."
+	@ssh $(KVELDULF) "mkdir -p ~/.cargo/bin && install -m 755 ~/src/ref/target/release/ref ~/.cargo/bin/ref"
 	@echo "  4. Verifying..."
-	@ssh $(KVELDULF) "~/bin/ref --version"
+	@ssh $(KVELDULF) "~/.cargo/bin/ref --version"
 	@echo "Deployed successfully!"
 
 # ═══════════════════════════════════════════════════════════════════════════════

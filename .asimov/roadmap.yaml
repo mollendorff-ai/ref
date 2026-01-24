@@ -14,6 +14,10 @@ current:
   status: complete
   summary: "Rebrand & Release Infrastructure"
   goal: "REBRAND_RELEASE"
+  note: |
+    WHY REBRAND? RoyalBit name (company founded 2006) was hijacked by crypto scammers.
+    UK FCA warning (Oct 2024) about "Royalbit Miners" - unauthorized firm.
+    Multiple fraudulent domains with HYIP Ponzi schemes (155-580% returns).
   deliverables:
     - "[x] Rebrand: ref-tools → ref (CLI) / Möllendorff Ref (product)"
     - "[x] Cargo.toml: crates.io publishing metadata"
