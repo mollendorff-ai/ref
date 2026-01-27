@@ -17,6 +17,7 @@ current:
   deliverables:
     - "[x] PDF table extraction (whitespace column detection, markdown output)"
     - "[x] PDF heading detection improvements (numbered, Roman, academic, legal)"
+    - "[x] Network idle wait for SPA support (ADR-002)"
     - "[ ] Stale reference detection (not cited anywhere)"
 
 next:

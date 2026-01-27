@@ -1,11 +1,20 @@
 //! Headless Chrome browser management via chromiumoxide
+//!
+//! v1.2.0: Added networkIdle wait for SPA support (ADR-002)
 
 use anyhow::{Context, Result};
+use chromiumoxide::cdp::browser_protocol::page::{
+    EventLifecycleEvent, SetLifecycleEventsEnabledParams,
+};
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
+
+/// Default wait time for network idle (ms) - how long to wait for networkIdle event
+const NETWORK_IDLE_TIMEOUT_MS: u64 = 10000;
 
 /// Auto-detect Chrome/Chromium executable path based on OS
 fn detect_chrome_path() -> Option<PathBuf> {
@@ -107,6 +116,10 @@ impl BrowserPool {
         )
         .await?;
 
+        // Enable lifecycle events for networkIdle detection
+        page.execute(SetLifecycleEventsEnabledParams::new(true))
+            .await?;
+
         Ok(BrowserPage {
             page,
             _permit: permit,
@@ -127,16 +140,36 @@ pub struct BrowserPage {
 }
 
 impl BrowserPage {
-    /// Navigate to URL and wait for DOM content loaded
+    /// Navigate to URL and wait for network idle (SPA support)
+    ///
+    /// This method:
+    /// 1. Subscribes to lifecycle events
+    /// 2. Navigates to the URL
+    /// 3. Waits for `networkIdle` event (no requests for 500ms)
+    /// 4. Falls back to timeout if networkIdle not reached
+    ///
+    /// This ensures SPAs have time to load their dynamic content.
     pub async fn goto(&self, url: &str, timeout_ms: u64) -> Result<PageResult> {
+        // Subscribe to lifecycle events BEFORE navigation
+        let mut lifecycle = self
+            .page
+            .event_listener::<EventLifecycleEvent>()
+            .await
+            .context("Failed to subscribe to lifecycle events")?;
+
+        // Start navigation with overall timeout
         let nav_result = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
+            Duration::from_millis(timeout_ms),
             self.page.goto(url),
         )
         .await;
 
+        // Handle navigation result
         match nav_result {
             Ok(Ok(_)) => {
+                // Navigation succeeded, now wait for networkIdle
+                self.wait_for_network_idle(&mut lifecycle).await;
+
                 let status = self.get_status().await;
                 let title = self.page.get_title().await.ok().flatten();
                 Ok(PageResult {
@@ -158,6 +191,46 @@ impl BrowserPage {
                 title: None,
                 error: Some("Navigation timeout".to_string()),
             }),
+        }
+    }
+
+    /// Wait for networkIdle lifecycle event with timeout
+    ///
+    /// networkIdle fires when there are no network requests for 500ms.
+    /// This is ideal for SPAs that load content via XHR/fetch.
+    ///
+    /// Falls back gracefully on timeout - some sites never reach networkIdle
+    /// due to analytics, websockets, or polling.
+    async fn wait_for_network_idle(
+        &self,
+        lifecycle: &mut chromiumoxide::listeners::EventStream<EventLifecycleEvent>,
+    ) {
+        let wait_result = tokio::time::timeout(
+            Duration::from_millis(NETWORK_IDLE_TIMEOUT_MS),
+            async {
+                while let Some(event) = lifecycle.next().await {
+                    // networkIdle = no network connections for 500ms
+                    // networkAlmostIdle = ≤2 connections for 500ms
+                    if event.name == "networkIdle" {
+                        return WaitResult::NetworkIdle;
+                    }
+                }
+                WaitResult::StreamEnded
+            },
+        )
+        .await;
+
+        match wait_result {
+            Ok(WaitResult::NetworkIdle) => {
+                // Ideal case: network settled
+            }
+            Ok(WaitResult::StreamEnded) => {
+                // Stream ended unexpectedly, continue anyway
+            }
+            Err(_) => {
+                // Timeout waiting for networkIdle
+                // This is acceptable - site may have persistent connections
+            }
         }
     }
 
@@ -196,6 +269,12 @@ impl BrowserPage {
     pub async fn current_url(&self) -> Option<String> {
         self.page.url().await.ok().flatten()
     }
+}
+
+/// Internal result type for network idle wait
+enum WaitResult {
+    NetworkIdle,
+    StreamEnded,
 }
 
 /// Result of a page navigation
@@ -243,5 +322,22 @@ mod tests {
         if let Some(path) = result {
             assert!(path.exists());
         }
+    }
+
+    #[test]
+    fn test_network_idle_timeout_reasonable() {
+        // Ensure timeout is reasonable (not too short, not too long)
+        assert!(NETWORK_IDLE_TIMEOUT_MS >= 5000, "Timeout too short for SPAs");
+        assert!(
+            NETWORK_IDLE_TIMEOUT_MS <= 30000,
+            "Timeout too long, will slow down all fetches"
+        );
+    }
+
+    #[test]
+    fn test_wait_result_variants() {
+        // Ensure WaitResult enum exists and is exhaustive
+        let _idle = WaitResult::NetworkIdle;
+        let _ended = WaitResult::StreamEnded;
     }
 }

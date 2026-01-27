@@ -8,6 +8,8 @@ Enhanced PDF extraction.
 
 ### Added
 
+- **Network idle wait for SPAs**: `ref fetch` now waits for `networkIdle` (no requests for 500ms) before extracting content. This ensures SPAs load their dynamic content before extraction. Falls back to timeout for sites with persistent connections.
+
 - **PDF table extraction**: Detects tables via whitespace column alignment
   - Finds consistent column boundaries across rows
   - Header row detection (non-numeric first row, title case)
