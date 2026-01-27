@@ -11,14 +11,13 @@
 
 current:
   version: "1.2.0"
-  status: in_progress
-  summary: "Enhanced extraction"
+  status: complete
+  summary: "Enhanced extraction & SPA support"
   goal: "BETTER_EXTRACTION"
   deliverables:
     - "[x] PDF table extraction (whitespace column detection, markdown output)"
     - "[x] PDF heading detection improvements (numbered, Roman, academic, legal)"
     - "[x] Network idle wait for SPA support (ADR-002)"
-    - "[ ] Stale reference detection (not cited anywhere)"
 
 next:
   - version: "1.3.0"
@@ -26,6 +25,7 @@ next:
     goal: "REF_MANAGEMENT"
     deliverables:
       - "[ ] Stale reference detection (not cited anywhere)"
+      - "[ ] Reference deduplication"
 
 backlog:
   - summary: "MCP Server Mode"

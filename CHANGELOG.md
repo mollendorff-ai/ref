@@ -4,7 +4,7 @@ All notable changes to Möllendorff Ref.
 
 ## [1.2.0] - 2026-01-26
 
-Enhanced PDF extraction.
+Enhanced extraction & SPA support.
 
 ### Added
 
