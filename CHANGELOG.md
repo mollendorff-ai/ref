@@ -2,6 +2,30 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.2.0] - 2026-01-26
+
+Enhanced PDF extraction.
+
+### Added
+
+- **PDF table extraction**: Detects tables via whitespace column alignment
+  - Finds consistent column boundaries across rows
+  - Header row detection (non-numeric first row, title case)
+  - Outputs structured `tables[]` array with `headers`, `rows`, and `markdown`
+- **Improved PDF heading detection**: Multiple pattern types with confidence scoring
+  - Numbered sections: `1.`, `1.2`, `1.2.3` with correct level inference
+  - Roman numerals: `I.`, `IV.`, `XIV.`
+  - Structural keywords: `Chapter 3`, `Section 2.1`, `Appendix A`
+  - Academic keywords: Abstract, Introduction, Methods, Results, etc.
+  - Legal patterns: WHEREAS, DEFINITIONS, GOVERNING LAW
+  - ALL CAPS headings
+  - Page reference stripping: `Introduction ...... 15` → `Introduction`
+
+### Changed
+
+- PDF output now includes `tables` field (empty array if no tables detected)
+- Heading detection uses confidence threshold (0.5+) instead of simple regex
+
 ## [1.1.0] - 2025-01-02
 
 Rebrand & Release Infrastructure.
