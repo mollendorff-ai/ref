@@ -368,11 +368,11 @@ mod tests {
 
     #[test]
     fn test_extract_extractable_urls() {
-        let content = r#"
+        let content = r"
             Check https://instagram.com/user1 and
             https://www.statista.com/statistics/123
             and https://example.com for more.
-        "#;
+        ";
 
         let urls = extract_extractable_urls(content);
         assert_eq!(urls.len(), 2); // Only instagram and statista

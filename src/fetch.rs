@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_parse_basic() {
-        let html = r#"
+        let html = r"
             <html>
             <head><title>Test Page</title></head>
             <body>
@@ -672,7 +672,7 @@ mod tests {
                 </main>
             </body>
             </html>
-        "#;
+        ";
         let page = parse_page(html, "https://test.com", false);
         assert_eq!(page.status, PageStatus::Ok);
         assert_eq!(page.title, Some("Test Page".to_string()));

@@ -327,21 +327,17 @@ mod tests {
 
     #[test]
     fn test_network_idle_timeout_reasonable() {
-        // Ensure timeout is reasonable (not too short, not too long)
-        assert!(
-            NETWORK_IDLE_TIMEOUT_MS >= 5000,
-            "Timeout too short for SPAs"
-        );
-        assert!(
-            NETWORK_IDLE_TIMEOUT_MS <= 30000,
-            "Timeout too long, will slow down all fetches"
-        );
+        let ms = NETWORK_IDLE_TIMEOUT_MS;
+        assert!(ms >= 5000, "Timeout too short for SPAs");
+        assert!(ms <= 30000, "Timeout too long, will slow down all fetches");
     }
 
     #[test]
     fn test_wait_result_variants() {
-        // Ensure WaitResult enum exists and is exhaustive
-        let _idle = WaitResult::NetworkIdle;
-        let _ended = WaitResult::StreamEnded;
+        // Ensure WaitResult enum is constructible for all variants
+        let idle = WaitResult::NetworkIdle;
+        let ended = WaitResult::StreamEnded;
+        assert!(matches!(idle, WaitResult::NetworkIdle));
+        assert!(matches!(ended, WaitResult::StreamEnded));
     }
 }

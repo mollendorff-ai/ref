@@ -1,14 +1,13 @@
 //! E2E tests for Möllendorff Ref CLI
 
-#![allow(deprecated)] // cargo_bin deprecation - will update when assert_cmd stabilizes replacement
-
+use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::tempdir;
 
 fn ref_cmd() -> Command {
-    Command::cargo_bin("ref").unwrap()
+    cargo_bin_cmd!("ref")
 }
 
 #[test]
@@ -114,18 +113,17 @@ fn test_check_links_empty_file() {
 }
 
 #[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
 fn test_check_links_with_urls() {
     let dir = tempdir().unwrap();
     let file_path = dir.path().join("links.md");
     fs::write(&file_path, "Check https://example.com for more info.").unwrap();
 
-    // This test requires Chrome, so we just check it starts
-    // Full E2E would need Chrome installed
     ref_cmd()
         .args(["check-links", file_path.to_str().unwrap()])
-        .timeout(std::time::Duration::from_secs(5))
-        .assert();
-    // Don't assert success/failure as it depends on Chrome being installed
+        .timeout(std::time::Duration::from_secs(30))
+        .assert()
+        .success();
 }
 
 #[test]

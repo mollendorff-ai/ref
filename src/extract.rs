@@ -76,11 +76,11 @@ mod tests {
 
     #[test]
     fn test_extract_urls() {
-        let content = r#"
+        let content = r"
             Check out https://example.com and
             [link](https://foo.bar/path?q=1) for more.
             Also http://old.site.org.
-        "#;
+        ";
 
         let urls = extract_urls(content);
         assert_eq!(urls.len(), 3);

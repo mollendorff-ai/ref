@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_extract_markdown_urls() {
-        let content = r#"
+        let content = r"
 # Test Document
 
 Check out [Example Site](https://example.com) for more info.
@@ -311,7 +311,7 @@ Also see [GitHub](https://github.com/foo/bar).
 Bare URL: https://bare.example.org/path
 
 Another [link](https://another.com/page?q=1).
-        "#;
+        ";
 
         let found = extract_markdown_urls(content, Path::new("test.md"));
 

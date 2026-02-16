@@ -47,8 +47,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Clippy (pedantic)
-        run: cargo clippy -- -D warnings -W clippy::pedantic
+      - name: Clippy (pedantic, all targets)
+        run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
 
   test:
     name: Unit tests (${{ matrix.rust }})
