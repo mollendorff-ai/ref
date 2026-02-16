@@ -8,6 +8,7 @@ use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -72,8 +73,9 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
     let target = get_target_triple()?;
     eprintln!("Platform: {target}");
 
-    // Find matching asset
-    let asset_name = format!("ref-{target}.tar.gz");
+    // Find matching asset (.zip for Windows, .tar.gz for Unix)
+    let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
+    let asset_name = format!("ref-{target}.{ext}");
     let asset = release
         .assets
         .iter()
@@ -192,10 +194,13 @@ fn install_binary(src: &Path, dest: &Path) -> Result<()> {
     // Copy new binary
     match fs::copy(src, dest) {
         Ok(_) => {
-            // Set executable permissions
-            let mut perms = fs::metadata(dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(dest, perms)?;
+            // Set executable permissions (Unix only)
+            #[cfg(unix)]
+            {
+                let mut perms = fs::metadata(dest)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(dest, perms)?;
+            }
 
             // Remove backup
             let _ = fs::remove_file(&backup);
