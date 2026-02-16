@@ -18,6 +18,10 @@ Open source readiness.
 - Safe integer casts (replace `as` with `try_from`, `abs_diff`, integer cross-multiplication)
 - Added `# Errors` and `# Panics` doc sections to all public functions
 - Removed unused `async` from `extract_pdf`
+- Windows build: `#[cfg(unix)]` guard on `PermissionsExt`, `.zip` archive detection for Windows assets
+- CI clippy enforces `--all-targets` (lints tests too, not just library)
+- Migrated from deprecated `cargo_bin()` to `cargo_bin_cmd!()` macro in integration tests
+- Chrome-dependent test moved behind `#[ignore]` per ADR-003
 
 ### Added
 
