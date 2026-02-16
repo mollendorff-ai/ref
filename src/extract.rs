@@ -3,7 +3,12 @@
 use regex::Regex;
 use std::collections::HashSet;
 
-/// Extract unique URLs from text content
+/// Extract unique URLs from text content.
+///
+/// # Panics
+///
+/// Panics if the internal URL regex fails to compile (should never happen).
+#[must_use]
 pub fn extract_urls(content: &str) -> Vec<String> {
     let re = Regex::new(r#"https?://[^\s\)>\]"'`]+"#).unwrap();
 
@@ -24,7 +29,12 @@ pub fn extract_urls(content: &str) -> Vec<String> {
     urls
 }
 
-/// Extract dollar amounts from text
+/// Extract dollar amounts from text.
+///
+/// # Panics
+///
+/// Panics if the internal amount regex fails to compile (should never happen).
+#[must_use]
 pub fn extract_amounts(text: &str) -> Vec<AmountMatch> {
     let re = Regex::new(r"\$([0-9,.]+)\s*(billion|million|B|M|K)?").unwrap();
 
@@ -38,7 +48,12 @@ pub fn extract_amounts(text: &str) -> Vec<AmountMatch> {
         .collect()
 }
 
-/// Extract percentages from text
+/// Extract percentages from text.
+///
+/// # Panics
+///
+/// Panics if the internal percentage regex fails to compile (should never happen).
+#[must_use]
 pub fn extract_percentages(text: &str) -> Vec<String> {
     let re = Regex::new(r"([0-9,.]+)\s*%").unwrap();
 

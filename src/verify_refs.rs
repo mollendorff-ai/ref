@@ -63,6 +63,11 @@ pub struct VerifyOutput {
     pub timestamp: String,
 }
 
+/// Run the verify-refs command.
+///
+/// # Errors
+///
+/// Returns error if the references file can't be read, parsed, or written back.
 pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
     // Read and parse references.yaml
     let content = tokio::fs::read_to_string(&args.file)
@@ -142,7 +147,7 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
     let statuses: Vec<Status> = join_all(tasks)
         .await
         .into_iter()
-        .filter_map(|r| r.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
 
     // Close browser
@@ -150,28 +155,7 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
         pool.close().await?;
     }
 
-    // Compute summary
-    let mut summary = VerifySummary {
-        total,
-        verified: statuses.len(),
-        ok: 0,
-        dead: 0,
-        redirect: 0,
-        paywall: 0,
-        login: 0,
-        skipped,
-    };
-
-    for status in &statuses {
-        match status {
-            Status::Ok => summary.ok += 1,
-            Status::Dead => summary.dead += 1,
-            Status::Redirect => summary.redirect += 1,
-            Status::Paywall => summary.paywall += 1,
-            Status::Login => summary.login += 1,
-            Status::Pending => {}
-        }
-    }
+    let summary = compute_summary(total, skipped, &statuses);
 
     // Update meta
     {
@@ -181,15 +165,15 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
     }
 
     // Write back to file (unless dry run)
-    if !args.dry_run {
+    if args.dry_run {
+        eprintln!("Dry run - file not modified");
+    } else {
         let file = refs_file.lock().await;
         let yaml = serde_yaml::to_string(&*file)?;
         tokio::fs::write(&args.file, yaml)
             .await
             .with_context(|| format!("Failed to write {}", args.file.display()))?;
         eprintln!("Updated {}", args.file.display());
-    } else {
-        eprintln!("Dry run - file not modified");
     }
 
     // Output JSON summary
@@ -201,6 +185,33 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
     println!("{}", serde_json::to_string(&output)?);
 
     Ok(())
+}
+
+/// Compute a summary from the list of verification statuses.
+fn compute_summary(total: usize, skipped: usize, statuses: &[Status]) -> VerifySummary {
+    let mut summary = VerifySummary {
+        total,
+        verified: statuses.len(),
+        ok: 0,
+        dead: 0,
+        redirect: 0,
+        paywall: 0,
+        login: 0,
+        skipped,
+    };
+
+    for status in statuses {
+        match status {
+            Status::Ok => summary.ok += 1,
+            Status::Dead => summary.dead += 1,
+            Status::Redirect => summary.redirect += 1,
+            Status::Paywall => summary.paywall += 1,
+            Status::Login => summary.login += 1,
+            Status::Pending => {}
+        }
+    }
+
+    summary
 }
 
 /// Result of verifying a single URL
@@ -215,14 +226,14 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
         Err(e) => {
             return VerifyResult {
                 status: Status::Dead,
-                notes: Some(format!("Browser error: {}", e)),
+                notes: Some(format!("Browser error: {e}")),
             }
         }
     };
 
     // Parse original URL to get host
     let original_host = match Url::parse(url) {
-        Ok(u) => u.host_str().map(|s| s.to_string()),
+        Ok(u) => u.host_str().map(std::string::ToString::to_string),
         Err(_) => None,
     };
 
@@ -231,7 +242,7 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
         Err(e) => {
             return VerifyResult {
                 status: Status::Dead,
-                notes: Some(format!("Navigation error: {}", e)),
+                notes: Some(format!("Navigation error: {e}")),
             }
         }
     };
@@ -271,14 +282,11 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
     }
 
     // Get page content to detect paywall/login
-    let html = match page.content().await {
-        Ok(h) => h,
-        Err(_) => {
-            return VerifyResult {
-                status: Status::Ok,
-                notes: None,
-            }
-        }
+    let Ok(html) = page.content().await else {
+        return VerifyResult {
+            status: Status::Ok,
+            notes: None,
+        };
     };
 
     // Check for paywall indicators

@@ -63,7 +63,11 @@ pub struct LinkReport {
     pub results: Vec<LinkResult>,
 }
 
-/// Run the check-links command
+/// Run the check-links command.
+///
+/// # Errors
+///
+/// Returns error if URLs can't be read or the browser pool fails.
 pub async fn run_check_links(args: CheckLinksArgs) -> Result<()> {
     let urls = get_urls(&args).await?;
 
@@ -114,7 +118,7 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
     if let Some(file) = &args.file {
         let content = fs::read_to_string(file)
             .await
-            .with_context(|| format!("Failed to read file: {}", file))?;
+            .with_context(|| format!("Failed to read file: {file}"))?;
         return Ok(extract_urls(&content));
     }
 
@@ -125,7 +129,11 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
     std::process::exit(1);
 }
 
-/// Check multiple links and generate report
+/// Check multiple links and generate report.
+///
+/// # Errors
+///
+/// Returns error if Chrome fails to launch or URLs can't be fetched.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
     let pool = BrowserPool::new(config.concurrency).await?;
     let mut results = Vec::with_capacity(urls.len());
@@ -158,10 +166,10 @@ pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<L
                 if let (Some(orig), Some(fin)) = (orig_host, final_host) {
                     let orig_norm = orig.trim_start_matches("www.");
                     let fin_norm = fin.trim_start_matches("www.");
-                    if orig_norm != fin_norm {
-                        Some(final_url)
-                    } else {
+                    if orig_norm == fin_norm {
                         None
+                    } else {
+                        Some(final_url)
                     }
                 } else {
                     None

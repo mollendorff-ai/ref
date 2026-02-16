@@ -21,7 +21,12 @@ pub struct PdfArgs {
     pub files: Vec<PathBuf>,
 }
 
-pub async fn run_pdf(args: PdfArgs) -> Result<()> {
+/// Run the PDF extraction command.
+///
+/// # Errors
+///
+/// Returns an error if JSON serialization fails.
+pub fn run_pdf(args: &PdfArgs) -> Result<()> {
     let file_count = args.files.len();
     eprintln!(
         "Extracting {} PDF{}...",
@@ -33,7 +38,7 @@ pub async fn run_pdf(args: PdfArgs) -> Result<()> {
 
     for file in &args.files {
         eprintln!("  -> {}", file.display());
-        let page = extract_pdf(file).await;
+        let page = extract_pdf(file);
         results.push(page);
     }
 
@@ -51,7 +56,7 @@ pub async fn run_pdf(args: PdfArgs) -> Result<()> {
         }
     }
 
-    eprintln!("Done: {}/{} OK", ok_count, file_count);
+    eprintln!("Done: {ok_count}/{file_count} OK");
     Ok(())
 }
 
@@ -270,9 +275,8 @@ fn find_column_positions(lines: &[&str], config: &TableConfig) -> Option<Vec<usi
         for &gap_pos in gaps {
             // Check if this position is close to an existing one
             let mut found = false;
-            for (pos, count) in position_counts.iter_mut() {
-                if (*pos as i32 - gap_pos as i32).unsigned_abs() as usize <= config.column_tolerance
-                {
+            for (pos, count) in &mut position_counts {
+                if pos.abs_diff(gap_pos) <= config.column_tolerance {
                     *count += 1;
                     // Update position to running average
                     *pos = (*pos * (*count - 1) + gap_pos) / *count;
@@ -294,7 +298,7 @@ fn find_column_positions(lines: &[&str], config: &TableConfig) -> Option<Vec<usi
         .map(|(pos, _)| pos)
         .collect();
 
-    consistent_positions.sort();
+    consistent_positions.sort_unstable();
 
     if consistent_positions.is_empty() {
         None
@@ -351,20 +355,21 @@ fn detect_header_row(rows: &[Vec<String>]) -> (Option<Vec<String>>, Vec<Vec<Stri
     }
 
     // Check if first row cells are shorter (headers tend to be concise)
-    let first_avg_len: f32 =
-        first_row.iter().map(|c| c.len()).sum::<usize>() as f32 / first_row.len().max(1) as f32;
-    let second_avg_len: f32 =
-        second_row.iter().map(|c| c.len()).sum::<usize>() as f32 / second_row.len().max(1) as f32;
+    // Compare averages using integer cross-multiplication to avoid float casts:
+    // first_avg < second_avg * 0.8  =>  first_total * second_count * 10 < second_total * first_count * 8
+    let first_total: usize = first_row.iter().map(String::len).sum();
+    let second_total: usize = second_row.iter().map(String::len).sum();
+    let first_count = first_row.len().max(1);
+    let second_count = second_row.len().max(1);
 
-    if first_avg_len < second_avg_len * 0.8 {
+    if first_total * second_count * 10 < second_total * first_count * 8 {
         header_score += 1;
     }
 
     // Check if first row has title case or ALL CAPS
-    let first_has_caps = first_row
-        .iter()
-        .filter(|c| !c.is_empty())
-        .any(|c| is_title_case_word(c) || c.chars().all(|ch| !ch.is_alphabetic() || ch.is_uppercase()));
+    let first_has_caps = first_row.iter().filter(|c| !c.is_empty()).any(|c| {
+        is_title_case_word(c) || c.chars().all(|ch| !ch.is_alphabetic() || ch.is_uppercase())
+    });
 
     if first_has_caps {
         header_score += 2;
@@ -395,8 +400,7 @@ fn is_title_case_word(s: &str) -> bool {
     }
 
     let first_char = trimmed.chars().next();
-    first_char.is_some_and(|c| c.is_uppercase())
-        && trimmed.chars().skip(1).any(|c| c.is_lowercase())
+    first_char.is_some_and(char::is_uppercase) && trimmed.chars().skip(1).any(char::is_lowercase)
 }
 
 /// Generate markdown table
@@ -405,9 +409,10 @@ fn generate_table_markdown(headers: Option<&Vec<String>>, rows: &[Vec<String>]) 
         return String::new();
     }
 
-    let col_count = headers
-        .map(|h| h.len())
-        .unwrap_or_else(|| rows.iter().map(|r| r.len()).max().unwrap_or(0));
+    let col_count = headers.map_or_else(
+        || rows.iter().map(std::vec::Vec::len).max().unwrap_or(0),
+        std::vec::Vec::len,
+    );
 
     if col_count == 0 {
         return String::new();
@@ -441,7 +446,7 @@ fn generate_table_markdown(headers: Option<&Vec<String>>, rows: &[Vec<String>]) 
     for row in rows {
         md.push('|');
         for i in 0..col_count {
-            let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
+            let cell = row.get(i).map_or("", std::string::String::as_str);
             md.push_str(if cell.is_empty() { " " } else { cell });
             if i < col_count - 1 {
                 md.push('|');
@@ -468,7 +473,8 @@ struct HeadingPatterns {
     all_caps: Regex,
 }
 
-static HEADING_PATTERNS: LazyLock<HeadingPatterns> = LazyLock::new(|| HeadingPatterns {
+static HEADING_PATTERNS: LazyLock<HeadingPatterns> = LazyLock::new(|| {
+    HeadingPatterns {
     // Matches: "1.", "1.2", "1.2.3", "1.2.3.4" followed by space and text
     numbered_section: Regex::new(r"^(\d+(?:\.\d+)*\.?)\s+([A-Z][A-Za-z].*)").unwrap(),
 
@@ -498,6 +504,7 @@ static HEADING_PATTERNS: LazyLock<HeadingPatterns> = LazyLock::new(|| HeadingPat
 
     // ALL CAPS with at least 3 alphabetic chars
     all_caps: Regex::new(r"^[A-Z][A-Z0-9\s\-:,&]{2,}$").unwrap(),
+}
 });
 
 /// Heading detection configuration
@@ -593,7 +600,7 @@ fn detect_heading(line: &str, config: &HeadingConfig) -> Option<HeadingMatch> {
         let level = trimmed_number.matches('.').count() + 1;
         return Some(HeadingMatch {
             text: cleaned,
-            level: level.min(6) as u8,
+            level: u8::try_from(level.min(6)).unwrap_or(6),
             confidence: 0.85,
         });
     }
@@ -641,8 +648,7 @@ fn is_valid_roman_numeral(s: &str) -> bool {
     if s.is_empty() || s.len() > 4 {
         return false;
     }
-    let valid =
-        Regex::new(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$").unwrap();
+    let valid = Regex::new(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$").unwrap();
     valid.is_match(s)
 }
 
@@ -660,7 +666,7 @@ pub struct PdfPage {
     pub tables: Vec<Table>,
 }
 
-async fn extract_pdf(path: &PathBuf) -> PdfPage {
+fn extract_pdf(path: &PathBuf) -> PdfPage {
     let file_url = format!("file://{}", path.display());
 
     // Check file exists
@@ -672,7 +678,7 @@ async fn extract_pdf(path: &PathBuf) -> PdfPage {
     let text = match pdf_extract::extract_text(path) {
         Ok(t) => t,
         Err(e) => {
-            return error_page(&file_url, &format!("PDF extraction failed: {}", e));
+            return error_page(&file_url, &format!("PDF extraction failed: {e}"));
         }
     };
 
@@ -758,9 +764,7 @@ fn parse_sections(text: &str) -> Vec<Section> {
         // Check if this looks like a heading
         let heading_match = detect_heading(trimmed, &config);
 
-        let is_heading = heading_match
-            .as_ref()
-            .is_some_and(|h| h.confidence >= 0.5);
+        let is_heading = heading_match.as_ref().is_some_and(|h| h.confidence >= 0.5);
 
         if is_heading && current_content.len() >= config.min_content_before_heading {
             // Save current section
@@ -810,7 +814,7 @@ fn extract_title(text: &str, path: &Path) -> Option<String> {
 
     path.file_stem()
         .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 fn extract_author(text: &str) -> Option<String> {
@@ -916,7 +920,7 @@ fn extract_code(text: &str) -> Vec<CodeBlock> {
 fn detect_language(code: &str) -> Option<String> {
     if code.contains("fn ") && code.contains("->") {
         Some("rust".to_string())
-    } else if code.contains("def ") && code.contains(":") {
+    } else if code.contains("def ") && code.contains(':') {
         Some("python".to_string())
     } else if code.contains("function ") || code.contains("const ") || code.contains("let ") {
         Some("javascript".to_string())
@@ -967,7 +971,10 @@ mod tests {
         assert!(is_potential_table_line("$10M      $15M   $20M", &config));
 
         // Not table lines
-        assert!(!is_potential_table_line("This is a regular sentence.", &config));
+        assert!(!is_potential_table_line(
+            "This is a regular sentence.",
+            &config
+        ));
         assert!(!is_potential_table_line("Short", &config));
         assert!(!is_potential_table_line(
             "The quick brown fox jumps over the lazy dog.",
@@ -990,7 +997,7 @@ mod tests {
 
     #[test]
     fn test_detect_tables_simple() {
-        let text = r#"
+        let text = r"
 Financial Summary
 
 Item        2024      2025
@@ -999,7 +1006,7 @@ Costs       $5M       $7M
 Profit      $5M       $8M
 
 This is a paragraph of text that follows the table.
-"#;
+";
 
         let tables = detect_tables(text);
         assert!(!tables.is_empty(), "Should detect at least one table");
@@ -1014,12 +1021,12 @@ This is a paragraph of text that follows the table.
 
     #[test]
     fn test_detect_tables_with_header() {
-        let text = r#"
+        let text = r"
 Name          Age    City
 John          25     NYC
 Jane          30     LA
 Bob           35     Chicago
-"#;
+";
 
         let tables = detect_tables(text);
         assert!(!tables.is_empty());

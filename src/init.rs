@@ -26,6 +26,8 @@ pub struct InitOutput {
     pub file: String,
 }
 
+/// # Errors
+/// Returns an error if the output file already exists (without `--force`) or cannot be written.
 pub async fn run_init(args: InitArgs) -> Result<()> {
     // Check if file exists
     if args.output.exists() && !args.force {

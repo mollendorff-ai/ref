@@ -59,6 +59,9 @@ pub struct RefreshReport {
 }
 
 /// Run the refresh-data command
+///
+/// # Errors
+/// Returns an error if URLs cannot be resolved, the browser fails to launch, or JSON serialization fails.
 pub async fn run_refresh_data(args: RefreshDataArgs) -> Result<()> {
     let urls = get_extractable_urls(&args).await?;
 
@@ -104,7 +107,7 @@ async fn get_extractable_urls(args: &RefreshDataArgs) -> Result<Vec<(String, Str
     if let Some(file) = &args.file {
         let content = fs::read_to_string(file)
             .await
-            .with_context(|| format!("Failed to read file: {}", file))?;
+            .with_context(|| format!("Failed to read file: {file}"))?;
 
         return Ok(extract_extractable_urls(&content));
     }
@@ -134,7 +137,7 @@ fn extract_extractable_urls(content: &str) -> Vec<(String, String)> {
             let url = mat.as_str().trim_end_matches([',', '.', ')', ']']);
             if !seen.contains(url) {
                 seen.insert(url.to_string());
-                urls.push((url.to_string(), ext_type.to_string()));
+                urls.push((url.to_string(), (*ext_type).to_string()));
             }
         }
     }
@@ -143,6 +146,9 @@ fn extract_extractable_urls(content: &str) -> Vec<(String, String)> {
 }
 
 /// Extract data from multiple URLs
+///
+/// # Errors
+/// Returns an error if the browser pool cannot be created or page navigation fails.
 pub async fn refresh_data(
     urls: &[(String, String)],
     config: &RefreshConfig,
@@ -236,7 +242,7 @@ fn extract_instagram(url: &str, content: &str) -> ExtractedData {
         .trim_end_matches('/')
         .split('/')
         .next_back()
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     ExtractedData {
         url: url.to_string(),

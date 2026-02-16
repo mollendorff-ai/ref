@@ -31,7 +31,7 @@ pub struct Reference {
     pub url: String,
     /// Human-readable title
     pub title: String,
-    /// Categories for filtering (e.g., ["research", "wikipedia"])
+    /// Categories for filtering (e.g., `["research", "wikipedia"]`)
     pub categories: Vec<String>,
     /// Files that cite this reference
     pub cited_in: Vec<String>,

@@ -2,6 +2,28 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.3.0] - 2026-02-16
+
+Open source readiness.
+
+### Changed
+
+- **License**: Elastic 2.0 to MIT
+- **README**: Full rewrite — token optimization value prop, pipeline diagram, output example, Asimov orchestration link
+- **Cargo.toml**: Updated description and license
+
+### Fixed
+
+- All 77 clippy pedantic warnings resolved with zero `#[allow(...)]` bypasses
+- Safe integer casts (replace `as` with `try_from`, `abs_diff`, integer cross-multiplication)
+- Added `# Errors` and `# Panics` doc sections to all public functions
+- Removed unused `async` from `extract_pdf`
+
+### Removed
+
+- R&D prototype disclaimer
+- Legacy asimov protocol files (asimov.json, green.json, warmup.json, etc.)
+
 ## [1.2.0] - 2026-01-26
 
 Enhanced extraction & SPA support.

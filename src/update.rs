@@ -37,14 +37,16 @@ struct Asset {
     browser_download_url: String,
 }
 
+/// # Errors
+/// Returns an error if the latest release cannot be fetched or the binary cannot be replaced.
 pub async fn run_update(args: UpdateArgs) -> Result<()> {
-    eprintln!("Current version: {}", CURRENT_VERSION);
+    eprintln!("Current version: {CURRENT_VERSION}");
     eprintln!("Checking for updates...");
 
     let release = fetch_latest_release().await?;
     let latest_version = release.tag_name.trim_start_matches('v');
 
-    eprintln!("Latest version: {}", latest_version);
+    eprintln!("Latest version: {latest_version}");
 
     if latest_version == CURRENT_VERSION && !args.force {
         let output = serde_json::json!({
@@ -68,15 +70,15 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
 
     // Determine target platform
     let target = get_target_triple()?;
-    eprintln!("Platform: {}", target);
+    eprintln!("Platform: {target}");
 
     // Find matching asset
-    let asset_name = format!("ref-{}.tar.gz", target);
+    let asset_name = format!("ref-{target}.tar.gz");
     let asset = release
         .assets
         .iter()
         .find(|a| a.name == asset_name)
-        .with_context(|| format!("No release found for platform: {}", target))?;
+        .with_context(|| format!("No release found for platform: {target}"))?;
 
     eprintln!("Downloading {}...", asset.name);
 
@@ -108,16 +110,13 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
     });
     println!("{}", serde_json::to_string(&output)?);
 
-    eprintln!("Updated successfully! Restart to use v{}", latest_version);
+    eprintln!("Updated successfully! Restart to use v{latest_version}");
 
     Ok(())
 }
 
 async fn fetch_latest_release() -> Result<Release> {
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        GITHUB_REPO
-    );
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
 
     let client = reqwest::Client::builder()
         .user_agent("ref-update")
@@ -222,7 +221,7 @@ fn get_target_triple() -> Result<&'static str> {
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
-        _ => bail!("Unsupported platform: {}-{}", os, arch),
+        _ => bail!("Unsupported platform: {os}-{arch}"),
     }
 }
 

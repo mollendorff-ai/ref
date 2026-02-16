@@ -1,6 +1,6 @@
 //! Headless Chrome browser management via chromiumoxide
 //!
-//! v1.2.0: Added networkIdle wait for SPA support (ADR-002)
+//! v1.2.0: Added `networkIdle` wait for SPA support (ADR-002)
 
 use anyhow::{Context, Result};
 use chromiumoxide::cdp::browser_protocol::page::{
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-/// Default wait time for network idle (ms) - how long to wait for networkIdle event
+/// Default wait time for network idle (ms) - how long to wait for `networkIdle` event
 const NETWORK_IDLE_TIMEOUT_MS: u64 = 10000;
 
 /// Auto-detect Chrome/Chromium executable path based on OS
@@ -67,6 +67,9 @@ pub struct BrowserPool {
 
 impl BrowserPool {
     /// Create a new browser pool with concurrency limit
+    ///
+    /// # Errors
+    /// Returns an error if Chrome/Chromium is not found or fails to launch.
     pub async fn new(concurrency: usize) -> Result<Self> {
         let chrome_path = detect_chrome_path().ok_or_else(|| {
             anyhow::anyhow!(
@@ -87,7 +90,7 @@ impl BrowserPool {
             .arg("--no-first-run")
             .arg("--headless=new")
             .build()
-            .map_err(|e| anyhow::anyhow!("Browser config error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Browser config error: {e}"))?;
 
         let (browser, mut handler) = Browser::launch(config)
             .await
@@ -104,6 +107,9 @@ impl BrowserPool {
     }
 
     /// Get a new page with resource blocking
+    ///
+    /// # Errors
+    /// Returns an error if page creation or configuration fails.
     pub async fn new_page(&self) -> Result<BrowserPage> {
         let permit = self.semaphore.clone().acquire_owned().await?;
         let page = self.browser.new_page("about:blank").await?;
@@ -127,6 +133,9 @@ impl BrowserPool {
     }
 
     /// Close the browser
+    ///
+    /// # Errors
+    /// Returns an error if the browser fails to close cleanly.
     pub async fn close(mut self) -> Result<()> {
         self.browser.close().await?;
         Ok(())
@@ -146,9 +155,12 @@ impl BrowserPage {
     /// 1. Subscribes to lifecycle events
     /// 2. Navigates to the URL
     /// 3. Waits for `networkIdle` event (no requests for 500ms)
-    /// 4. Falls back to timeout if networkIdle not reached
+    /// 4. Falls back to timeout if `networkIdle` not reached
     ///
     /// This ensures SPAs have time to load their dynamic content.
+    ///
+    /// # Errors
+    /// Returns an error if the lifecycle event subscription fails.
     pub async fn goto(&self, url: &str, timeout_ms: u64) -> Result<PageResult> {
         // Subscribe to lifecycle events BEFORE navigation
         let mut lifecycle = self
@@ -158,11 +170,8 @@ impl BrowserPage {
             .context("Failed to subscribe to lifecycle events")?;
 
         // Start navigation with overall timeout
-        let nav_result = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            self.page.goto(url),
-        )
-        .await;
+        let nav_result =
+            tokio::time::timeout(Duration::from_millis(timeout_ms), self.page.goto(url)).await;
 
         // Handle navigation result
         match nav_result {
@@ -194,20 +203,19 @@ impl BrowserPage {
         }
     }
 
-    /// Wait for networkIdle lifecycle event with timeout
+    /// Wait for `networkIdle` lifecycle event with timeout
     ///
-    /// networkIdle fires when there are no network requests for 500ms.
+    /// `networkIdle` fires when there are no network requests for 500ms.
     /// This is ideal for SPAs that load content via XHR/fetch.
     ///
-    /// Falls back gracefully on timeout - some sites never reach networkIdle
+    /// Falls back gracefully on timeout - some sites never reach `networkIdle`
     /// due to analytics, websockets, or polling.
     async fn wait_for_network_idle(
         &self,
         lifecycle: &mut chromiumoxide::listeners::EventStream<EventLifecycleEvent>,
     ) {
-        let wait_result = tokio::time::timeout(
-            Duration::from_millis(NETWORK_IDLE_TIMEOUT_MS),
-            async {
+        let wait_result =
+            tokio::time::timeout(Duration::from_millis(NETWORK_IDLE_TIMEOUT_MS), async {
                 while let Some(event) = lifecycle.next().await {
                     // networkIdle = no network connections for 500ms
                     // networkAlmostIdle = ≤2 connections for 500ms
@@ -216,22 +224,12 @@ impl BrowserPage {
                     }
                 }
                 WaitResult::StreamEnded
-            },
-        )
-        .await;
+            })
+            .await;
 
-        match wait_result {
-            Ok(WaitResult::NetworkIdle) => {
-                // Ideal case: network settled
-            }
-            Ok(WaitResult::StreamEnded) => {
-                // Stream ended unexpectedly, continue anyway
-            }
-            Err(_) => {
-                // Timeout waiting for networkIdle
-                // This is acceptable - site may have persistent connections
-            }
-        }
+        // All outcomes are acceptable: networkIdle (ideal), stream ended, or timeout
+        // Sites with persistent connections (analytics, websockets) may never reach networkIdle
+        let _ = wait_result;
     }
 
     /// Try to get HTTP status from the page (heuristic based on page content)
@@ -258,6 +256,9 @@ impl BrowserPage {
     }
 
     /// Get page content (for data extraction)
+    ///
+    /// # Errors
+    /// Returns an error if content extraction fails.
     pub async fn content(&self) -> Result<String> {
         self.page
             .content()
@@ -327,7 +328,10 @@ mod tests {
     #[test]
     fn test_network_idle_timeout_reasonable() {
         // Ensure timeout is reasonable (not too short, not too long)
-        assert!(NETWORK_IDLE_TIMEOUT_MS >= 5000, "Timeout too short for SPAs");
+        assert!(
+            NETWORK_IDLE_TIMEOUT_MS >= 5000,
+            "Timeout too short for SPAs"
+        );
         assert!(
             NETWORK_IDLE_TIMEOUT_MS <= 30000,
             "Timeout too long, will slow down all fetches"

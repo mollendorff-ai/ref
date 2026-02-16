@@ -43,6 +43,8 @@ struct FoundUrl {
     source_file: String,
 }
 
+/// # Errors
+/// Returns an error if file patterns cannot be expanded, files cannot be read, or output cannot be written.
 pub async fn run_scan(args: ScanArgs) -> Result<()> {
     // Expand file patterns and collect all files
     let files = expand_files(&args.files).await?;
@@ -92,7 +94,7 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
         // Update title if we found a better one (non-URL)
         if let Some(title) = &found.title {
             if entry.title == entry.url && title != &entry.url {
-                entry.title = title.clone();
+                entry.title.clone_from(title);
             }
         }
     }

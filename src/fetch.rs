@@ -99,6 +99,12 @@ pub struct Page {
     pub chars: usize,
 }
 
+/// Fetch one or more URLs in parallel and print structured JSON to stdout.
+///
+/// # Errors
+///
+/// Returns an error if the browser pool fails to initialize, pages cannot
+/// be serialized, or the browser cannot be closed cleanly.
 pub async fn run_fetch(args: FetchArgs) -> Result<()> {
     let url_count = args.urls.len();
     let parallel = args.parallel.min(url_count).max(1);
@@ -128,7 +134,7 @@ pub async fn run_fetch(args: FetchArgs) -> Result<()> {
     let results: Vec<Page> = join_all(tasks)
         .await
         .into_iter()
-        .filter_map(|r| r.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
 
     // Close browser
@@ -150,7 +156,7 @@ pub async fn run_fetch(args: FetchArgs) -> Result<()> {
         }
     }
 
-    eprintln!("Done: {}/{} OK", ok_count, url_count);
+    eprintln!("Done: {ok_count}/{url_count} OK");
     Ok(())
 }
 
@@ -313,8 +319,8 @@ fn extract_title(doc: &Html) -> Option<String> {
 }
 
 fn extract_meta(doc: &Html, name: &str) -> Option<String> {
-    select_attr(doc, &format!("meta[property='{}']", name), "content")
-        .or_else(|| select_attr(doc, &format!("meta[name='{}']", name), "content"))
+    select_attr(doc, &format!("meta[property='{name}']"), "content")
+        .or_else(|| select_attr(doc, &format!("meta[name='{name}']"), "content"))
 }
 
 fn extract_doi(doc: &Html) -> Option<String> {
@@ -449,7 +455,8 @@ fn extract_sections(doc: &Html) -> Vec<Section> {
                         }
                     }
 
-                    let level = tag.chars().nth(1).unwrap_or('1').to_digit(10).unwrap_or(1) as u8;
+                    let level = tag.chars().nth(1).and_then(|c| c.to_digit(10)).unwrap_or(1);
+                    let level = u8::try_from(level).unwrap_or(1);
                     current_section = Some(Section {
                         level,
                         heading: truncate_section(&text, 200),
@@ -520,8 +527,7 @@ fn extract_content_links(doc: &Html, base_url: &str) -> Vec<Link> {
             // Resolve relative URLs
             let full_url = if let Some(ref base) = base {
                 base.join(href)
-                    .map(|u| u.to_string())
-                    .unwrap_or_else(|_| href.to_string())
+                    .map_or_else(|_| href.to_string(), |u| u.to_string())
             } else {
                 href.to_string()
             };
@@ -646,7 +652,7 @@ fn truncate_section(s: &str, max: usize) -> String {
                 return format!("{}...", &s[..last_space]);
             }
         }
-        format!("{}...", truncated)
+        format!("{truncated}...")
     }
 }
 
