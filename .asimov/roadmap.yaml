@@ -14,7 +14,7 @@ current:
     - "[x] MIT license"
     - "[x] README rewrite (token optimization value prop, output example)"
     - "[x] Clippy pedantic zero warnings, zero bypasses"
-    - "[ ] Test strategy ADR (e2e coverage vs headless Chrome constraints)"
+    - "[x] Test strategy ADR-003 (unit vs e2e, #[ignore] for Chrome tests)"
     - "[ ] Re-enable GitHub Actions (CI, multi-platform release, crates.io publish)"
 
 next:

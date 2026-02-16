@@ -19,6 +19,10 @@ Open source readiness.
 - Added `# Errors` and `# Panics` doc sections to all public functions
 - Removed unused `async` from `extract_pdf`
 
+### Added
+
+- ADR-003: Test strategy — unit tests for pure logic, `#[ignore]` e2e tests for Chrome-dependent code
+
 ### Removed
 
 - R&D prototype disclaimer
