@@ -22,6 +22,9 @@ Open source readiness.
 ### Added
 
 - ADR-003: Test strategy — unit tests for pure logic, `#[ignore]` e2e tests for Chrome-dependent code
+- **GitHub Actions**: CI workflow with clippy pedantic, unit tests (stable + beta), e2e tests (Chrome), release build
+- **GitHub Actions**: Auto-release on version bump (tag + multi-platform binaries + crates.io publish)
+- **GitHub Actions**: E2E test job — runs `#[ignore]` tests with Chrome on ubuntu runners
 
 ### Removed
 

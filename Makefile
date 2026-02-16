@@ -159,7 +159,7 @@ deploy-kveldulf:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 lint:
-	@cargo clippy --all-targets -- -D warnings
+	@cargo clippy -- -D warnings -W clippy::pedantic
 
 format:
 	@cargo fmt
