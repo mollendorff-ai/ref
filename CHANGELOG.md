@@ -34,13 +34,7 @@ Rebrand & Release Infrastructure.
 
 ### Changed
 
-- **Rebranding: RoyalBit to Möllendorff Group Inc.** - Complete organizational rebrand.
-  - Rebrand: ref-tools → ref (CLI) / Möllendorff Ref (product)
-  - **Why rebrand?** The "RoyalBit" name (company founded 2006) was hijacked by unrelated cryptocurrency scammers:
-    - UK FCA issued official warning (Oct 2024) about "Royalbit Miners" - unauthorized firm
-    - Multiple fraudulent domains: royalbit.ltd (trust score 38/100), royalbit.top, royal-bit.club
-    - Classic HYIP Ponzi schemes offering impossible returns (155-580% in days)
-    - Sources: [FCA Warning](https://www.fca.org.uk/news/warnings/royalbit-miners), [Scam Detector](https://www.scam-detector.com/validator/royalbit-ltd-review/)
+- **Renamed from RoyalBit to Möllendorff Group Inc.**
 
 ### Added
 - Cargo.toml: crates.io publishing metadata
