@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-std"
 futures = "0.3"
 
 # Headless Chrome (CDP)
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+chromiumoxide = "0.9"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -31,8 +31,8 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 
 # HTML parsing & readability
-scraper = "0.22"
-html2text = "0.14"
+scraper = "0.25"
+html2text = "0.16"
 
 # Regex for URL extraction
 regex = "1.11"
@@ -41,11 +41,11 @@ regex = "1.11"
 glob = "0.3"
 
 # PDF extraction
-pdf-extract = "0.8"
+pdf-extract = "0.10"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
