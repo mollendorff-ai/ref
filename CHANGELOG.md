@@ -70,6 +70,7 @@ Rebrand & Release Infrastructure.
 - **Renamed from RoyalBit to Möllendorff Group Inc.**
 
 ### Added
+
 - Cargo.toml: crates.io publishing metadata
 - GitHub Actions: CI workflow (test, lint, build)
 - GitHub Actions: Release workflow (multi-arch)

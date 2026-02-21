@@ -7,21 +7,13 @@
 
 current:
   version: "1.3.1"
-  status: planned
-  summary: "Dependency hygiene"
-  goal: "DEP_HYGIENE"
+  status: in_progress
+  summary: "Upgrade all crates"
+  goal: "CRATE_UPGRADE"
   deliverables:
-    - "[ ] Enable Dependabot (dependabot.yml for cargo + github-actions)"
-    - "[ ] Upgrade outdated dependencies (cargo update, review breaking changes)"
-    - "[ ] Audit for known vulnerabilities (cargo audit)"
-
-next:
-  - version: "1.4.0"
-    summary: "Reference management"
-    goal: "REF_MANAGEMENT"
-    deliverables:
-      - "[ ] Stale reference detection (not cited anywhere)"
-      - "[ ] Reference deduplication"
+    - "[ ] cargo update (semver-compatible bumps)"
+    - "[ ] Upgrade breaking deps (chromiumoxide, html2text, pdf-extract, scraper, thiserror)"
+    - "[ ] Verify tests pass after upgrades"
 
 completed:
   - version: "1.3.0"
@@ -29,10 +21,20 @@ completed:
     goal: "FOSS_READY"
 
 backlog:
+  - summary: "Dependency hygiene (Dependabot + audit)"
+    goal: "DEP_HYGIENE"
+    deliverables:
+      - "Enable Dependabot (dependabot.yml for cargo + github-actions)"
+      - "Audit for known vulnerabilities (cargo audit)"
+  - summary: "Reference management"
+    goal: "REF_MANAGEMENT"
+    deliverables:
+      - "Stale reference detection (not cited anywhere)"
+      - "Reference deduplication"
   - summary: "MCP Server Mode"
     goal: "MCP_SERVER"
     adr: "docs/adr/ADR-001-MCP-SERVER-MODE.md"
-    note: "Deferred - no iOS support, CLI via Bash works fine"
+    note: "Deferred - CLI via Bash/LangChain Tool works fine for now"
   - "Proxy support (--proxy)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"

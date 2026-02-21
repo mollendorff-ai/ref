@@ -1,0 +1,3 @@
+{
+  "ignores": ["target/**", "node_modules/**", "vendor/**"]
+}

@@ -1,7 +1,7 @@
 # Möllendorff Ref - Reference verification toolkit
 # Build targets for optimized static binaries
 
-.PHONY: help build install install-release uninstall lint format test clean pre-commit
+.PHONY: help build install install-release uninstall lint format test coverage clean pre-commit
 .PHONY: build-linux build-linux-arm64 build-windows build-all
 .PHONY: release-linux release-linux-arm64 release-windows release-all
 .PHONY: deploy-kveldulf
@@ -59,7 +59,7 @@ help:
 	@echo "  make deploy-kveldulf    - Build and deploy to kveldulf"
 	@echo ""
 	@echo "Code Quality:"
-	@echo "  make lint / format / test / pre-commit"
+	@echo "  make lint / format / test / coverage / pre-commit"
 	@echo ""
 	@echo "  make clean              - Remove build artifacts"
 
@@ -158,6 +158,10 @@ deploy-kveldulf:
 # CODE QUALITY
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# IO modules excluded from coverage gate (tested in CI with Chrome)
+# See: ADR-003 for rationale
+COVERAGE_EXCLUDE := 'browser\.rs|check_links\.rs|fetch\.rs|init\.rs|main\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
+
 lint:
 	@cargo clippy -- -D warnings -W clippy::pedantic
 
@@ -167,7 +171,10 @@ format:
 test:
 	@cargo test
 
-pre-commit: format lint test
+coverage:
+	@cargo llvm-cov --fail-under-lines 100 --ignore-filename-regex $(COVERAGE_EXCLUDE)
+
+pre-commit: format lint test coverage
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HOUSEKEEPING

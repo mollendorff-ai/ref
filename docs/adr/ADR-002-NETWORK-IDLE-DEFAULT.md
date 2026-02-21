@@ -9,16 +9,19 @@
 ## Context
 
 Modern websites are predominantly Single Page Applications (SPAs) that:
+
 1. Return a shell HTML on initial load
 2. Fetch actual content via XHR/fetch after JavaScript executes
 3. May have multiple cascading API calls before content is complete
 
 The current `ref fetch` implementation:
+
 - Uses `page.goto(url)` which waits for `DOMContentLoaded`
 - Immediately extracts content after navigation completes
 - Often captures empty/loading states instead of actual content
 
 Example failure mode:
+
 ```
 $ ref fetch https://react-app.example.com
 {"sections":[{"heading":"Loading...","content":""}]}
@@ -35,6 +38,7 @@ After navigation, wait for Chrome's `networkIdle` lifecycle event (no network re
 ### 1. Chrome CDP Already Supports This
 
 chromiumoxide exposes `EventLifecycleEvent` with these lifecycle states:
+
 - `DOMContentLoaded` - HTML parsed (current behavior)
 - `load` - Resources loaded
 - `networkAlmostIdle` - ≤2 network connections for 500ms
@@ -51,6 +55,7 @@ No new dependencies required.
 | `networkIdle` | Gets all dynamic content | 500ms+ slower |
 
 The 500ms cost is acceptable because:
+
 - Static sites are already fast; 500ms is noise
 - SPA content is what users actually want
 - The existing 30s timeout protects against hangs
@@ -58,11 +63,13 @@ The 500ms cost is acceptable because:
 ### 3. Fallback to Timeout
 
 Some sites never reach `networkIdle` due to:
+
 - Analytics pings
 - WebSocket connections
 - Polling/heartbeats
 
 Implementation will:
+
 1. Wait for `networkIdle` event
 2. Fall back to timeout (default 30s, configurable)
 3. Extract content either way

@@ -122,6 +122,7 @@ rmcp = { version = "0.14", features = ["server", "macros", "transport-io"] }
 ```
 
 Estimated impact:
+
 - Binary size: +200-300KB
 - New code: ~400 lines (src/mcp.rs)
 - Reuse: Existing command logic unchanged

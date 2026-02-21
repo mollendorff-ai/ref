@@ -1,0 +1,14 @@
+{
+  // Line length: disabled (tables, URLs, badges routinely exceed 80)
+  "MD013": false,
+  // Duplicate headings: allowed (CHANGELOG uses repeated Added/Changed/Fixed)
+  "MD024": false,
+  // Bare URLs: fine in docs and test data
+  "MD034": false,
+  // Fenced code language: not required for ASCII diagrams
+  "MD040": false,
+  // First line heading: not required (badges, frontmatter)
+  "MD041": false,
+  // Table column style: allow compact pipes
+  "MD060": false
+}
