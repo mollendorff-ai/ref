@@ -1,6 +1,6 @@
 [package]
 name = "mollendorff-ref"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 authors = ["Möllendorff Group Inc. <admin@mollendorff.ai>"]
 description = "Renders web pages and PDFs into token-optimized JSON for LLM agents"

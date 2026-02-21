@@ -2,6 +2,25 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.3.1] - 2026-02-21
+
+Dependency upgrades and quality gate fixes.
+
+### Changed
+
+- **chromiumoxide** 0.7 -> 0.9 (tokio runtime now built-in)
+- **scraper** 0.22 -> 0.25
+- **html2text** 0.14 -> 0.16
+- **pdf-extract** 0.8 -> 0.10
+- **thiserror** 1.0 -> 2.0
+- 72 transitive dependencies updated via `cargo update`
+
+### Fixed
+
+- Pre-commit coverage gate now excludes IO modules per ADR-003 (enforces 100% on pure-logic modules only)
+- Markdown lint config added (`.markdownlint.jsonc`) — disables rules incompatible with project style
+- Blank-line violations in CHANGELOG and ADRs
+
 ## [1.3.0] - 2026-02-16
 
 Open source readiness.
