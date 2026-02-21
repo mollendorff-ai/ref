@@ -5,17 +5,12 @@
 # See: CHANGELOG.md for release history
 # See: docs/adr/ for detailed rationale
 
-current:
-  version: "1.3.1"
-  status: in_progress
-  summary: "Upgrade all crates"
-  goal: "CRATE_UPGRADE"
-  deliverables:
-    - "[ ] cargo update (semver-compatible bumps)"
-    - "[ ] Upgrade breaking deps (chromiumoxide, html2text, pdf-extract, scraper, thiserror)"
-    - "[ ] Verify tests pass after upgrades"
+current: null
 
 completed:
+  - version: "1.3.1"
+    summary: "Upgrade all crates"
+    goal: "CRATE_UPGRADE"
   - version: "1.3.0"
     summary: "Open source readiness"
     goal: "FOSS_READY"
