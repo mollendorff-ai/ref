@@ -86,7 +86,7 @@ Rebrand & Release Infrastructure.
 
 ### Changed
 
-- **Renamed from RoyalBit to Möllendorff Group Inc.**
+- **Renamed from RoyalBit to Möllendorff AI**
 
 ### Added
 

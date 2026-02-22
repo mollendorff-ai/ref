@@ -29,7 +29,7 @@ use verify_refs::{run_verify_refs, VerifyRefsArgs};
 
 #[derive(Parser)]
 #[command(name = "ref")]
-#[command(author = "Möllendorff Group Inc.")]
+#[command(author = "Möllendorff AI")]
 #[command(version)]
 #[command(about = "Möllendorff Ref - LLM-optimized reference toolkit")]
 #[command(
