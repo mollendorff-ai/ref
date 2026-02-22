@@ -18,6 +18,12 @@ MCP Server Mode — persistent JSON-RPC 2.0 server for AI tool integration.
 - Core functions (`fetch_one`, `extract_pdf`, `scan_files`, `verify_refs_core`) promoted to `pub(crate)` for MCP reuse
 - `scan.rs` and `verify_refs.rs` refactored: core logic extracted from CLI print wrappers
 
+### CI
+
+- **Coverage gate**: `cargo-llvm-cov` enforces 100% on pure-logic modules, gates auto-release
+- **Dynamic badges**: test count and coverage percentage updated on every push to main via GitHub Gist
+- **actions/checkout** 4 → 6, **actions/cache** 4 → 5
+
 ### Dependencies
 
 - **rmcp** 0.16 (Anthropic official MCP SDK)
