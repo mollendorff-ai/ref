@@ -46,19 +46,29 @@ struct FoundUrl {
 /// # Errors
 /// Returns an error if file patterns cannot be expanded, files cannot be read, or output cannot be written.
 pub async fn run_scan(args: ScanArgs) -> Result<()> {
-    // Expand file patterns and collect all files
+    let output = scan_files(args).await?;
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+/// Core scan logic: expand files, extract URLs, merge, write output file.
+///
+/// # Errors
+///
+/// Returns an error if file patterns cannot be expanded, files cannot be read, or output cannot be written.
+pub(crate) async fn scan_files(args: ScanArgs) -> Result<ScanOutput> {
     let files = expand_files(&args.files).await?;
 
     if files.is_empty() {
-        let error = serde_json::json!({
-            "error": "no_files",
-            "message": "No files found matching patterns"
+        return Ok(ScanOutput {
+            file: args.output.display().to_string(),
+            scanned_files: 0,
+            total_urls: 0,
+            new_urls: 0,
+            updated_urls: 0,
         });
-        println!("{}", serde_json::to_string(&error)?);
-        return Ok(());
     }
 
-    // Extract URLs from all files
     let mut all_urls: Vec<FoundUrl> = Vec::new();
     for file in &files {
         let content = tokio::fs::read_to_string(file)
@@ -69,7 +79,6 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
         all_urls.extend(found);
     }
 
-    // Dedupe and merge by URL
     let mut url_map: HashMap<String, Reference> = HashMap::new();
 
     for found in &all_urls {
@@ -86,12 +95,10 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
             }
         });
 
-        // Add source file to cited_in if not already present
         if !entry.cited_in.contains(&found.source_file) {
             entry.cited_in.push(found.source_file.clone());
         }
 
-        // Update title if we found a better one (non-URL)
         if let Some(title) = &found.title {
             if entry.title == entry.url && title != &entry.url {
                 entry.title.clone_from(title);
@@ -99,7 +106,6 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
         }
     }
 
-    // Load existing file if merging
     let (mut refs_file, _existing_count) = if args.merge && args.output.exists() {
         let content = tokio::fs::read_to_string(&args.output).await?;
         let existing: ReferencesFile = serde_yaml::from_str(&content)?;
@@ -121,19 +127,16 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
         )
     };
 
-    // Build a map of existing URLs for quick lookup
     let mut existing_urls: HashMap<String, usize> = HashMap::new();
     for (i, r) in refs_file.references.iter().enumerate() {
         existing_urls.insert(r.url.clone(), i);
     }
 
-    // Merge new URLs
     let mut new_count = 0;
     let mut updated_count = 0;
 
     for (url, new_ref) in url_map {
         if let Some(&idx) = existing_urls.get(&url) {
-            // Update existing: merge cited_in
             let existing = &mut refs_file.references[idx];
             for cited in &new_ref.cited_in {
                 if !existing.cited_in.contains(cited) {
@@ -141,38 +144,28 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
                     updated_count += 1;
                 }
             }
-            // Update title if existing is just URL
             if existing.title == existing.url && new_ref.title != new_ref.url {
                 existing.title = new_ref.title;
             }
         } else {
-            // Add new reference
             refs_file.references.push(new_ref);
             new_count += 1;
         }
     }
 
-    // Update meta
     refs_file.meta.total_links = refs_file.references.len();
-
-    // Sort references by URL for consistency
     refs_file.references.sort_by(|a, b| a.url.cmp(&b.url));
 
-    // Write file
     let yaml = serde_yaml::to_string(&refs_file)?;
     tokio::fs::write(&args.output, yaml).await?;
 
-    // Output JSON result
-    let output = ScanOutput {
+    Ok(ScanOutput {
         file: args.output.display().to_string(),
         scanned_files: files.len(),
         total_urls: refs_file.references.len(),
         new_urls: new_count,
         updated_urls: updated_count,
-    };
-    println!("{}", serde_json::to_string(&output)?);
-
-    Ok(())
+    })
 }
 
 /// Expand file patterns to actual file paths

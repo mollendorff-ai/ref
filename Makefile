@@ -160,7 +160,7 @@ deploy-kveldulf:
 
 # IO modules excluded from coverage gate (tested in CI with Chrome)
 # See: ADR-003 for rationale
-COVERAGE_EXCLUDE := 'browser\.rs|check_links\.rs|fetch\.rs|init\.rs|main\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
+COVERAGE_EXCLUDE := 'browser\.rs|check_links\.rs|fetch\.rs|init\.rs|main\.rs|mcp\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
 
 lint:
 	@cargo clippy -- -D warnings -W clippy::pedantic

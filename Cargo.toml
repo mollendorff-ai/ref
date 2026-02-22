@@ -1,6 +1,6 @@
 [package]
 name = "mollendorff-ref"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 authors = ["Möllendorff AI <admin@mollendorff.ai>"]
 description = "Renders web pages and PDFs into token-optimized JSON for LLM agents"
@@ -53,6 +53,12 @@ chrono = { version = "0.4", features = ["serde"] }
 # URL parsing
 url = "2.5"
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+
+# MCP server (Model Context Protocol)
+rmcp = { version = "0.16", features = ["server", "transport-io", "macros"] }
+schemars = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 assert_cmd = "2.1"

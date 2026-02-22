@@ -8,6 +8,7 @@ pub mod check_links;
 pub mod extract;
 pub mod fetch;
 pub mod init;
+pub mod mcp;
 pub mod pdf;
 pub mod refresh_data;
 pub mod scan;

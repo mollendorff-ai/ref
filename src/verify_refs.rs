@@ -69,7 +69,17 @@ pub struct VerifyOutput {
 ///
 /// Returns error if the references file can't be read, parsed, or written back.
 pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
-    // Read and parse references.yaml
+    let output = verify_refs_core(args).await?;
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+/// Core verification logic: read references, verify each URL, update file.
+///
+/// # Errors
+///
+/// Returns error if the references file can't be read, parsed, or written back.
+pub(crate) async fn verify_refs_core(args: VerifyRefsArgs) -> Result<VerifyOutput> {
     let content = tokio::fs::read_to_string(&args.file)
         .await
         .with_context(|| format!("Failed to read {}", args.file.display()))?;
@@ -80,7 +90,6 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
     let total = refs_file.references.len();
     eprintln!("Loaded {} references from {}", total, args.file.display());
 
-    // Filter by category if specified
     let indices_to_verify: Vec<usize> = refs_file
         .references
         .iter()
@@ -100,7 +109,11 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
 
     if to_verify == 0 {
         eprintln!("No references to verify (all filtered out)");
-        return Ok(());
+        return Ok(VerifyOutput {
+            summary: compute_summary(total, skipped, &[]),
+            file: args.file.display().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        });
     }
 
     eprintln!(
@@ -108,14 +121,10 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
         to_verify, args.parallel
     );
 
-    // Create browser pool
     let pool = Arc::new(BrowserPool::new(args.parallel).await?);
     let timeout = args.timeout;
-
-    // Shared mutable references for updating
     let refs_file = Arc::new(Mutex::new(refs_file));
 
-    // Verify each reference
     let tasks: Vec<_> = indices_to_verify
         .into_iter()
         .map(|idx| {
@@ -130,7 +139,6 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
                 eprintln!("  -> {}", truncate(&url, 60));
                 let result = verify_url(&pool, &url, timeout).await;
 
-                // Update the reference
                 {
                     let mut file = refs_file.lock().await;
                     file.references[idx].status = result.status;
@@ -143,28 +151,24 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
         })
         .collect();
 
-    // Await all tasks
     let statuses: Vec<Status> = join_all(tasks)
         .await
         .into_iter()
         .filter_map(std::result::Result::ok)
         .collect();
 
-    // Close browser
     if let Ok(pool) = Arc::try_unwrap(pool) {
         pool.close().await?;
     }
 
     let summary = compute_summary(total, skipped, &statuses);
 
-    // Update meta
     {
         let mut file = refs_file.lock().await;
         file.meta.last_verified = Some(Utc::now().to_rfc3339());
         file.meta.total_links = file.references.len();
     }
 
-    // Write back to file (unless dry run)
     if args.dry_run {
         eprintln!("Dry run - file not modified");
     } else {
@@ -176,15 +180,11 @@ pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
         eprintln!("Updated {}", args.file.display());
     }
 
-    // Output JSON summary
-    let output = VerifyOutput {
+    Ok(VerifyOutput {
         summary,
         file: args.file.display().to_string(),
         timestamp: Utc::now().to_rfc3339(),
-    };
-    println!("{}", serde_json::to_string(&output)?);
-
-    Ok(())
+    })
 }
 
 /// Compute a summary from the list of verification statuses.

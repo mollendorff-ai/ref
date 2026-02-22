@@ -104,6 +104,90 @@ jobs:
       - name: Run e2e tests
         run: cargo test -- --ignored
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    outputs:
+      percentage: ${{ steps.coverage.outputs.percentage }}
+      total: ${{ steps.tests.outputs.total }}
+      ignored: ${{ steps.tests.outputs.ignored }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run coverage (pure-logic modules, 100% gate)
+        id: coverage
+        run: |
+          # IO modules excluded — tested in e2e job with Chrome (ADR-003)
+          EXCLUDE='browser\.rs|check_links\.rs|fetch\.rs|init\.rs|main\.rs|mcp\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
+          OUTPUT=$(cargo llvm-cov --ignore-filename-regex "$EXCLUDE" 2>&1)
+          echo "$OUTPUT"
+
+          # Extract line coverage percentage
+          COVERAGE=$(echo "$OUTPUT" | grep '^TOTAL' | awk '{print $NF}' | tr -d '%')
+          echo "percentage=$COVERAGE" >> "$GITHUB_OUTPUT"
+          echo "Coverage: ${COVERAGE}%"
+
+          # Enforce 100% gate on pure-logic modules
+          cargo llvm-cov --fail-under-lines 100 --ignore-filename-regex "$EXCLUDE"
+
+      - name: Count tests
+        id: tests
+        run: |
+          OUTPUT=$(cargo test 2>&1)
+          echo "$OUTPUT" | tail -20
+
+          # Sum test counts from all test binaries
+          TOTAL=$(echo "$OUTPUT" | grep '^test result:' | awk '{sum += $4} END {print sum}')
+          IGNORED=$(echo "$OUTPUT" | grep '^test result:' | awk '{sum += $10} END {print sum}')
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "ignored=$IGNORED" >> "$GITHUB_OUTPUT"
+          echo "Tests: $TOTAL passed, $IGNORED ignored"
+
+  badges:
+    name: Update badges
+    runs-on: ubuntu-latest
+    needs: [lint, test, test-e2e, coverage]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Update test count badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.BADGE_GIST_ID }}
+          filename: ref-tests.json
+          label: tests
+          message: "${{ needs.coverage.outputs.total }} passing"
+          color: brightgreen
+
+      - name: Update coverage badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.BADGE_GIST_ID }}
+          filename: ref-coverage.json
+          label: coverage
+          message: "${{ needs.coverage.outputs.percentage }}%"
+          valColorRange: ${{ needs.coverage.outputs.percentage }}
+          minColorRange: 50
+          maxColorRange: 100
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -130,7 +214,7 @@ jobs:
   auto-release:
     name: Auto Release
     runs-on: ubuntu-latest
-    needs: [lint, test, test-e2e, build]
+    needs: [lint, test, test-e2e, coverage, build]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write

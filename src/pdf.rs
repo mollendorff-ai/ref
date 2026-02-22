@@ -666,7 +666,7 @@ pub struct PdfPage {
     pub tables: Vec<Table>,
 }
 
-fn extract_pdf(path: &PathBuf) -> PdfPage {
+pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
     let file_url = format!("file://{}", path.display());
 
     // Check file exists

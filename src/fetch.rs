@@ -160,7 +160,7 @@ pub async fn run_fetch(args: FetchArgs) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_one(pool: &BrowserPool, url: &str, timeout: u64, raw: bool) -> Page {
+pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, timeout: u64, raw: bool) -> Page {
     eprintln!("  -> {}", truncate(url, 60));
 
     let page = match pool.new_page().await {
@@ -247,7 +247,7 @@ fn error_page(url: &str, error: &str) -> Page {
     }
 }
 
-fn parse_page(html: &str, url: &str, raw: bool) -> Page {
+pub(crate) fn parse_page(html: &str, url: &str, raw: bool) -> Page {
     let doc = Html::parse_document(html);
     let mut alerts = Vec::new();
 

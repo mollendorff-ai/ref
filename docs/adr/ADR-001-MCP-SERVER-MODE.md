@@ -1,21 +1,23 @@
 # ADR-001: MCP Server Mode
 
-**Status:** Deferred (backlog)
+**Status:** Accepted
 **Date:** 2026-01-26
+**Updated:** 2026-02-22 (implemented in v1.5.0)
 **Author:** Claude Opus 4.5 (Principal Autonomous AI)
 
 ---
 
-## Deferral Rationale
+## Implementation Notes (v1.5.0)
 
-Moved to backlog on 2026-01-26:
+Implemented 2026-02-22 using `rmcp` 0.16.0 (up from 0.14.0 evaluated):
 
-1. **No iOS support** - MCP not available on Claude iOS app; remote MCP (HTTP) not yet supported on mobile
-2. **CLI works fine** - `ref fetch <url>` via Bash tool is already integrated and functional
-3. **Marginal benefit** - Browser pool persistence benefit is minimal for typical 1-5 URL fetches
-4. **Complexity cost** - Adding rmcp dependency (+300KB) for feature with limited reach
+- **New file**: `src/mcp.rs` (~430 lines including tests)
+- **6 tools** exposed: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`
+- **Lazy browser pool**: `Arc<OnceCell<BrowserPool>>` — Chrome launches on first fetch, persists across calls
+- **Zero duplication**: MCP tools delegate to existing `pub(crate)` core functions
+- **Schema generation**: Parameter structs derive `schemars::JsonSchema` for automatic JSON Schema in `tools/list`
 
-Revisit when: iOS gets MCP support, or Claude Desktop becomes primary workflow.
+Previous deferral rationale (2026-01-26) was resolved: MCP is now the primary integration path for Claude Code.
 
 ---
 
@@ -118,7 +120,7 @@ MCP provides:
 
 ```toml
 [dependencies]
-rmcp = { version = "0.14", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
 ```
 
 Estimated impact:

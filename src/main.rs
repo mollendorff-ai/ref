@@ -11,6 +11,7 @@ mod check_links;
 mod extract;
 mod fetch;
 mod init;
+mod mcp;
 mod pdf;
 mod refresh_data;
 mod scan;
@@ -58,6 +59,8 @@ enum Commands {
     RefreshData(RefreshDataArgs),
     /// Update to the latest version from GitHub releases
     Update(UpdateArgs),
+    /// Start MCP server (Model Context Protocol) on stdio
+    Mcp,
 }
 
 #[tokio::main]
@@ -73,5 +76,6 @@ async fn main() -> Result<()> {
         Commands::RefreshData(args) => run_refresh_data(args).await,
         Commands::VerifyRefs(args) => run_verify_refs(args).await,
         Commands::Update(args) => run_update(args).await,
+        Commands::Mcp => mcp::run_mcp().await,
     }
 }

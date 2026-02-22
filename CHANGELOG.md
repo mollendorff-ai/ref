@@ -2,6 +2,28 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.5.0] - 2026-02-22
+
+MCP Server Mode — persistent JSON-RPC 2.0 server for AI tool integration.
+
+### Added
+
+- **`ref mcp`** subcommand: starts MCP server over stdio with persistent browser pool
+- **6 MCP tools**: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`
+- **MCP integration guide**: `docs/mcp-integration.md` with setup for Claude Code, Claude Desktop, VS Code
+- **ADR-001 updated**: Status changed from Deferred to Accepted
+
+### Changed
+
+- Core functions (`fetch_one`, `extract_pdf`, `scan_files`, `verify_refs_core`) promoted to `pub(crate)` for MCP reuse
+- `scan.rs` and `verify_refs.rs` refactored: core logic extracted from CLI print wrappers
+
+### Dependencies
+
+- **rmcp** 0.16 (Anthropic official MCP SDK)
+- **schemars** 0.8 (JSON Schema generation for tool parameters)
+- **tracing** 0.1 + **tracing-subscriber** 0.3 (structured logging to stderr)
+
 ## [1.4.0] - 2026-02-22
 
 Dependency hygiene and automation.

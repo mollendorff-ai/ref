@@ -7,13 +7,13 @@
 
 current: null
 
-upcoming:
-  - version: "1.5.0"
-    summary: "MCP Server Mode"
-    goal: "MCP_SERVER"
-    adr: "docs/adr/ADR-001-MCP-SERVER-MODE.md"
+upcoming: []
 
 completed:
+  - version: "1.5.0"
+    summary: "MCP Server Mode (6 tools, persistent browser pool)"
+    goal: "MCP_SERVER"
+    adr: "docs/adr/ADR-001-MCP-SERVER-MODE.md"
   - version: "1.4.0"
     summary: "Dependency hygiene (Dependabot + audit)"
     goal: "DEP_HYGIENE"

@@ -127,6 +127,15 @@ fn test_check_links_with_urls() {
 }
 
 #[test]
+fn test_mcp_subcommand_registered() {
+    ref_cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mcp"));
+}
+
+#[test]
 fn test_concurrency_validation() {
     ref_cmd()
         .args(["check-links", "--concurrency", "0", "test.md"])

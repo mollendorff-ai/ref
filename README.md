@@ -2,7 +2,8 @@
 
 [![CI](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml/badge.svg)](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/mollendorff-ref.svg)](https://crates.io/crates/mollendorff-ref)
-[![Tests](https://img.shields.io/badge/tests-48_passing-brightgreen)](https://github.com/mollendorff-ai/ref)
+[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-tests.json)](https://github.com/mollendorff-ai/ref/actions)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-coverage.json)](https://github.com/mollendorff-ai/ref/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Renders web pages and PDFs into token-optimized JSON for LLM agents.
@@ -81,6 +82,42 @@ Same JSON structure, plus table detection (whitespace column analysis, header in
 | `ref refresh-data --url <url>` | Extract live data (market sizes, stats) |
 | `ref init` | Create references.yaml template |
 | `ref update` | Self-update from GitHub releases |
+| `ref mcp` | Start MCP server (JSON-RPC 2.0 over stdio) |
+
+## MCP Server Mode
+
+`ref mcp` starts a persistent MCP server over stdio.
+AI applications call tools directly — no shell spawning, browser pool stays warm between calls.
+
+Six tools: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`.
+
+**Claude Code** (`.mcp.json` in project root):
+
+```json
+{
+  "mcpServers": {
+    "ref": {
+      "command": "ref",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "ref": {
+      "command": "/usr/local/bin/ref",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+See [docs/mcp-integration.md](docs/mcp-integration.md) for full setup guide and tool reference.
 
 ## AI orchestration
 
