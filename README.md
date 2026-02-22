@@ -1,5 +1,10 @@
 # Möllendorff Ref
 
+[![CI](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml/badge.svg)](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/mollendorff-ref.svg)](https://crates.io/crates/mollendorff-ref)
+[![Tests](https://img.shields.io/badge/tests-48_passing-brightgreen)](https://github.com/mollendorff-ai/ref)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Renders web pages and PDFs into token-optimized JSON for LLM agents.
 
 ## The problem
