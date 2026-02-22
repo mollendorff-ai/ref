@@ -7,7 +7,16 @@
 
 current: null
 
+upcoming:
+  - version: "1.5.0"
+    summary: "MCP Server Mode"
+    goal: "MCP_SERVER"
+    adr: "docs/adr/ADR-001-MCP-SERVER-MODE.md"
+
 completed:
+  - version: "1.4.0"
+    summary: "Dependency hygiene (Dependabot + audit)"
+    goal: "DEP_HYGIENE"
   - version: "1.3.1"
     summary: "Upgrade all crates"
     goal: "CRATE_UPGRADE"
@@ -16,20 +25,11 @@ completed:
     goal: "FOSS_READY"
 
 backlog:
-  - summary: "Dependency hygiene (Dependabot + audit)"
-    goal: "DEP_HYGIENE"
-    deliverables:
-      - "Enable Dependabot (dependabot.yml for cargo + github-actions)"
-      - "Audit for known vulnerabilities (cargo audit)"
   - summary: "Reference management"
     goal: "REF_MANAGEMENT"
     deliverables:
       - "Stale reference detection (not cited anywhere)"
       - "Reference deduplication"
-  - summary: "MCP Server Mode"
-    goal: "MCP_SERVER"
-    adr: "docs/adr/ADR-001-MCP-SERVER-MODE.md"
-    note: "Deferred - CLI via Bash/LangChain Tool works fine for now"
   - "Proxy support (--proxy)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"

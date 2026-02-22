@@ -2,6 +2,22 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.4.0] - 2026-02-22
+
+Dependency hygiene and automation.
+
+### Added
+
+- **Dependabot**: Weekly automated PRs for cargo and github-actions dependencies
+- **cargo audit**: Zero known vulnerabilities confirmed
+
+### Changed
+
+- **regex** 1.11 -> 1.12
+- **reqwest** 0.13.1 -> 0.13.2
+- **assert_cmd** 2.0 -> 2.1
+- **tempfile** 3.14 -> 3.25
+
 ## [1.3.1] - 2026-02-21
 
 Dependency upgrades and quality gate fixes.
