@@ -140,7 +140,7 @@ jobs:
           echo "$OUTPUT"
 
           # Extract line coverage percentage
-          COVERAGE=$(echo "$OUTPUT" | grep '^TOTAL' | awk '{print $NF}' | tr -d '%')
+          COVERAGE=$(echo "$OUTPUT" | grep '^TOTAL' | awk '{print $10}' | tr -d '%')
           echo "percentage=$COVERAGE" >> "$GITHUB_OUTPUT"
           echo "Coverage: ${COVERAGE}%"
 
