@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Fetch(args) => run_fetch(args).await,
-        Commands::Pdf(args) => run_pdf(&args),
+        Commands::Pdf(args) => run_pdf(&args).await,
         Commands::Init(args) => run_init(args).await,
         Commands::Scan(args) => run_scan(args).await,
         Commands::CheckLinks(args) => run_check_links(args).await,

@@ -2,6 +2,25 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.6.0] - 2026-03-07
+
+PDF from URL and targeted extraction with CSS selector.
+
+### Added
+
+- **`ref pdf <url>`**: accepts https:// URLs in addition to local file paths — downloads the PDF and extracts in one step, no manual curl required
+- **`ref fetch --selector <css>`**: skip content heuristics and extract a specific DOM element directly. Falls back to normal content extraction if the selector matches nothing
+- MCP tools updated: `ref_pdf` accepts URL input; `ref_fetch` exposes `selector` parameter
+
+## [1.5.1] - 2026-03-07
+
+Bug fixes for section extraction and link-check concurrency.
+
+### Fixed
+
+- `extract_sections()` now walks the DOM in document order using a single CSS selector pass. Previously the multi-pass loop over heading tags caused paragraphs to be mis-assigned — all paragraphs were appended to whichever heading was last encountered across all tag-specific loops, losing document structure.
+- `check_links()` now runs URL checks in parallel using the BrowserPool concurrency pool. Previously the `--concurrency` flag had no effect — checks ran sequentially despite the pool being created with the requested concurrency.
+
 ## [1.5.0] - 2026-02-22
 
 MCP Server Mode — persistent JSON-RPC 2.0 server for AI tool integration.

@@ -57,6 +57,12 @@ ref fetch https://example.com 2>/dev/null | jq .
 }
 ```
 
+Extract a specific element with `--selector`:
+
+```bash
+ref fetch --selector "#pricing-table" https://example.com 2>/dev/null | jq .
+```
+
 Null fields and empty arrays are omitted.
 Sections are capped (200 char headings, 2,000 char content).
 Code blocks include detected language.
@@ -70,12 +76,18 @@ ref pdf document.pdf 2>/dev/null | jq .
 
 Same JSON structure, plus table detection (whitespace column analysis, header inference, markdown output) and heading detection (numbered sections, Roman numerals, ALL CAPS, academic/legal formats).
 
+Also accepts URLs — downloads and extracts in one step:
+
+```bash
+ref pdf https://example.com/report.pdf 2>/dev/null | jq .
+```
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `ref fetch <url>` | Render page via Chrome, output structured JSON |
-| `ref pdf <file>` | Extract text and tables from PDFs |
+| `ref pdf <file\|url>` | Extract text and tables from PDFs |
 | `ref scan <files>` | Find URLs in markdown, build references.yaml |
 | `ref verify-refs <file>` | Check reference entries, update status |
 | `ref check-links <file>` | Validate URL health (HTTP status codes) |

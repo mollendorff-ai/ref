@@ -34,6 +34,10 @@ pub struct FetchArgs {
     /// Cookie file for authenticated fetches (Netscape format)
     #[arg(long)]
     pub cookies: Option<String>,
+
+    /// CSS selector to extract a specific element (skips content heuristics)
+    #[arg(long)]
+    pub selector: Option<String>,
 }
 
 /// Page status
@@ -119,6 +123,7 @@ pub async fn run_fetch(args: FetchArgs) -> Result<()> {
     let pool = Arc::new(BrowserPool::new(parallel).await?);
     let timeout = args.timeout;
     let raw = args.raw;
+    let selector: Option<Arc<str>> = args.selector.map(|s| Arc::from(s.as_str()));
 
     // Spawn parallel fetch tasks
     let tasks: Vec<_> = args
@@ -126,7 +131,8 @@ pub async fn run_fetch(args: FetchArgs) -> Result<()> {
         .into_iter()
         .map(|url| {
             let pool = Arc::clone(&pool);
-            tokio::spawn(async move { fetch_one(&pool, &url, timeout, raw).await })
+            let sel = selector.clone();
+            tokio::spawn(async move { fetch_one(&pool, &url, timeout, raw, sel.as_deref()).await })
         })
         .collect();
 
@@ -160,7 +166,13 @@ pub async fn run_fetch(args: FetchArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, timeout: u64, raw: bool) -> Page {
+pub(crate) async fn fetch_one(
+    pool: &BrowserPool,
+    url: &str,
+    timeout: u64,
+    raw: bool,
+    selector: Option<&str>,
+) -> Page {
     eprintln!("  -> {}", truncate(url, 60));
 
     let page = match pool.new_page().await {
@@ -227,7 +239,7 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, timeout: u64, raw: 
         Err(e) => return error_page(url, &e.to_string()),
     };
 
-    parse_page(&html, url, raw)
+    parse_page(&html, url, raw, selector)
 }
 
 fn error_page(url: &str, error: &str) -> Page {
@@ -247,7 +259,7 @@ fn error_page(url: &str, error: &str) -> Page {
     }
 }
 
-pub(crate) fn parse_page(html: &str, url: &str, raw: bool) -> Page {
+pub(crate) fn parse_page(html: &str, url: &str, raw: bool, selector: Option<&str>) -> Page {
     let doc = Html::parse_document(html);
     let mut alerts = Vec::new();
 
@@ -269,7 +281,17 @@ pub(crate) fn parse_page(html: &str, url: &str, raw: bool) -> Page {
     }
 
     // Extract content
-    let content_html = if raw {
+    let content_html = if let Some(sel_str) = selector {
+        if let Ok(sel) = Selector::parse(sel_str) {
+            if let Some(el) = doc.select(&sel).next() {
+                el.html()
+            } else {
+                extract_main_content(&doc) // fallback: selector matched nothing
+            }
+        } else {
+            extract_main_content(&doc) // fallback: selector failed to parse
+        }
+    } else if raw {
         html.to_string()
     } else {
         extract_main_content(&doc)
@@ -438,37 +460,40 @@ fn extract_sections(doc: &Html) -> Vec<Section> {
     let mut sections = Vec::new();
     let mut current_section: Option<Section> = None;
 
-    // Simple approach: extract headings and paragraphs
-    for tag in ["h1", "h2", "h3", "h4", "h5", "h6", "p"] {
-        if let Ok(sel) = Selector::parse(tag) {
-            for el in doc.select(&sel) {
-                let text: String = el.text().collect::<String>().trim().to_string();
-                if text.is_empty() || text.len() < 3 {
-                    continue;
-                }
+    // Single-pass document-order traversal using a combined selector
+    let Ok(sel) = Selector::parse("h1, h2, h3, h4, h5, h6, p") else {
+        return sections;
+    };
 
-                if tag.starts_with('h') {
-                    // Flush current section
-                    if let Some(s) = current_section.take() {
-                        if !s.content.is_empty() {
-                            sections.push(s);
-                        }
-                    }
+    for el in doc.select(&sel) {
+        let tag = el.value().name();
+        let text: String = el.text().collect::<String>().trim().to_string();
+        if text.is_empty() || text.len() < 3 {
+            continue;
+        }
 
-                    let level = tag.chars().nth(1).and_then(|c| c.to_digit(10)).unwrap_or(1);
-                    let level = u8::try_from(level).unwrap_or(1);
-                    current_section = Some(Section {
-                        level,
-                        heading: truncate_section(&text, 200),
-                        content: String::new(),
-                    });
-                } else if let Some(ref mut s) = current_section {
-                    // Add paragraph to current section
-                    if !s.content.is_empty() {
-                        s.content.push_str("\n\n");
-                    }
-                    s.content.push_str(&truncate_section(&text, 2000));
+        if tag.starts_with('h') && tag.len() == 2 {
+            // Flush current section
+            if let Some(s) = current_section.take() {
+                if !s.content.is_empty() {
+                    sections.push(s);
                 }
+            }
+
+            let level = tag.chars().nth(1).and_then(|c| c.to_digit(10)).unwrap_or(1);
+            let level = u8::try_from(level).unwrap_or(1);
+            current_section = Some(Section {
+                level,
+                heading: truncate_section(&text, 200),
+                content: String::new(),
+            });
+        } else if tag == "p" {
+            if let Some(ref mut s) = current_section {
+                // Add paragraph to current section
+                if !s.content.is_empty() {
+                    s.content.push_str("\n\n");
+                }
+                s.content.push_str(&truncate_section(&text, 2000));
             }
         }
     }
@@ -673,7 +698,7 @@ mod tests {
             </body>
             </html>
         ";
-        let page = parse_page(html, "https://test.com", false);
+        let page = parse_page(html, "https://test.com", false, None);
         assert_eq!(page.status, PageStatus::Ok);
         assert_eq!(page.title, Some("Test Page".to_string()));
         assert!(!page.sections.is_empty());
@@ -717,6 +742,36 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sections_document_order() {
+        let html = r#"
+            <html><body>
+                <h1>Alpha</h1>
+                <p>Content under alpha, long enough to be meaningful here.</p>
+                <h2>Beta</h2>
+                <p>Content under beta, also long enough to be meaningful.</p>
+            </body></html>
+        "#;
+        let page = parse_page(html, "https://test.com", false, None);
+        assert!(!page.sections.is_empty(), "should have sections");
+        // Find Alpha section
+        let alpha = page.sections.iter().find(|s| s.heading == "Alpha");
+        assert!(alpha.is_some(), "should have Alpha section");
+        assert!(
+            alpha.unwrap().content.contains("Content under alpha"),
+            "Alpha section should contain its own paragraph, got: {:?}",
+            alpha.unwrap().content
+        );
+        // Find Beta section
+        let beta = page.sections.iter().find(|s| s.heading == "Beta");
+        assert!(beta.is_some(), "should have Beta section");
+        assert!(
+            beta.unwrap().content.contains("Content under beta"),
+            "Beta section should contain its own paragraph, got: {:?}",
+            beta.unwrap().content
+        );
+    }
+
+    #[test]
     fn test_extract_code() {
         let html =
             r#"<pre><code class="language-rust">fn main() { println!("hello"); }</code></pre>"#;
@@ -724,5 +779,50 @@ mod tests {
         let blocks = extract_code_blocks(&doc);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].lang, Some("rust".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // Selector Tests (v1.6.0)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_page_with_selector() {
+        let html = r#"
+            <html><body>
+                <nav><a href="/">Home</a></nav>
+                <div id="target">
+                    <h1>Targeted Heading</h1>
+                    <p>This is the targeted content, long enough to be meaningful.</p>
+                </div>
+                <footer>Footer noise</footer>
+            </body></html>
+        "#;
+        let page = parse_page(html, "https://test.com", false, Some("#target"));
+        assert!(!page.sections.is_empty());
+        let has_targeted = page
+            .sections
+            .iter()
+            .any(|s| s.heading.contains("Targeted") || s.content.contains("targeted content"));
+        assert!(
+            has_targeted,
+            "Should extract targeted element content, got: {:?}",
+            page.sections
+        );
+    }
+
+    #[test]
+    fn test_parse_page_selector_fallback() {
+        let html = r#"
+            <html><body>
+                <h1>Normal Heading</h1>
+                <p>Normal content that is long enough to be meaningful here.</p>
+            </body></html>
+        "#;
+        // Selector that matches nothing — should fall back gracefully
+        let page = parse_page(html, "https://test.com", false, Some(".nonexistent-class"));
+        assert!(
+            !page.sections.is_empty(),
+            "Should fall back to normal extraction"
+        );
     }
 }

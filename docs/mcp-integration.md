@@ -65,6 +65,7 @@ Render web pages via headless Chrome and return structured JSON.
 | `parallel` | number | 4 | Max parallel browser tabs |
 | `timeout` | number | 30000 | Timeout per URL in ms |
 | `raw` | boolean | false | Skip content cleaning |
+| `selector` | string | - | CSS selector to extract a specific element, skipping content heuristics |
 
 ```json
 {
@@ -79,7 +80,7 @@ Extract text, tables, and headings from PDF files.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `files` | string[] | (required) | Absolute paths to PDF files |
+| `files` | string[] | (required) | Absolute paths to PDF files or https:// URLs |
 
 ```json
 {

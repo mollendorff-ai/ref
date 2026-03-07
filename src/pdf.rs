@@ -16,17 +16,21 @@ use std::sync::LazyLock;
 
 #[derive(Args)]
 pub struct PdfArgs {
-    /// PDF files to extract
+    /// PDF files or URLs to extract
     #[arg(required = true)]
-    pub files: Vec<PathBuf>,
+    pub files: Vec<String>,
+}
+
+fn is_url(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://")
 }
 
 /// Run the PDF extraction command.
 ///
 /// # Errors
 ///
-/// Returns an error if JSON serialization fails.
-pub fn run_pdf(args: &PdfArgs) -> Result<()> {
+/// Returns an error if JSON serialization or network request fails.
+pub async fn run_pdf(args: &PdfArgs) -> Result<()> {
     let file_count = args.files.len();
     eprintln!(
         "Extracting {} PDF{}...",
@@ -37,8 +41,12 @@ pub fn run_pdf(args: &PdfArgs) -> Result<()> {
     let mut results: Vec<PdfPage> = Vec::new();
 
     for file in &args.files {
-        eprintln!("  -> {}", file.display());
-        let page = extract_pdf(file);
+        eprintln!("  -> {file}");
+        let page = if is_url(file) {
+            extract_pdf_from_url(file).await
+        } else {
+            extract_pdf(&PathBuf::from(file))
+        };
         results.push(page);
     }
 
@@ -666,6 +674,36 @@ pub struct PdfPage {
     pub tables: Vec<Table>,
 }
 
+pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
+    let bytes = match reqwest::get(url)
+        .await
+        .and_then(reqwest::Response::error_for_status)
+    {
+        Ok(resp) => match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => return error_page(url, &format!("Failed to read response: {e}")),
+        },
+        Err(e) => return error_page(url, &format!("Download failed: {e}")),
+    };
+
+    let temp_path = std::env::temp_dir().join(format!(
+        "ref-pdf-{}.pdf",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+
+    if let Err(e) = std::fs::write(&temp_path, &bytes) {
+        return error_page(url, &format!("Failed to write temp file: {e}"));
+    }
+
+    let mut page = extract_pdf(&temp_path);
+    page.base.url = url.to_string();
+    let _ = std::fs::remove_file(&temp_path);
+    page
+}
+
 pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
     let file_url = format!("file://{}", path.display());
 
@@ -1237,5 +1275,18 @@ Bob           35     Chicago
     fn test_truncate() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 8), "hello...");
+    }
+
+    // -------------------------------------------------------------------------
+    // URL Detection Tests (v1.6.0)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_url() {
+        assert!(is_url("https://example.com/doc.pdf"));
+        assert!(is_url("http://example.com/doc.pdf"));
+        assert!(!is_url("/local/path/doc.pdf"));
+        assert!(!is_url("relative/path.pdf"));
+        assert!(!is_url("C:\\Windows\\file.pdf"));
     }
 }

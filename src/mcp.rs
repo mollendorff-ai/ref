@@ -41,11 +41,13 @@ pub struct FetchParams {
     pub timeout: Option<u64>,
     /// Skip content cleaning, return raw extracted text
     pub raw: Option<bool>,
+    /// CSS selector to extract a specific element (skips content heuristics)
+    pub selector: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PdfParams {
-    /// Absolute paths to PDF files
+    /// Local file paths or https:// URLs to PDF files
     pub files: Vec<String>,
 }
 
@@ -147,9 +149,11 @@ impl RefMcpServer {
 
         let pool = self.get_or_init_pool(parallel).await?;
 
+        let selector = params.selector.as_deref();
+
         let mut pages = Vec::new();
         for url in &params.urls {
-            let page = fetch::fetch_one(pool, url, timeout, raw).await;
+            let page = fetch::fetch_one(pool, url, timeout, raw, selector).await;
             pages.push(page);
         }
 
@@ -163,7 +167,7 @@ impl RefMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    /// Extract text, tables, and headings from PDF files.
+    /// Extract text, tables, and headings from PDF files or URLs.
     #[tool(name = "ref_pdf")]
     async fn ref_pdf(
         &self,
@@ -171,8 +175,11 @@ impl RefMcpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let mut results = Vec::new();
         for file in &params.files {
-            let path = PathBuf::from(file);
-            let page = pdf::extract_pdf(&path);
+            let page = if file.starts_with("http://") || file.starts_with("https://") {
+                pdf::extract_pdf_from_url(file).await
+            } else {
+                pdf::extract_pdf(&PathBuf::from(file))
+            };
             results.push(page);
         }
 

@@ -4,8 +4,20 @@
 #
 # See: CHANGELOG.md for release history
 # See: docs/adr/ for detailed rationale
+#
+# Sprint execution: each upcoming item runs as a named team (3 agents).
+# Agent types: general-purpose (full file read/write/bash access).
+# Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
 current: null
+
+shipped:
+  - version: "1.5.1"
+    date: "2026-03-07"
+    summary: "Fix section extraction order and check-links parallelism"
+  - version: "1.6.0"
+    date: "2026-03-07"
+    summary: "PDF from URL and --selector for fetch"
 
 upcoming: []
 

@@ -6,8 +6,10 @@ use crate::browser::BrowserPool;
 use crate::extract::extract_urls;
 use anyhow::{Context, Result};
 use clap::Args;
+use futures::future::join_all;
 use serde::Serialize;
 use std::io::{self, BufRead};
+use std::sync::Arc;
 use tokio::fs;
 
 #[derive(Args)]
@@ -135,74 +137,113 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
 ///
 /// Returns error if Chrome fails to launch or URLs can't be fetched.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
-    let pool = BrowserPool::new(config.concurrency).await?;
-    let mut results = Vec::with_capacity(urls.len());
-    let mut ok_count = 0;
-    let mut failed_count = 0;
+    let pool = Arc::new(BrowserPool::new(config.concurrency).await?);
+    let timeout = config.timeout_ms;
+    let retries = config.retries;
 
-    for url in urls {
-        eprintln!("  -> {}", truncate(url, 60));
+    let tasks: Vec<_> = urls
+        .iter()
+        .map(|url| {
+            let pool = Arc::clone(&pool);
+            let url = url.clone();
+            tokio::spawn(async move { check_one(&pool, &url, timeout, retries).await })
+        })
+        .collect();
 
-        let page = pool.new_page().await?;
-        let mut result = page.goto(url, config.timeout_ms).await?;
+    let results: Vec<LinkResult> = join_all(tasks)
+        .await
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .collect();
 
-        // Retry on failure
-        if result.status == 0 && config.retries > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            result = page.goto(url, config.timeout_ms).await?;
+    if let Ok(pool) = Arc::try_unwrap(pool) {
+        pool.close().await?;
+    }
+
+    let ok = results
+        .iter()
+        .filter(|r| {
+            r.error.is_none() && r.redirect_to.is_none() && r.status >= 200 && r.status < 400
+        })
+        .count();
+    let failed = results.len() - ok;
+
+    Ok(LinkReport {
+        ok,
+        failed,
+        results,
+    })
+}
+
+async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> LinkResult {
+    eprintln!("  -> {}", truncate(url, 60));
+
+    let page = match pool.new_page().await {
+        Ok(p) => p,
+        Err(e) => {
+            return LinkResult {
+                url: url.to_string(),
+                status: 0,
+                error: Some(e.to_string()),
+                redirect_to: None,
+            };
         }
+    };
 
-        // Determine if redirect (check final URL)
-        let redirect_to = if result.status >= 200 && result.status < 400 {
-            if let Some(final_url) = page.current_url().await {
-                // Check if different domain
-                let orig_host = url::Url::parse(url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(String::from));
-                let final_host = url::Url::parse(&final_url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(String::from));
+    let mut result = match page.goto(url, timeout).await {
+        Ok(r) => r,
+        Err(e) => {
+            return LinkResult {
+                url: url.to_string(),
+                status: 0,
+                error: Some(e.to_string()),
+                redirect_to: None,
+            };
+        }
+    };
 
-                if let (Some(orig), Some(fin)) = (orig_host, final_host) {
-                    let orig_norm = orig.trim_start_matches("www.");
-                    let fin_norm = fin.trim_start_matches("www.");
-                    if orig_norm == fin_norm {
-                        None
-                    } else {
-                        Some(final_url)
-                    }
-                } else {
+    // Retry on failure
+    if result.status == 0 && retries > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Ok(r) = page.goto(url, timeout).await {
+            result = r;
+        }
+    }
+
+    // Determine if redirect (check final URL)
+    let redirect_to = if result.status >= 200 && result.status < 400 {
+        if let Some(final_url) = page.current_url().await {
+            let orig_host = url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from));
+            let final_host = url::Url::parse(&final_url)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from));
+
+            if let (Some(orig), Some(fin)) = (orig_host, final_host) {
+                let orig_norm = orig.trim_start_matches("www.");
+                let fin_norm = fin.trim_start_matches("www.");
+                if orig_norm == fin_norm {
                     None
+                } else {
+                    Some(final_url)
                 }
             } else {
                 None
             }
         } else {
             None
-        };
-
-        let is_ok = result.status >= 200 && result.status < 400 && redirect_to.is_none();
-        if is_ok {
-            ok_count += 1;
-        } else {
-            failed_count += 1;
         }
+    } else {
+        None
+    };
 
-        results.push(LinkResult {
-            url: url.clone(),
-            status: result.status,
-            error: result.error,
-            redirect_to,
-        });
+    LinkResult {
+        url: url.to_string(),
+        status: result.status,
+        error: result.error,
+        redirect_to,
     }
-
-    pool.close().await?;
-
-    Ok(LinkReport {
-        ok: ok_count,
-        failed: failed_count,
-        results,
-    })
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -216,6 +257,18 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_check_links_config() {
+        let config = CheckLinksConfig {
+            concurrency: 5,
+            timeout_ms: 15000,
+            retries: 1,
+        };
+        assert_eq!(config.concurrency, 5);
+        assert_eq!(config.timeout_ms, 15000);
+        assert_eq!(config.retries, 1);
+    }
 
     #[test]
     fn test_truncate() {
