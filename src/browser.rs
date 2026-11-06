@@ -235,9 +235,7 @@ fn want_sandbox(env_value: Option<&str>, root: bool) -> bool {
 
 #[cfg(target_os = "linux")]
 fn running_as_root() -> bool {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .is_some_and(|s| uid_is_root(&s))
+    std::fs::read_to_string("/proc/self/status").is_ok_and(|s| uid_is_root(&s))
 }
 
 #[cfg(not(target_os = "linux"))]
