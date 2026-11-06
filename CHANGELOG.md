@@ -21,6 +21,10 @@ All notable changes to Möllendorff Ref.
 - The user agent is Chrome's own (with "HeadlessChrome" shown as "Chrome") plus `mollendorff-ref/<version>`, instead of a hard-coded 2023 Mac Chrome 120 string.
 - Fixed two `clippy::needless_raw_string_hashes` errors that failed the Lint job on current stable.
 
+### Tests
+
+- New end-to-end suite (`tests/e2e_local.rs`, runs in the Chrome CI job) against a local HTTP server: 404 and 500 are dead with exit 1, a "Fortune 500" title is ok, same-host redirects are followed, lists/tables/quotes/loose text are kept and nav/footer dropped, long pages are flagged or kept whole with `--max-chars 0`, content loaded by `fetch()` after page load is seen, wall detection on real and false cases, `file://` refused, and check-links reports real status codes. Each case was a bug found in review.
+
 ### Documentation
 
 - README rewritten to match what the code does: no "bypasses bot protection" claim (also removed from the CLI help, crate docs and MCP server instructions), a status note that says it is a young personal project built with AI assistance, documented exit codes, status values, truncation, security defaults and a Limitations section. The Asimov section no longer recommends forbidding other web tools.
