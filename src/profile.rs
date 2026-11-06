@@ -48,9 +48,10 @@ pub fn default_saved_dir(home: Option<&Path>) -> Option<PathBuf> {
 /// The user's home folder from `HOME` (or `USERPROFILE` on Windows)
 #[must_use]
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .filter(|h| !h.is_empty())
+    ["HOME", "USERPROFILE"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find(|h| !h.is_empty())
         .map(PathBuf::from)
 }
 
