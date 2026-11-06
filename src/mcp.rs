@@ -17,7 +17,7 @@ use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, ErrorCode, Implementation, ServerCapabilities, ServerInfo,
+    CallToolResult, ContentBlock, ErrorCode, Implementation, ServerCapabilities, ServerConfig,
 };
 use rmcp::schemars;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServiceExt};
@@ -183,7 +183,7 @@ impl RefMcpServer {
         }
         .map_err(json_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Extract text, tables, and headings from PDF files or URLs.
@@ -211,7 +211,7 @@ impl RefMcpServer {
         }
         .map_err(json_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Validate URL health using headless Chrome (returns status codes and redirect info).
@@ -231,7 +231,7 @@ impl RefMcpServer {
             .map_err(to_mcp_err)?;
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Scan markdown files for URLs and build/update references.yaml.
@@ -256,7 +256,7 @@ impl RefMcpServer {
         let output = scan::scan_files(args).await.map_err(to_mcp_err)?;
         let json = serde_json::to_string(&output).map_err(json_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Verify references.yaml entries by fetching each URL and updating status.
@@ -279,7 +279,7 @@ impl RefMcpServer {
             .map_err(to_mcp_err)?;
         let json = serde_json::to_string(&output).map_err(json_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Extract live data (amounts, percentages, statistics) from URLs.
@@ -321,30 +321,22 @@ impl RefMcpServer {
         let report = refresh_data(&urls, &config).await.map_err(to_mcp_err)?;
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 }
 
 // The macro generates async fns without `.await`; clippy 1.99 flags them.
 #[allow(unknown_lints)]
 #[allow(clippy::unused_async_trait_impl)]
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl rmcp::handler::server::ServerHandler for RefMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: rmcp::model::ProtocolVersion::default(),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation {
-                name: "ref".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                ..Default::default()
-            },
-            instructions: Some(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("ref", env!("CARGO_PKG_VERSION")))
+            .with_instructions(
                 "Möllendorff Ref: LLM-optimized web fetching and PDF extraction. \
-                 Renders pages via headless Chrome, bypasses bot protection."
-                    .into(),
-            ),
-        }
+                 Renders pages via headless Chrome, bypasses bot protection.",
+            )
     }
 }
 
@@ -539,8 +531,8 @@ mod tests {
 
         // Verify the result contains JSON with error status
         let content = &call_result.content[0];
-        let text = match &content.raw {
-            rmcp::model::RawContent::Text(t) => &t.text,
+        let text = match content {
+            ContentBlock::Text(t) => &t.text,
             _ => panic!("Expected text content"),
         };
         let parsed: serde_json::Value = serde_json::from_str(text).unwrap();

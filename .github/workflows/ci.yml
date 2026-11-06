@@ -8,7 +8,7 @@ on:
       - 'tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - '.github/workflows/ci.yml'
+      - '.github/workflows/**'
   pull_request:
     branches: [main]
     paths:
@@ -16,7 +16,10 @@ on:
       - 'tests/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - '.github/workflows/ci.yml'
+      - '.github/workflows/**'
+  schedule:
+    # Weekly, so new advisories against the dependencies show up even without commits
+    - cron: '17 6 * * 1'
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,9 +31,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Pinned so a new Rust release cannot turn main red without a code change.
+      # Bump it on purpose (and fix any new lints) when upgrading.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99.1"
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -49,6 +55,19 @@ jobs:
 
       - name: Clippy (pedantic, all targets)
         run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      # Fails on known vulnerabilities; "unmaintained" notices are warnings
+      - name: cargo audit
+        run: cargo audit
 
   test:
     name: Unit tests (${{ matrix.rust }})
@@ -182,7 +201,7 @@ jobs:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.BADGE_GIST_ID }}
           filename: ref-coverage.json
-          label: coverage
+          label: logic coverage
           message: "${{ needs.coverage.outputs.percentage }}%"
           valColorRange: ${{ needs.coverage.outputs.percentage }}
           minColorRange: 50
@@ -214,7 +233,7 @@ jobs:
   auto-release:
     name: Auto Release
     runs-on: ubuntu-latest
-    needs: [lint, test, test-e2e, coverage, build]
+    needs: [lint, audit, test, test-e2e, coverage, build]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write

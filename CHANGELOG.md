@@ -21,6 +21,15 @@ All notable changes to Möllendorff Ref.
 - The user agent is Chrome's own (with "HeadlessChrome" shown as "Chrome") plus `mollendorff-ref/<version>`, instead of a hard-coded 2023 Mac Chrome 120 string.
 - Fixed two `clippy::needless_raw_string_hashes` errors that failed the Lint job on current stable.
 
+### Maintenance
+
+- **rmcp 0.16 → 3.9** (MCP SDK; clears RUSTSEC-2026-0189, which affected only its HTTP transport) and **scraper 0.25 → 0.27**. Supersedes Dependabot PRs #20 and #21.
+- Removed unused dependencies: `html2text`, `thiserror`, and the direct `schemars` (rmcp re-exports it).
+- The `ref` binary now uses the library instead of compiling every module a second time, so unit tests run once and the test badge no longer counts them twice.
+- `Cargo.lock` is committed, so CI and release builds use the same dependency versions.
+- CI: the Lint job is pinned to Rust 1.99.1, so a new Rust release cannot turn main red without a code change; a `cargo audit` job runs on every change and weekly; the release workflow now runs fmt and pedantic clippy before building (v1.6.0 was released with Lint failing).
+- The coverage badge is labelled "logic coverage": it measures the pure-logic modules only (I/O modules are covered by the Chrome end-to-end tests).
+
 ### Security
 
 - **Only `http` and `https` URLs** are opened by `fetch`, `check-links`, `verify-refs`, `refresh-data` and PDF downloads. `ref fetch file:///etc/hostname` used to return the file, also through MCP.
