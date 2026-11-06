@@ -2,6 +2,25 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.7.1] - 2026-11-06
+
+Fixes from a second independent review of 1.7.0.
+
+### Fixed
+
+- **`ref_scan` could overwrite any file in the workspace** (for example a `.rs` source file), and through a hard link a file outside it. Outputs must now be `.yaml` or `.yml`, an existing file must be empty or already a references file, hard-linked files are refused, and all writes (`scan`, `verify-refs`, `init`) go to a temporary file that is renamed into place, so a hard link is never written through.
+- **Signed-in PDFs failed**: when `fetch` found a PDF it downloaded it again without the cookies or Chrome's user agent, so a members-only PDF came back `dead` with `http: 200`. The download now sends the same user agent and the cookies that apply to the URL, and `http` is reported only when the download succeeded. Timeouts say "Download timed out (limit 60 s)".
+- **Ref's Chrome feature list usually lost to chromiumoxide's**: they were two separate `--disable-features` switches in random order. The list is now merged into chromiumoxide's own switch, so Chrome receives one deterministic list (checked in the launched command line).
+- **Shadow DOM text was dropped silently**: text in open shadow roots (web components) is now copied into the page before it is read, nested components included. Closed shadow roots still cannot be read.
+- **Hidden overlays counted as paywalls**: wall elements hidden with `hidden`, `aria-hidden="true"`, `display: none` or `visibility: hidden` are ignored.
+- **SIGKILL left Chrome running**: on Linux, the next run stops Chrome processes left by a killed run and removes their profile.
+- `ref mcp --root` with a missing folder names the folder in the error.
+
+### Documentation
+
+- README: the output example's `chars` matches its content; "the browser stays warm" now says only `ref_fetch` reuses the browser; `ref_scan` output rules and SIGKILL cleanup are described.
+- `.asimov/freshness.json` no longer forbids other web tools; it says to prefer ref for reading pages and to check `status`, `http` and `truncated`.
+
 ## [1.7.0] - 2026-11-06
 
 Correctness, safety and honesty release: real HTTP status, no silently dropped or cut content, http(s)-only fetching, a contained MCP server, verified self-update, and a README that matches the code.

@@ -116,12 +116,33 @@ fn any_element(doc: &Html, selectors: &[&str]) -> bool {
 /// `paywall-free` and `paywalled-content-helper` do not.
 fn has_marker(doc: &Html, markers: &[&str]) -> bool {
     doc.tree.nodes().any(|node| {
-        node.value().as_element().is_some_and(|el| {
+        let marked = node.value().as_element().is_some_and(|el| {
             el.classes()
                 .chain(el.id())
                 .any(|name| name_has_marker(&name.to_ascii_lowercase(), markers))
-        })
+        });
+        // A wall that is in the page but hidden (not shown to readers) does not count
+        marked
+            && !std::iter::once(node)
+                .chain(node.ancestors())
+                .any(|n| n.value().as_element().is_some_and(is_hidden))
     })
+}
+
+/// Hidden through the `hidden` attribute, `aria-hidden="true"` or an inline
+/// `display: none` / `visibility: hidden` style
+fn is_hidden(el: &scraper::node::Element) -> bool {
+    let style: String = el
+        .attr("style")
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    el.attr("hidden").is_some()
+        || el.attr("aria-hidden") == Some("true")
+        || style.contains("display:none")
+        || style.contains("visibility:hidden")
 }
 
 fn name_has_marker(name: &str, markers: &[&str]) -> bool {
@@ -224,6 +245,20 @@ mod tests {
         }
         let html = open.replace("<article>", "<article id='login-modal'>");
         assert_eq!(detect(&html), Access::Login);
+    }
+
+    #[test]
+    fn hidden_wall_elements_do_not_count() {
+        for wrapper in [
+            "<div class='tp-modal' style='display: none'>Subscribe</div>",
+            "<div class='paywall' hidden>Subscribe</div>",
+            "<div aria-hidden='true'><div class='paywall'>Subscribe</div></div>",
+            "<section style='VISIBILITY:hidden'><div class='login-wall'>Sign in</div></section>",
+        ] {
+            assert_eq!(detect(&long_article(wrapper)), Access::Open, "{wrapper}");
+        }
+        let shown = long_article("<div class='tp-modal' style='display:block'>Subscribe</div>");
+        assert_eq!(detect(&shown), Access::Paywall);
     }
 
     #[test]

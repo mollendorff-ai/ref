@@ -268,10 +268,16 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOpti
     // A PDF opens in Chrome's viewer, which has no readable HTML: extract it instead
     if nav.mime.as_deref() == Some("application/pdf") && nav.status.is_some_and(|c| c < 400) {
         drop(page);
-        let mut pdf = crate::pdf::extract_pdf_from_url(url).await.base;
+        // Same user agent and cookies as Chrome, so a signed-in PDF downloads too
+        let headers = pool.download_headers(url);
+        let mut pdf = crate::pdf::extract_pdf_from_url_with(url, &headers)
+            .await
+            .base;
         pdf.alerts
             .insert(0, "PDF detected: extracted as with `ref pdf`".to_string());
-        pdf.http = nav.status;
+        if pdf.status != PageStatus::Dead {
+            pdf.http = nav.status;
+        }
         return pdf;
     }
 

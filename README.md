@@ -47,7 +47,7 @@ ref fetch https://example.com/report 2>/dev/null | jq .
     {
       "level": 1,
       "heading": "Quarterly report",
-      "content": "Intro paragraph.\n\n- Revenue up 12%\n- Costs flat\n\n| Region | Q3 |\n| --- | --- |\n| North | 150 |\n\n> Strong quarter, said the CFO."
+      "content": "Intro paragraph.\n\n- Revenue up 12%\n- Costs flat\n\n| Region | Q3 |\n| --- | --- |\n| North | 150 |\n\n> Strong quarter, said the CFO.\n\nLoose closing remark in a div."
     }
   ],
   "chars": 175
@@ -114,7 +114,7 @@ Treat that file like a password.
 ## MCP Server Mode
 
 `ref mcp` starts a persistent MCP server over stdio.
-AI applications call tools directly; the browser stays warm between calls.
+AI applications call tools directly. `ref_fetch` reuses one browser between calls; the other browser tools start one per call.
 
 Six tools: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`.
 
@@ -145,6 +145,7 @@ Six tools: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_re
 ```
 
 MCP tools only read and write files inside the directory the server was started in, or the folder given with `ref mcp --root <folder>`.
+`ref_scan` writes only `.yaml` or `.yml` files, never overwrites a file that is not already a references file, and refuses hard-linked files; outputs are written to a temporary file and renamed into place.
 If that folder is the filesystem root, file tools are refused.
 
 See [docs/mcp-integration.md](docs/mcp-integration.md) for the full setup guide and tool reference.
@@ -160,6 +161,7 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 - Only `http` and `https` URLs are opened; `file://`, `data:` and other schemes are refused.
 - Chrome runs with its sandbox unless ref runs as root, `REF_CHROME_NO_SANDBOX=1` is set, or Chrome cannot start with it (ref then retries without it and prints a warning).
 - Each run uses its own temporary Chrome profile, deleted afterwards (also after Ctrl-C or SIGTERM).
+  If a run is killed outright (SIGKILL), the next run on Linux stops its leftover Chrome and removes its profile.
 - ref turns off Chrome's optional background services (sync, metrics, safe-browsing updates, translation and others).
   Chrome still makes a few calls of its own to Google, such as component update and account checks, that these switches do not stop; block them at your firewall or proxy if that matters to you.
 - The user agent is Chrome's own plus `mollendorff-ref/<version>`, so sites can see who is asking.

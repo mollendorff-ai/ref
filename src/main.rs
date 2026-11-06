@@ -82,7 +82,7 @@ async fn run(cli: Cli) -> ExitCode {
         match cli.command {
             Commands::Fetch(args) => run_fetch(args).await,
             Commands::Pdf(args) => run_pdf(&args).await,
-            Commands::Init(args) => run_init(args).await.map(|()| true),
+            Commands::Init(args) => run_init(&args).map(|()| true),
             Commands::Scan(args) => run_scan(args).await.map(|()| true),
             Commands::CheckLinks(args) => run_check_links(args).await,
             Commands::RefreshData(args) => run_refresh_data(args).await,
