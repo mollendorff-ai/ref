@@ -320,6 +320,18 @@ mod tests {
         assert_ne!(fs::read_to_string(&target).unwrap(), "");
         let err = write_atomic(&dir.path().join("missing/out.yaml"), b"x");
         assert!(err.is_err());
+
+        // Rename onto a non-empty folder fails; the temporary file is removed
+        let busy = dir.path().join("busy.yaml");
+        fs::create_dir(&busy).unwrap();
+        fs::write(busy.join("inside"), "x").unwrap();
+        assert!(write_atomic(&busy, b"x").is_err());
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("ref-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     #[test]
