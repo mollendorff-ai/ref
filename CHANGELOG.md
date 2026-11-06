@@ -2,6 +2,16 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.8.1] - 2026-11-06
+
+### Added
+
+- Runs with a saved profile print `Using saved profile <folder>` on stderr, so you can tell which profile a run used.
+
+### Documentation
+
+- README: step-by-step "First time" and "Later" guides for signed-in reading (what to do when a session expires, adding a site, upgrading from 1.7), where the profile lives on each system, and "Sign-ins and human checks" listed among the problems ref solves.
+
 ## [1.8.0] - 2026-11-06
 
 ### Added
