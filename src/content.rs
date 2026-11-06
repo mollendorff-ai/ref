@@ -400,10 +400,7 @@ mod tests {
             "Definition text",
             "Figure caption",
         ] {
-            assert!(
-                content.contains(expected),
-                "missing {expected:?} in {content}"
-            );
+            assert!(content.contains(expected), "{expected:?}");
         }
     }
 
@@ -490,6 +487,18 @@ mod tests {
         let content = &sections(html).sections[0].content;
         assert!(content.contains("Layout cell paragraph."));
         assert!(content.contains("| Inner a | Inner b |"));
+    }
+
+    #[test]
+    fn inline_elements_in_containers_join_the_text() {
+        let out = sections("<div>Read <a href='/x'>the <b>full</b> report</a> today.</div>");
+        assert_eq!(out.sections[0].content, "Read the full report today.");
+    }
+
+    #[test]
+    fn comments_inside_blocks_are_ignored() {
+        let out = sections("<p>Before <!-- hidden note --> after.</p>");
+        assert_eq!(out.sections[0].content, "Before after.");
     }
 
     #[test]

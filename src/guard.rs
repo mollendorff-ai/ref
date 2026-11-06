@@ -42,16 +42,18 @@ pub fn check_workspace_path(raw: &str, root: &Path) -> Result<PathBuf, String> {
         return Err(outside(raw));
     }
     let joined = root.join(path);
+    // An existing path is resolved fully (following symlinks); a new file is
+    // resolved through its parent folder, which must exist.
     let resolved = if joined.exists() {
-        joined.canonicalize().map_err(|e| format!("{raw}: {e}"))?
+        joined.canonicalize().ok()
     } else {
-        let parent = joined
+        joined
             .parent()
-            .ok_or_else(|| outside(raw))?
-            .canonicalize()
-            .map_err(|e| format!("{raw}: folder not found ({e})"))?;
-        let name = joined.file_name().ok_or_else(|| outside(raw))?;
-        parent.join(name)
+            .zip(joined.file_name())
+            .and_then(|(parent, name)| parent.canonicalize().ok().map(|p| p.join(name)))
+    };
+    let Some(resolved) = resolved else {
+        return Err(format!("{raw}: folder not found"));
     };
     if resolved.starts_with(&root) {
         Ok(resolved)
