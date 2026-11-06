@@ -1,4 +1,4 @@
-# Ignore unmaintained fxhash warning - transitive dep from scraper
-# Not a security vulnerability, just unmaintained
+# cargo audit configuration. No advisories are ignored.
+# (RUSTSEC-2025-0057 for fxhash was ignored before; fxhash is no longer a dependency.)
 [advisories]
-ignore = ["RUSTSEC-2025-0057"]
+ignore = []

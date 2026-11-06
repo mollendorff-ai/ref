@@ -26,8 +26,8 @@ pub struct VerifyRefsArgs {
     /// Path to references.yaml file
     pub file: PathBuf,
 
-    /// Number of parallel browser tabs
-    #[arg(long, short, default_value = "4")]
+    /// Number of parallel browser tabs (1-20)
+    #[arg(long, short, default_value = "4", value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=20))]
     pub parallel: usize,
 
     /// Filter by category (can be used multiple times)

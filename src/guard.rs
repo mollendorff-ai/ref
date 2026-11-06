@@ -42,6 +42,17 @@ pub fn check_workspace_path(raw: &str, root: &Path) -> Result<PathBuf, String> {
         return Err(outside(raw));
     }
     let joined = root.join(path);
+    // A symlink that points nowhere would be followed on write, possibly to
+    // a file outside the workspace
+    let dangling = joined
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+        && !joined.exists();
+    if dangling {
+        return Err(format!(
+            "{raw}: refusing a symlink that points to a missing file"
+        ));
+    }
     // An existing path is resolved fully (following symlinks); a new file is
     // resolved through its parent folder, which must exist.
     let resolved = if joined.exists() {
@@ -145,6 +156,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink("/etc", dir.path().join("etc-link")).unwrap();
         assert!(check_workspace_path("etc-link/hostname", dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlinks_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("escaped.yaml"),
+            dir.path().join("out.yaml"),
+        )
+        .unwrap();
+        let err = check_workspace_path("out.yaml", dir.path()).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_reached_through_a_symlinked_folder_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.md"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("docs")).unwrap();
+        assert!(check_workspace_path("docs/secret.md", dir.path()).is_err());
     }
 
     #[test]

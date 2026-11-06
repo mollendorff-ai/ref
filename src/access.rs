@@ -44,21 +44,28 @@ const LOGIN_PHRASES: [&str; 8] = [
     "authentication required",
 ];
 
-const PAYWALL_ELEMENTS: [&str; 6] = [
-    "[class*='paywall']",
-    "[id*='paywall']",
-    "[class*='subscription-wall']",
-    "[class*='piano-offer']",
-    "[class*='premium-wall']",
-    "[class*='tp-modal']",
+/// Class or id names used by paywall overlays (matched as whole name parts)
+const PAYWALL_MARKERS: [&str; 6] = [
+    "paywall",
+    "subscription-wall",
+    "piano-offer",
+    "premium-wall",
+    "tp-modal",
+    "regwall",
 ];
 
-const LOGIN_ELEMENTS: [&str; 5] = [
-    "[class*='login-wall']",
-    "[class*='auth-wall']",
-    "[class*='signup-wall']",
-    "[id*='login-modal']",
-    "[class*='gate-content']",
+/// Class or id names used by login walls (matched as whole name parts)
+const LOGIN_MARKERS: [&str; 5] = [
+    "login-wall",
+    "auth-wall",
+    "signup-wall",
+    "login-modal",
+    "gate-content",
+];
+
+/// Name parts that turn a marker into its opposite (`no-paywall`, `paywall-free`)
+const NEGATIONS: [&str; 8] = [
+    "no", "not", "non", "free", "without", "hidden", "disabled", "off",
 ];
 
 /// Decide whether a rendered page is open, paywalled or behind a login.
@@ -72,13 +79,13 @@ pub fn detect(html: &str) -> Access {
     let text = visible_text(&doc).to_lowercase();
     let short = text.chars().count() < SHORT_PAGE_CHARS;
 
-    if not_free_structured_data(html) || any_element(&doc, &PAYWALL_ELEMENTS) {
+    if not_free_structured_data(html) || has_marker(&doc, &PAYWALL_MARKERS) {
         return Access::Paywall;
     }
     if short && contains_any(&text, &PAYWALL_PHRASES) {
         return Access::Paywall;
     }
-    if any_element(&doc, &LOGIN_ELEMENTS) {
+    if has_marker(&doc, &LOGIN_MARKERS) {
         return Access::Login;
     }
     if short
@@ -101,6 +108,31 @@ fn any_element(doc: &Html, selectors: &[&str]) -> bool {
         .iter()
         .filter_map(|s| Selector::parse(s).ok())
         .any(|sel| doc.select(&sel).next().is_some())
+}
+
+/// True when an element's class or id carries a marker as a whole part of a name.
+///
+/// `paywall`, `paywall-overlay` and `article-paywall` match; `no-paywall`,
+/// `paywall-free` and `paywalled-content-helper` do not.
+fn has_marker(doc: &Html, markers: &[&str]) -> bool {
+    doc.tree.nodes().any(|node| {
+        node.value().as_element().is_some_and(|el| {
+            el.classes()
+                .chain(el.id())
+                .any(|name| name_has_marker(&name.to_ascii_lowercase(), markers))
+        })
+    })
+}
+
+fn name_has_marker(name: &str, markers: &[&str]) -> bool {
+    let parts: Vec<&str> = name.split(['-', '_']).collect();
+    if parts.iter().any(|p| NEGATIONS.contains(p)) {
+        return false;
+    }
+    markers.iter().any(|marker| {
+        let wanted: Vec<&str> = marker.split('-').collect();
+        parts.windows(wanted.len()).any(|w| w == wanted.as_slice())
+    })
 }
 
 fn contains_any(text: &str, phrases: &[&str]) -> bool {
@@ -172,6 +204,26 @@ mod tests {
     fn overlay_element_is_paywall_even_on_long_pages() {
         let html = long_article("<div class='paywall-overlay'>Subscribe</div>");
         assert_eq!(detect(&html), Access::Paywall);
+    }
+
+    #[test]
+    fn marker_names_match_whole_parts_only() {
+        let open = long_article("");
+        for class in [
+            "no-paywall",
+            "paywall-free",
+            "paywalled-helper",
+            "has_no_paywall",
+        ] {
+            let html = open.replace("<article>", &format!("<article class='{class}'>"));
+            assert_eq!(detect(&html), Access::Open, "{class}");
+        }
+        for class in ["paywall", "article-paywall", "PAYWALL_overlay", "tp-modal"] {
+            let html = open.replace("<article>", &format!("<article class='{class}'>"));
+            assert_eq!(detect(&html), Access::Paywall, "{class}");
+        }
+        let html = open.replace("<article>", "<article id='login-modal'>");
+        assert_eq!(detect(&html), Access::Login);
     }
 
     #[test]

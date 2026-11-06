@@ -6,7 +6,7 @@
 use crate::access::{self, Access};
 use crate::browser::BrowserPool;
 pub use crate::content::Section;
-use crate::content::{self, MAX_SECTIONS};
+use crate::content::{self, DEFAULT_MAX_SECTIONS};
 use crate::text::{cut_at_word, truncate};
 use anyhow::{anyhow, Context, Result};
 use clap::Args;
@@ -23,9 +23,9 @@ pub struct FetchArgs {
     #[arg(required = true)]
     pub urls: Vec<String>,
 
-    /// Parallel fetches (browser tabs)
-    #[arg(long, short, default_value = "4")]
-    pub parallel: usize,
+    /// Parallel fetches (browser tabs, 1-20)
+    #[arg(long, short, default_value = "4", value_parser = clap::value_parser!(u8).range(1..=20))]
+    pub parallel: u8,
 
     /// Timeout per URL in milliseconds
     #[arg(long, default_value = "30000")]
@@ -47,10 +47,45 @@ pub struct FetchArgs {
     /// "truncated" (0 = no limit)
     #[arg(long, default_value_t = DEFAULT_MAX_CHARS)]
     pub max_chars: usize,
+
+    /// Maximum number of sections per page; more are dropped and the page is
+    /// marked "truncated" (0 = no limit)
+    #[arg(long, default_value_t = DEFAULT_MAX_SECTIONS)]
+    pub max_sections: usize,
 }
 
 /// Default per-section character limit
 pub const DEFAULT_MAX_CHARS: usize = 5000;
+
+/// Maximum links returned per page
+const MAX_LINKS: usize = 50;
+
+/// How to fetch and trim one page
+#[derive(Debug, Clone)]
+pub struct FetchOptions {
+    /// Navigation timeout in milliseconds
+    pub timeout: u64,
+    /// Keep page chrome and all links
+    pub raw: bool,
+    /// CSS selector for the element to extract
+    pub selector: Option<String>,
+    /// Characters per section (0 = no limit)
+    pub max_chars: usize,
+    /// Sections per page (0 = no limit)
+    pub max_sections: usize,
+}
+
+impl Default for FetchOptions {
+    fn default() -> Self {
+        Self {
+            timeout: 30_000,
+            raw: false,
+            selector: None,
+            max_chars: DEFAULT_MAX_CHARS,
+            max_sections: DEFAULT_MAX_SECTIONS,
+        }
+    }
+}
 
 /// Page status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -120,7 +155,7 @@ pub struct Page {
 /// be serialized, or the browser cannot be closed cleanly.
 pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
     let url_count = args.urls.len();
-    let parallel = args.parallel.min(url_count).max(1);
+    let parallel = usize::from(args.parallel).min(url_count).max(1);
 
     eprintln!(
         "Fetching {} URL{} ({} parallel)...",
@@ -139,10 +174,13 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
         pool.set_cookies(&cookies);
     }
     let pool = Arc::new(pool);
-    let timeout = args.timeout;
-    let raw = args.raw;
-    let selector: Option<Arc<str>> = args.selector.map(|s| Arc::from(s.as_str()));
-    let max_chars = args.max_chars;
+    let options = Arc::new(FetchOptions {
+        timeout: args.timeout,
+        raw: args.raw,
+        selector: args.selector,
+        max_chars: args.max_chars,
+        max_sections: args.max_sections,
+    });
 
     // Spawn parallel fetch tasks
     let tasks: Vec<_> = args
@@ -150,10 +188,8 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
         .into_iter()
         .map(|url| {
             let pool = Arc::clone(&pool);
-            let sel = selector.clone();
-            tokio::spawn(async move {
-                fetch_one(&pool, &url, timeout, raw, sel.as_deref(), max_chars).await
-            })
+            let options = Arc::clone(&options);
+            tokio::spawn(async move { fetch_one(&pool, &url, &options).await })
         })
         .collect();
 
@@ -188,14 +224,7 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
     Ok(none_dead && results.len() == url_count)
 }
 
-pub(crate) async fn fetch_one(
-    pool: &BrowserPool,
-    url: &str,
-    timeout: u64,
-    raw: bool,
-    selector: Option<&str>,
-    max_chars: usize,
-) -> Page {
+pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Page {
     eprintln!("  -> {}", truncate(url, 60));
 
     if let Err(e) = crate::guard::check_web_url(url) {
@@ -212,7 +241,7 @@ pub(crate) async fn fetch_one(
         .ok()
         .and_then(|u| u.host_str().map(String::from));
 
-    let nav = match page.goto(url, timeout).await {
+    let nav = match page.goto(url, options.timeout).await {
         Ok(n) => n,
         Err(e) => return error_page(url, &e.to_string()),
     };
@@ -234,6 +263,16 @@ pub(crate) async fn fetch_one(
             chars: 0,
             truncated: false,
         };
+    }
+
+    // A PDF opens in Chrome's viewer, which has no readable HTML: extract it instead
+    if nav.mime.as_deref() == Some("application/pdf") && nav.status.is_some_and(|c| c < 400) {
+        drop(page);
+        let mut pdf = crate::pdf::extract_pdf_from_url(url).await.base;
+        pdf.alerts
+            .insert(0, "PDF detected: extracted as with `ref pdf`".to_string());
+        pdf.http = nav.status;
+        return pdf;
     }
 
     // Check for redirect
@@ -270,7 +309,7 @@ pub(crate) async fn fetch_one(
         Err(e) => return error_page(url, &e.to_string()),
     };
 
-    let mut parsed = parse_page(&html, url, raw, selector, max_chars);
+    let mut parsed = parse_page(&html, url, options);
     apply_http_status(&mut parsed, nav.status);
     parsed
 }
@@ -303,13 +342,8 @@ fn error_page(url: &str, error: &str) -> Page {
     }
 }
 
-pub(crate) fn parse_page(
-    html: &str,
-    url: &str,
-    raw: bool,
-    selector: Option<&str>,
-    max_chars: usize,
-) -> Page {
+pub(crate) fn parse_page(html: &str, url: &str, options: &FetchOptions) -> Page {
+    let raw = options.raw;
     let doc = Html::parse_document(html);
     let mut alerts = Vec::new();
 
@@ -331,15 +365,21 @@ pub(crate) fn parse_page(
     }
 
     // Extract content
-    let content_html = if let Some(sel_str) = selector {
-        if let Ok(sel) = Selector::parse(sel_str) {
-            if let Some(el) = doc.select(&sel).next() {
-                el.html()
-            } else {
-                extract_main_content(&doc) // fallback: selector matched nothing
-            }
+    let content_html = if let Some(sel_str) = options.selector.as_deref() {
+        let matched =
+            Selector::parse(sel_str).map(|sel| doc.select(&sel).next().map(|el| el.html()));
+        if let Ok(Some(html)) = matched {
+            html
         } else {
-            extract_main_content(&doc) // fallback: selector failed to parse
+            let why = if matched.is_err() {
+                "is not valid CSS"
+            } else {
+                "matched nothing"
+            };
+            alerts.push(format!(
+                "Selector {sel_str:?} {why}; returned the main content instead"
+            ));
+            extract_main_content(&doc)
         }
     } else if raw {
         html.to_string()
@@ -350,29 +390,39 @@ pub(crate) fn parse_page(
     let content_doc = Html::parse_document(&content_html);
 
     // Extract sections
-    let extracted = content::extract_sections(&content_doc, max_chars, raw);
+    let extracted =
+        content::extract_sections(&content_doc, options.max_chars, options.max_sections, raw);
     let sections = extracted.sections;
     let mut truncated = extracted.truncated;
 
     // Extract links (content only, not nav)
-    let links = if raw {
+    let (links, links_capped) = if raw {
         extract_all_links(&doc, url)
     } else {
         extract_content_links(&content_doc, url)
     };
+    if links_capped {
+        alerts.push(format!("Links limited to the first {MAX_LINKS}"));
+    }
 
     // Extract code blocks
     let (code, code_truncated) = extract_code_blocks(&content_doc);
     truncated |= code_truncated;
     if truncated {
-        alerts.push(truncation_alert(max_chars));
+        alerts.push(truncation_alert(options));
     }
 
-    // Calculate total chars
+    // Calculate total chars (characters, not bytes)
     let chars: usize = sections
         .iter()
-        .map(|s| s.content.len() + s.heading.len())
+        .map(|s| s.content.chars().count() + s.heading.chars().count())
         .sum();
+    if chars == 0 && status == PageStatus::Ok {
+        alerts.push(
+            "No readable content found; try --raw or --selector (the page may render later or block automated browsers)"
+                .to_string(),
+        );
+    }
 
     Page {
         url: url.to_string(),
@@ -392,16 +442,26 @@ pub(crate) fn parse_page(
     }
 }
 
-fn truncation_alert(max_chars: usize) -> String {
-    if max_chars == 0 {
-        format!(
-            "Content truncated: more than {MAX_SECTIONS} sections or {MAX_CODE_BLOCKS} code blocks, or a code block over {MAX_CODE_CHARS} characters"
-        )
-    } else {
-        format!(
-            "Content truncated: sections are limited to {max_chars} characters (use --max-chars 0 for full text)"
-        )
+fn truncation_alert(options: &FetchOptions) -> String {
+    let mut limits = Vec::new();
+    if options.max_chars > 0 {
+        limits.push(format!("{} characters per section", options.max_chars));
     }
+    if options.max_sections > 0 {
+        limits.push(format!("{} sections", options.max_sections));
+    }
+    limits.push(format!(
+        "{MAX_CODE_BLOCKS} code blocks of up to {MAX_CODE_CHARS} characters"
+    ));
+    format!(
+        "Content truncated: limits are {}. Use --max-chars 0 --max-sections 0 for full text",
+        limits.join(", ")
+    )
+}
+
+/// Page title from `<title>`, `og:title` or the first `<h1>`
+pub(crate) fn page_title(doc: &Html) -> Option<String> {
+    extract_title(doc)
 }
 
 fn extract_title(doc: &Html) -> Option<String> {
@@ -444,7 +504,7 @@ fn detect_status(html: &str) -> PageStatus {
     }
 }
 
-fn extract_main_content(doc: &Html) -> String {
+pub(crate) fn extract_main_content(doc: &Html) -> String {
     // Priority: main > article > [role=main] > body
     let selectors = [
         "main",
@@ -476,7 +536,8 @@ fn extract_main_content(doc: &Html) -> String {
     doc.html()
 }
 
-fn extract_content_links(doc: &Html, base_url: &str) -> Vec<Link> {
+/// Content links, deduplicated; the flag is true when more than [`MAX_LINKS`] were found
+fn extract_content_links(doc: &Html, base_url: &str) -> (Vec<Link>, bool) {
     let mut links = Vec::new();
     let mut seen = HashSet::new();
     let base = Url::parse(base_url).ok();
@@ -510,21 +571,20 @@ fn extract_content_links(doc: &Html, base_url: &str) -> Vec<Link> {
             }
             seen.insert(full_url.clone());
 
+            if links.len() == MAX_LINKS {
+                return (links, true);
+            }
             links.push(Link {
                 text: truncate(&text, 100),
                 url: full_url,
             });
-
-            if links.len() >= 50 {
-                break;
-            }
         }
     }
 
-    links
+    (links, false)
 }
 
-fn extract_all_links(doc: &Html, base_url: &str) -> Vec<Link> {
+fn extract_all_links(doc: &Html, base_url: &str) -> (Vec<Link>, bool) {
     // In raw mode, extract all links
     extract_content_links(doc, base_url)
 }
@@ -617,7 +677,7 @@ mod tests {
             </body>
             </html>
         ";
-        let page = parse_page(html, "https://test.com", false, None, DEFAULT_MAX_CHARS);
+        let page = parse_page(html, "https://test.com", &FetchOptions::default());
         assert_eq!(page.status, PageStatus::Ok);
         assert_eq!(page.title, Some("Test Page".to_string()));
         assert_ne!(page.sections, Vec::<Section>::new());
@@ -627,9 +687,7 @@ mod tests {
         parse_page(
             "<html><body><main><h1>Title</h1><p>Body text long enough.</p></main></body></html>",
             "https://test.com",
-            false,
-            None,
-            DEFAULT_MAX_CHARS,
+            &FetchOptions::default(),
         )
     }
 
@@ -661,10 +719,8 @@ mod tests {
         let page = parse_page(
             "<html><head><title>Fortune 500 Companies</title></head><body><p>Ranked list of companies.</p></body></html>",
             "https://test.com",
-            false,
-            None,
-            DEFAULT_MAX_CHARS,
-        );
+            &FetchOptions::default(),
+    );
         assert_eq!(page.status, PageStatus::Ok);
     }
 
@@ -715,7 +771,7 @@ mod tests {
                 <p>Content under beta, also long enough to be meaningful.</p>
             </body></html>
         ";
-        let page = parse_page(html, "https://test.com", false, None, DEFAULT_MAX_CHARS);
+        let page = parse_page(html, "https://test.com", &FetchOptions::default());
         assert!(!page.sections.is_empty(), "should have sections");
         // Find Alpha section
         let alpha = page.sections.iter().find(|s| s.heading == "Alpha");
@@ -765,9 +821,10 @@ mod tests {
         let page = parse_page(
             html,
             "https://test.com",
-            false,
-            Some("#target"),
-            DEFAULT_MAX_CHARS,
+            &FetchOptions {
+                selector: Some("#target".into()),
+                ..FetchOptions::default()
+            },
         );
         assert_ne!(page.sections, Vec::<Section>::new());
         let has_targeted = page
@@ -793,9 +850,10 @@ mod tests {
         let page = parse_page(
             html,
             "https://test.com",
-            false,
-            Some(".nonexistent-class"),
-            DEFAULT_MAX_CHARS,
+            &FetchOptions {
+                selector: Some(".nonexistent-class".into()),
+                ..FetchOptions::default()
+            },
         );
         assert!(
             !page.sections.is_empty(),

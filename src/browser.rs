@@ -62,6 +62,38 @@ fn detect_chrome_path() -> Option<PathBuf> {
     None
 }
 
+/// Profile folders of pools that are still open, so an interrupted run can
+/// remove them (see [`remove_open_profiles`]).
+static OPEN_PROFILES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+fn track_profile(dir: &Path, open: bool) {
+    if let Ok(mut dirs) = OPEN_PROFILES.lock() {
+        dirs.retain(|d| d != dir);
+        if open {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+}
+
+/// Remove the temporary Chrome profiles of pools that were not closed.
+/// Called when ref is interrupted (Ctrl-C or SIGTERM).
+pub fn remove_open_profiles() {
+    if let Ok(mut dirs) = OPEN_PROFILES.lock() {
+        if dirs.is_empty() {
+            return;
+        }
+        // A killed Chrome can still write to its profile for a moment
+        // while it exits, so remove, wait, and remove again.
+        for _ in 0..3 {
+            for dir in dirs.iter() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        dirs.retain(|d| d.exists());
+    }
+}
+
 /// Set to `1` or `true` to start Chrome without its sandbox
 /// (needed in some containers; ref also falls back automatically).
 pub const NO_SANDBOX_ENV: &str = "REF_CHROME_NO_SANDBOX";
@@ -97,6 +129,7 @@ impl BrowserPool {
         })?;
 
         let profile_dir = unique_profile_dir();
+        track_profile(&profile_dir, true);
         let sandbox = want_sandbox(
             std::env::var(NO_SANDBOX_ENV).ok().as_deref(),
             running_as_root(),
@@ -113,6 +146,7 @@ impl BrowserPool {
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&profile_dir);
+                track_profile(&profile_dir, false);
                 return Err(e);
             }
         };
@@ -166,7 +200,7 @@ impl BrowserPool {
 
         Ok(BrowserPage {
             page,
-            _permit: permit,
+            permit: Some(permit),
         })
     }
 
@@ -178,6 +212,7 @@ impl BrowserPool {
         let closed = self.browser.close().await;
         let _ = self.browser.wait().await;
         let _ = std::fs::remove_dir_all(&self.profile_dir);
+        track_profile(&self.profile_dir, false);
         closed?;
         Ok(())
     }
@@ -185,24 +220,57 @@ impl BrowserPool {
 
 impl Drop for BrowserPool {
     fn drop(&mut self) {
-        // Chrome is killed on drop by chromiumoxide; remove what we can of the profile.
+        // Chrome is killed on drop by chromiumoxide but may still write to the
+        // profile while it exits; the folder stays tracked so the final
+        // `remove_open_profiles` call in main removes it after that.
         let _ = std::fs::remove_dir_all(&self.profile_dir);
     }
 }
 
+/// Extra Chrome switches, without the leading `--`.
+///
+/// Most keep Chrome from calling Google (component updates, sync, sign-in,
+/// safe browsing, metrics, field trials) while it renders pages for ref.
+/// `disable-features` repeats chromiumoxide's own list because Chrome keeps
+/// only the last value of a repeated switch.
+const CHROME_FLAGS: [&str; 22] = [
+    "headless=new",
+    "disable-gpu",
+    "disable-dev-shm-usage",
+    "no-first-run",
+    "no-default-browser-check",
+    "disable-background-networking",
+    "disable-component-update",
+    "disable-sync",
+    "disable-default-apps",
+    "disable-extensions",
+    "disable-component-extensions-with-background-pages",
+    "disable-domain-reliability",
+    "disable-client-side-phishing-detection",
+    "disable-breakpad",
+    "disable-field-trial-config",
+    "metrics-recording-only",
+    "no-pings",
+    "no-service-autorun",
+    "password-store=basic",
+    "use-mock-keychain",
+    "safebrowsing-disable-auto-update",
+    "disable-features=TranslateUI,WebUIOmniboxPopup,WebUIOmniboxAimPopup,WebUIReloadButton,\
+     AimEnabled,AutofillServerCommunication,NetworkTimeServiceQuerying,PreconnectToSearch,\
+     OptimizationHints,OptimizationGuideModelDownloading,MediaRouter,DialMediaRouteProvider,\
+     Translate,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,\
+     AccountConsistency,GlobalMediaControls,SafeBrowsingEnhancedProtection",
+];
+
 async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result<Browser> {
+    // chromiumoxide adds the leading "--" itself, so flags are written without it
+    // (written with it, Chrome receives "----flag" and silently ignores it).
     let mut builder = BrowserConfig::builder()
         .chrome_executable(chrome_path)
-        .user_data_dir(profile_dir)
-        .arg("--disable-gpu")
-        .arg("--disable-dev-shm-usage")
-        .arg("--no-first-run")
-        // No calls home to Google (updates, sync, sign-in) from a scraping browser
-        .arg("--disable-background-networking")
-        .arg("--disable-component-update")
-        .arg("--disable-sync")
-        .arg("--disable-default-apps")
-        .arg("--headless=new");
+        .user_data_dir(profile_dir);
+    for flag in CHROME_FLAGS {
+        builder = builder.arg(flag);
+    }
     if !sandbox {
         builder = builder.no_sandbox();
     }
@@ -283,10 +351,24 @@ fn to_cookie_param(c: &Cookie) -> Option<CookieParam> {
     b.build().ok()
 }
 
-/// A browser page with automatic permit release
+/// A browser tab. Dropping it closes the tab and then frees its slot in the pool,
+/// so a long-running MCP server does not pile up open tabs.
 pub struct BrowserPage {
     page: Page,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl Drop for BrowserPage {
+    fn drop(&mut self) {
+        let page = self.page.clone();
+        let permit = self.permit.take();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = page.close().await;
+                drop(permit);
+            });
+        }
+    }
 }
 
 impl BrowserPage {
@@ -332,25 +414,31 @@ impl BrowserPage {
                         documents.push(DocumentResponse {
                             frame: event.frame_id.as_ref().map(|f| f.inner().clone()),
                             status: event.response.status,
+                            mime: event.response.mime_type.clone(),
                         });
                     }
                 }
                 let main_frame = main_frame.as_ref().map(|f| f.inner().as_str());
-                let status = main_document_status(&documents, main_frame);
+                let main = main_document(&documents, main_frame);
+                let status = main.and_then(|d| u16::try_from(d.status).ok());
+                let mime = main.map(|d| d.mime.to_ascii_lowercase());
                 let title = self.page.get_title().await.ok().flatten();
                 Ok(PageResult {
                     status,
+                    mime,
                     title,
                     error: None,
                 })
             }
             Ok(Err(e)) => Ok(PageResult {
                 status: None,
+                mime: None,
                 title: None,
                 error: Some(describe_error(&e.to_string())),
             }),
             Err(_) => Ok(PageResult {
                 status: None,
+                mime: None,
                 title: None,
                 error: Some("Navigation timeout".to_string()),
             }),
@@ -413,18 +501,19 @@ enum WaitResult {
 struct DocumentResponse {
     frame: Option<String>,
     status: i64,
+    mime: String,
 }
 
-/// Pick the HTTP status of the main document.
-///
-/// Prefers the response for the main frame; falls back to the first document
-/// response (iframes load after the main document).
-/// Returns `None` when Chrome reported no HTTP response (for example `data:` URLs).
-fn main_document_status(documents: &[DocumentResponse], main_frame: Option<&str>) -> Option<u16> {
-    let main = main_frame
+/// The main frame's document response, or the first one seen
+/// (iframes load after the main document).
+/// `None` when Chrome reported no HTTP response (for example `data:` URLs).
+fn main_document<'a>(
+    documents: &'a [DocumentResponse],
+    main_frame: Option<&str>,
+) -> Option<&'a DocumentResponse> {
+    main_frame
         .and_then(|id| documents.iter().find(|d| d.frame.as_deref() == Some(id)))
-        .or_else(|| documents.first())?;
-    u16::try_from(main.status).ok()
+        .or_else(|| documents.first())
 }
 
 /// Result of a page navigation
@@ -432,6 +521,8 @@ fn main_document_status(documents: &[DocumentResponse], main_frame: Option<&str>
 pub struct PageResult {
     /// HTTP status of the main document, when Chrome reported one
     pub status: Option<u16>,
+    /// MIME type of the main document (lowercase), e.g. `text/html`, `application/pdf`
+    pub mime: Option<String>,
     pub title: Option<String>,
     pub error: Option<String>,
 }
@@ -465,10 +556,15 @@ mod tests {
         assert!(describe_error("random error").ends_with("random error"));
     }
 
+    fn main_document_status(docs: &[DocumentResponse], main_frame: Option<&str>) -> Option<u16> {
+        main_document(docs, main_frame).and_then(|d| u16::try_from(d.status).ok())
+    }
+
     fn doc(frame: Option<&str>, status: i64) -> DocumentResponse {
         DocumentResponse {
             frame: frame.map(String::from),
             status,
+            mime: "text/html".to_string(),
         }
     }
 
@@ -499,6 +595,14 @@ mod tests {
         // On CI without Chrome, this may be None - that's fine
         if let Some(path) = result {
             assert!(path.exists());
+        }
+    }
+
+    #[test]
+    fn test_chrome_flags_have_no_leading_dashes() {
+        for flag in CHROME_FLAGS {
+            assert!(!flag.starts_with('-'), "{flag}");
+            assert!(!flag.contains(' '), "{flag}");
         }
     }
 
