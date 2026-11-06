@@ -6,32 +6,14 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
-mod access;
-mod browser;
-mod check_links;
-mod content;
-mod cookies;
-mod extract;
-mod fetch;
-mod guard;
-mod init;
-mod mcp;
-mod pdf;
-mod refresh_data;
-mod scan;
-mod schema;
-mod text;
-mod update;
-mod verify_refs;
-
-use check_links::{run_check_links, CheckLinksArgs};
-use fetch::{run_fetch, FetchArgs};
-use init::{run_init, InitArgs};
-use pdf::{run_pdf, PdfArgs};
-use refresh_data::{run_refresh_data, RefreshDataArgs};
-use scan::{run_scan, ScanArgs};
-use update::{run_update, UpdateArgs};
-use verify_refs::{run_verify_refs, VerifyRefsArgs};
+use mollendorff_ref::check_links::{run_check_links, CheckLinksArgs};
+use mollendorff_ref::fetch::{run_fetch, FetchArgs};
+use mollendorff_ref::init::{run_init, InitArgs};
+use mollendorff_ref::pdf::{run_pdf, PdfArgs};
+use mollendorff_ref::refresh_data::{run_refresh_data, RefreshDataArgs};
+use mollendorff_ref::scan::{run_scan, ScanArgs};
+use mollendorff_ref::update::{run_update, UpdateArgs};
+use mollendorff_ref::verify_refs::{run_verify_refs, VerifyRefsArgs};
 
 #[derive(Parser)]
 #[command(name = "ref")]
@@ -83,7 +65,7 @@ async fn main() -> ExitCode {
         Commands::RefreshData(args) => run_refresh_data(args).await.map(|()| true),
         Commands::VerifyRefs(args) => run_verify_refs(args).await,
         Commands::Update(args) => run_update(args).await.map(|()| true),
-        Commands::Mcp => mcp::run_mcp().await.map(|()| true),
+        Commands::Mcp => mollendorff_ref::mcp::run_mcp().await.map(|()| true),
     };
 
     match result {

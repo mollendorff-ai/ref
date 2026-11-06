@@ -15,8 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (same pinned version as CI lint)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      # A release must pass the same gates as main
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (pedantic, all targets)
+        run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
 
       - name: Run unit tests
         run: cargo test
