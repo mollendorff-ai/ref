@@ -38,6 +38,24 @@ fn handle(mut stream: TcpStream) {
         line.clear();
     }
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+    if path == "/whoami" {
+        let cookie = headers
+            .lines()
+            .find_map(|l| l.strip_prefix("cookie:"))
+            .unwrap_or(" none")
+            .trim()
+            .to_string();
+        let body = format!(
+            "<html><head><title>Who</title></head><body><p>Cookie header: {cookie}</p></body></html>"
+        );
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body.as_bytes());
+        return;
+    }
     if path == "/signed-in.pdf" {
         // Only for readers who send the session cookie, like a members-only PDF
         let pdf: &[u8] = include_bytes!("fixtures/signed-in.pdf");
@@ -66,6 +84,7 @@ fn handle(mut stream: TcpStream) {
     let _ = stream.write_all(body.as_bytes());
 }
 
+#[allow(clippy::too_many_lines)] // one flat table of test pages
 fn route(path: &str) -> (&'static str, String, String) {
     let page = |title: &str, body: &str| {
         format!(
@@ -160,6 +179,11 @@ fn route(path: &str) -> (&'static str, String, String) {
                 ),
             )
         }
+        "/sign-in" => (
+            "200 OK",
+            "Set-Cookie: session=kept-between-runs; Max-Age=3600; Path=/\r\n".to_string(),
+            page("Signed in", "<p>You are now signed in to this test site.</p>"),
+        ),
         "/moved" => ("301 Moved Permanently", "Location: /report\r\n".to_string(), String::new()),
         "/broken" => ("500 Internal Server Error", String::new(), page("Oops", "<p>Server error page.</p>")),
         _ => ("404 Not Found", String::new(), page("Not found", "<p>Nothing here.</p>")),
@@ -168,7 +192,13 @@ fn route(path: &str) -> (&'static str, String, String) {
 
 /// Run `ref fetch` with extra args and return (exit code, parsed JSON)
 fn fetch(args: &[&str]) -> (i32, Value) {
+    fetch_with_profile("fresh", args)
+}
+
+/// Same, with `REF_CHROME_PROFILE` set to `profile`
+fn fetch_with_profile(profile: &str, args: &[&str]) -> (i32, Value) {
     let output = cargo_bin_cmd!("ref")
+        .env("REF_CHROME_PROFILE", profile)
         .arg("fetch")
         .args(args)
         .timeout(std::time::Duration::from_mins(1))
@@ -412,4 +442,47 @@ fn scan_refuses_to_overwrite_other_files() {
         std::fs::read_to_string(dir.path().join("main.rs")).expect("read"),
         "fn main() {}"
     );
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn saved_profile_keeps_sign_ins_between_runs() {
+    let base = serve();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profile = dir.path().join("profile");
+    let profile = profile.to_str().expect("path");
+
+    let (_, signed_in) = fetch_with_profile(profile, &[&format!("{base}/sign-in")]);
+    assert_eq!(signed_in["status"], "ok", "{signed_in}");
+
+    let (_, later) = fetch_with_profile(profile, &[&format!("{base}/whoami")]);
+    assert!(
+        all_content(&later).contains("session=kept-between-runs"),
+        "{later}"
+    );
+    assert!(
+        std::path::Path::new(profile).is_dir(),
+        "saved profile was deleted"
+    );
+
+    let (_, fresh) = fetch(&[&format!("{base}/whoami")]);
+    assert!(
+        all_content(&fresh).contains("Cookie header: none"),
+        "{fresh}"
+    );
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn everyday_chrome_profile_is_refused_with_advice() {
+    let home = std::env::var("HOME").expect("HOME");
+    let everyday = format!("{home}/.config/google-chrome");
+    let output = cargo_bin_cmd!("ref")
+        .env("REF_CHROME_PROFILE", &everyday)
+        .args(["fetch", "http://127.0.0.1:9/"])
+        .output()
+        .expect("run ref");
+    assert_eq!(output.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("ref login"), "{err}");
 }
