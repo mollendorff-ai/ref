@@ -2,14 +2,17 @@
 //!
 //! v1.2.0: Added `networkIdle` wait for SPA support (ADR-002)
 
+use crate::cookies::Cookie;
 use anyhow::{Context, Result};
-use chromiumoxide::cdp::browser_protocol::network::{EventResponseReceived, ResourceType};
+use chromiumoxide::cdp::browser_protocol::network::{
+    CookieParam, EventResponseReceived, ResourceType, SetCookiesParams, TimeSinceEpoch,
+};
 use chromiumoxide::cdp::browser_protocol::page::{
     EventLifecycleEvent, SetLifecycleEventsEnabledParams,
 };
 use chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::{FutureExt, StreamExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -59,15 +62,26 @@ fn detect_chrome_path() -> Option<PathBuf> {
     None
 }
 
+/// Set to `1` or `true` to start Chrome without its sandbox
+/// (needed in some containers; ref also falls back automatically).
+pub const NO_SANDBOX_ENV: &str = "REF_CHROME_NO_SANDBOX";
+
 /// Browser pool configuration
 pub struct BrowserPool {
     browser: Browser,
     semaphore: Arc<Semaphore>,
     user_agent: String,
+    profile_dir: PathBuf,
+    cookies: Vec<CookieParam>,
 }
 
 impl BrowserPool {
     /// Create a new browser pool with concurrency limit
+    ///
+    /// Each pool gets its own Chrome profile folder, removed on [`close`](Self::close),
+    /// so two ref processes never share or lock one profile.
+    /// Chrome's sandbox is on unless ref runs as root, [`NO_SANDBOX_ENV`] is set,
+    /// or Chrome cannot start with it (then ref retries once without it and says so).
     ///
     /// # Errors
     /// Returns an error if Chrome/Chromium is not found or fails to launch.
@@ -82,29 +96,45 @@ impl BrowserPool {
             )
         })?;
 
-        let config = BrowserConfig::builder()
-            .chrome_executable(chrome_path)
-            .no_sandbox()
-            .arg("--disable-gpu")
-            .arg("--disable-dev-shm-usage")
-            .arg("--disable-setuid-sandbox")
-            .arg("--no-first-run")
-            .arg("--headless=new")
-            .build()
-            .map_err(|e| anyhow::anyhow!("Browser config error: {e}"))?;
+        let profile_dir = unique_profile_dir();
+        let sandbox = want_sandbox(
+            std::env::var(NO_SANDBOX_ENV).ok().as_deref(),
+            running_as_root(),
+        );
 
-        let (browser, mut handler) = Browser::launch(config)
+        let browser = match launch(&chrome_path, &profile_dir, sandbox).await {
+            Ok(b) => b,
+            Err(e) if sandbox => {
+                eprintln!(
+                    "Warning: Chrome did not start with its sandbox ({e:#}); retrying without it. \
+                     Set {NO_SANDBOX_ENV}=1 to skip this attempt."
+                );
+                launch(&chrome_path, &profile_dir, false).await?
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&profile_dir);
+                return Err(e);
+            }
+        };
+
+        let chrome_ua = browser
+            .version()
             .await
-            .context("Failed to launch Chrome")?;
-
-        // Spawn handler in background
-        tokio::spawn(async move { while handler.next().await.is_some() {} });
+            .map(|v| v.user_agent)
+            .unwrap_or_default();
 
         Ok(Self {
             browser,
             semaphore: Arc::new(Semaphore::new(concurrency)),
-            user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string(),
+            user_agent: honest_user_agent(&chrome_ua),
+            profile_dir,
+            cookies: Vec::new(),
         })
+    }
+
+    /// Send these cookies with every page opened from now on.
+    pub fn set_cookies(&mut self, cookies: &[Cookie]) {
+        self.cookies = cookies.iter().filter_map(to_cookie_param).collect();
     }
 
     /// Get a new page with resource blocking
@@ -123,6 +153,13 @@ impl BrowserPool {
         )
         .await?;
 
+        if !self.cookies.is_empty() {
+            // Raw CDP call: chromiumoxide's helper refuses to run on about:blank
+            page.execute(SetCookiesParams::new(self.cookies.clone()))
+                .await
+                .context("Failed to set cookies")?;
+        }
+
         // Enable lifecycle events for networkIdle detection
         page.execute(SetLifecycleEventsEnabledParams::new(true))
             .await?;
@@ -133,14 +170,119 @@ impl BrowserPool {
         })
     }
 
-    /// Close the browser
+    /// Close the browser and remove its profile folder
     ///
     /// # Errors
     /// Returns an error if the browser fails to close cleanly.
     pub async fn close(mut self) -> Result<()> {
-        self.browser.close().await?;
+        let closed = self.browser.close().await;
+        let _ = self.browser.wait().await;
+        let _ = std::fs::remove_dir_all(&self.profile_dir);
+        closed?;
         Ok(())
     }
+}
+
+impl Drop for BrowserPool {
+    fn drop(&mut self) {
+        // Chrome is killed on drop by chromiumoxide; remove what we can of the profile.
+        let _ = std::fs::remove_dir_all(&self.profile_dir);
+    }
+}
+
+async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result<Browser> {
+    let mut builder = BrowserConfig::builder()
+        .chrome_executable(chrome_path)
+        .user_data_dir(profile_dir)
+        .arg("--disable-gpu")
+        .arg("--disable-dev-shm-usage")
+        .arg("--no-first-run")
+        // No calls home to Google (updates, sync, sign-in) from a scraping browser
+        .arg("--disable-background-networking")
+        .arg("--disable-component-update")
+        .arg("--disable-sync")
+        .arg("--disable-default-apps")
+        .arg("--headless=new");
+    if !sandbox {
+        builder = builder.no_sandbox();
+    }
+    let config = builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("Browser config error: {e}"))?;
+
+    let (browser, mut handler) = Browser::launch(config)
+        .await
+        .context("Failed to launch Chrome")?;
+
+    // Spawn handler in background
+    tokio::spawn(async move { while handler.next().await.is_some() {} });
+    Ok(browser)
+}
+
+/// A profile folder unique to this process and pool
+fn unique_profile_dir() -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    std::env::temp_dir().join(format!("ref-chrome-{}-{nanos}", std::process::id()))
+}
+
+/// Chrome refuses its sandbox as root; users can also opt out explicitly.
+fn want_sandbox(env_value: Option<&str>, root: bool) -> bool {
+    let opted_out = env_value.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    !opted_out && !root
+}
+
+#[cfg(target_os = "linux")]
+fn running_as_root() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .is_some_and(|s| uid_is_root(&s))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_as_root() -> bool {
+    false
+}
+
+/// Parse the `Uid:` line of `/proc/self/status` (real, effective, ...).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn uid_is_root(status: &str) -> bool {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        == Some("0")
+}
+
+/// Chrome's own user agent, without the "Headless" marker hidden and with
+/// ref identifying itself, so sites see a real browser version and who is asking.
+fn honest_user_agent(chrome_ua: &str) -> String {
+    let base = if chrome_ua.is_empty() {
+        "Mozilla/5.0 (compatible)".to_string()
+    } else {
+        chrome_ua.replace("HeadlessChrome", "Chrome")
+    };
+    format!(
+        "{base} mollendorff-ref/{} (+https://github.com/mollendorff-ai/ref)",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn to_cookie_param(c: &Cookie) -> Option<CookieParam> {
+    let mut b = CookieParam::builder()
+        .name(c.name.clone())
+        .value(c.value.clone())
+        .domain(c.domain.clone())
+        .path(c.path.clone())
+        .secure(c.secure)
+        .http_only(c.http_only);
+    if let Some(exp) = c.expires {
+        #[allow(clippy::cast_precision_loss)]
+        let exp = exp as f64;
+        b = b.expires(TimeSinceEpoch::new(exp));
+    }
+    b.build().ok()
 }
 
 /// A browser page with automatic permit release
@@ -360,6 +502,60 @@ mod tests {
         if let Some(path) = result {
             assert!(path.exists());
         }
+    }
+
+    #[test]
+    fn test_want_sandbox() {
+        assert!(want_sandbox(None, false));
+        assert!(!want_sandbox(None, true));
+        assert!(!want_sandbox(Some("1"), false));
+        assert!(!want_sandbox(Some("TRUE"), false));
+        assert!(want_sandbox(Some("0"), false));
+    }
+
+    #[test]
+    fn test_uid_is_root() {
+        assert!(uid_is_root("Name:\tref\nUid:\t1000\t0\t0\t0\n"));
+        assert!(!uid_is_root("Uid:\t1000\t1000\t1000\t1000\n"));
+        assert!(!uid_is_root("Name:\tref\n"));
+    }
+
+    #[test]
+    fn test_honest_user_agent() {
+        let ua = honest_user_agent(
+            "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/142.0.0.0 Safari/537.36",
+        );
+        assert!(ua.contains(" Chrome/142.0.0.0 "));
+        assert!(!ua.contains("Headless"));
+        assert!(ua.contains("mollendorff-ref/"));
+        assert!(honest_user_agent("").starts_with("Mozilla/5.0 (compatible) mollendorff-ref/"));
+    }
+
+    #[test]
+    fn test_unique_profile_dirs() {
+        let a = unique_profile_dir();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert_ne!(a, unique_profile_dir());
+        assert!(a.starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn test_to_cookie_param() {
+        let c = Cookie {
+            domain: ".example.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: true,
+            expires: Some(1_893_456_000),
+            name: "sid".into(),
+            value: "abc".into(),
+        };
+        let p = to_cookie_param(&c).unwrap();
+        assert_eq!(p.name, "sid");
+        assert_eq!(p.domain.as_deref(), Some(".example.com"));
+        assert!(p.expires.is_some());
+        let session = Cookie { expires: None, ..c };
+        assert!(to_cookie_param(&session).unwrap().expires.is_none());
     }
 
     #[test]

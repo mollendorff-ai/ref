@@ -678,7 +678,13 @@ pub struct PdfPage {
     pub tables: Vec<Table>,
 }
 
+/// Largest PDF downloaded from a URL (bytes)
+const MAX_PDF_DOWNLOAD: usize = 100 * 1024 * 1024;
+
 pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
+    if let Err(e) = crate::guard::check_web_url(url) {
+        return error_page(url, &e);
+    }
     let bytes = match reqwest::get(url)
         .await
         .and_then(reqwest::Response::error_for_status)
@@ -689,6 +695,12 @@ pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
         },
         Err(e) => return error_page(url, &format!("Download failed: {e}")),
     };
+    if bytes.len() > MAX_PDF_DOWNLOAD {
+        return error_page(
+            url,
+            &format!("PDF is larger than {} MB", MAX_PDF_DOWNLOAD / 1024 / 1024),
+        );
+    }
 
     let temp_path = std::env::temp_dir().join(format!(
         "ref-pdf-{}.pdf",
@@ -717,11 +729,14 @@ pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
     }
 
     // Extract text using pdf-extract
-    let text = match pdf_extract::extract_text(path) {
-        Ok(t) => t,
-        Err(e) => {
+    // pdf-extract can panic on malformed files; keep that from taking down
+    // the whole command or the MCP server.
+    let text = match std::panic::catch_unwind(|| pdf_extract::extract_text(path)) {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
             return error_page(&file_url, &format!("PDF extraction failed: {e}"));
         }
+        Err(_) => return error_page(&file_url, "PDF extraction failed: malformed PDF"),
     };
 
     if text.is_empty() {

@@ -16,7 +16,19 @@ All notable changes to Möllendorff Ref.
 - Navigation, headers, footers, asides and forms are now actually stripped outside the article (the strip step was a no-op). `--raw` keeps them.
 - PDF tables without detected headers now produce valid Markdown (an empty header row plus the `---` separator).
 - MCP `ref_fetch` fetches its URLs concurrently (it ran them one at a time).
+- **`--cookies` works**: the Netscape cookie file is parsed and sent with each page. Before, the option was accepted and ignored.
+- Each run uses its own Chrome profile folder, removed on exit, so two ref processes no longer collide on one shared profile.
+- The user agent is Chrome's own (with "HeadlessChrome" shown as "Chrome") plus `mollendorff-ref/<version>`, instead of a hard-coded 2023 Mac Chrome 120 string.
 - Fixed two `clippy::needless_raw_string_hashes` errors that failed the Lint job on current stable.
+
+### Security
+
+- **Only `http` and `https` URLs** are opened by `fetch`, `check-links`, `verify-refs`, `refresh-data` and PDF downloads. `ref fetch file:///etc/hostname` used to return the file, also through MCP.
+- **MCP file access is limited to the server's working directory**: `ref_pdf`, `ref_scan` (inputs and output), `ref_verify_refs` and `ref_refresh_data` refuse absolute paths, `..` and symlinks that lead outside it. `ref_scan` could write anywhere.
+- **Chrome sandbox on by default**. It is turned off only when running as root, when `REF_CHROME_NO_SANDBOX=1` is set, or when Chrome cannot start with it (ref retries once and prints a warning).
+- **`ref update` verifies the SHA-256** of the download against the release's `checksums.txt` and refuses to install on a mismatch or when the checksum is missing.
+- **PDF parsing upgraded**: `pdf-extract` 0.10 → 0.12, which moves `lopdf` 0.38 → 0.42 (RUSTSEC-2026-0187, stack overflow on deeply nested objects). A panic inside the PDF parser now becomes a `dead` result instead of crashing the process or the MCP server (release builds unwind instead of abort). PDF downloads are capped at 100 MB.
+- Chrome's background traffic to Google (updates, sync) is disabled.
 
 ### Added
 

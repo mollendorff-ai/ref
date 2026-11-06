@@ -8,6 +8,7 @@
 use crate::browser::BrowserPool;
 use crate::check_links::{check_links, CheckLinksConfig};
 use crate::fetch;
+use crate::guard;
 use crate::pdf;
 use crate::refresh_data::{refresh_data, RefreshConfig};
 use crate::scan::{self, ScanArgs};
@@ -50,7 +51,7 @@ pub struct FetchParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PdfParams {
-    /// Local file paths or https:// URLs to PDF files
+    /// PDF file paths inside the working directory, or http(s):// URLs
     pub files: Vec<String>,
 }
 
@@ -68,9 +69,9 @@ pub struct CheckLinksParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ScanParams {
-    /// File paths or glob patterns to scan for URLs
+    /// File paths or glob patterns to scan for URLs (relative, inside the working directory)
     pub files: Vec<String>,
-    /// Output file path (default: references.yaml)
+    /// Output file path inside the working directory (default: references.yaml)
     pub output: Option<String>,
     /// Merge with existing file (default: true)
     pub merge: Option<bool>,
@@ -78,7 +79,7 @@ pub struct ScanParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct VerifyRefsParams {
-    /// Path to references.yaml file
+    /// Path to references.yaml inside the working directory
     pub file: String,
     /// Parallel browser tabs (default: 4)
     pub parallel: Option<usize>,
@@ -127,6 +128,17 @@ impl RefMcpServer {
             .await
             .map_err(|e| ErrorData::internal_error(format!("Browser pool init failed: {e}"), None))
     }
+}
+
+/// MCP tools only touch files inside the directory the server was started in.
+fn workspace_root() -> std::result::Result<PathBuf, ErrorData> {
+    std::env::current_dir()
+        .map_err(|e| ErrorData::internal_error(format!("Working directory unavailable: {e}"), None))
+}
+
+#[allow(clippy::needless_pass_by_value)] // used as map_err callback
+fn invalid(msg: String) -> ErrorData {
+    ErrorData::new(ErrorCode::INVALID_PARAMS, msg, None)
 }
 
 fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
@@ -180,12 +192,14 @@ impl RefMcpServer {
         &self,
         Parameters(params): Parameters<PdfParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        let root = workspace_root()?;
         let mut results = Vec::new();
         for file in &params.files {
             let page = if file.starts_with("http://") || file.starts_with("https://") {
                 pdf::extract_pdf_from_url(file).await
             } else {
-                pdf::extract_pdf(&PathBuf::from(file))
+                let path = guard::check_workspace_path(file, &root).map_err(invalid)?;
+                pdf::extract_pdf(&path)
             };
             results.push(page);
         }
@@ -226,13 +240,16 @@ impl RefMcpServer {
         &self,
         Parameters(params): Parameters<ScanParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        let root = workspace_root()?;
+        for pattern in &params.files {
+            guard::check_workspace_pattern(pattern).map_err(invalid)?;
+        }
+        let output = params
+            .output
+            .unwrap_or_else(|| "references.yaml".to_string());
         let args = ScanArgs {
             files: params.files.into_iter().map(PathBuf::from).collect(),
-            output: PathBuf::from(
-                params
-                    .output
-                    .unwrap_or_else(|| "references.yaml".to_string()),
-            ),
+            output: guard::check_workspace_path(&output, &root).map_err(invalid)?,
             merge: params.merge.unwrap_or(true),
         };
 
@@ -248,8 +265,9 @@ impl RefMcpServer {
         &self,
         Parameters(params): Parameters<VerifyRefsParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
+        let root = workspace_root()?;
         let args = VerifyRefsArgs {
-            file: PathBuf::from(params.file),
+            file: guard::check_workspace_path(&params.file, &root).map_err(invalid)?,
             parallel: params.parallel.unwrap_or(4),
             category: params.category,
             timeout: params.timeout.unwrap_or(30000),
@@ -286,8 +304,9 @@ impl RefMcpServer {
             let ext_type = infer_extractor_type(&url);
             vec![(url, ext_type.to_string())]
         } else {
-            let file = params.file.unwrap();
-            let content = tokio::fs::read_to_string(&file).await.map_err(|e| {
+            let file = params.file.unwrap_or_default();
+            let path = guard::check_workspace_path(&file, &workspace_root()?).map_err(invalid)?;
+            let content = tokio::fs::read_to_string(&path).await.map_err(|e| {
                 ErrorData::internal_error(format!("Failed to read {file}: {e}"), None)
             })?;
             crate::extract::extract_urls(&content)
@@ -490,13 +509,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ref_pdf_refuses_paths_outside_workdir() {
+        let server = RefMcpServer::new();
+        for file in ["/etc/hostname", "../outside.pdf"] {
+            let params = PdfParams {
+                files: vec![file.to_string()],
+            };
+            let err = server.ref_pdf(Parameters(params)).await.unwrap_err();
+            assert!(err.message.contains("working directory"), "{}", err.message);
+        }
+    }
+
+    #[tokio::test]
     async fn test_ref_pdf_tool_call() {
         let server = RefMcpServer::new();
 
         // Call with a non-existent file — should return success with error in JSON body
         // (tool-level errors are returned as JSON in CallToolResult, not MCP errors)
         let params = PdfParams {
-            files: vec!["/tmp/nonexistent_test_file.pdf".to_string()],
+            files: vec!["nonexistent_test_file.pdf".to_string()],
         };
         let result = server.ref_pdf(Parameters(params)).await;
 
