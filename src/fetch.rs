@@ -3,7 +3,9 @@
 //! LLM-optimized output - minimal tokens, maximum signal.
 //! JSON compact output only. No YAML, no pretty printing.
 
+use crate::access::{self, Access};
 use crate::browser::BrowserPool;
+use crate::text::{floor_char_boundary, truncate};
 use anyhow::Result;
 use clap::Args;
 use futures::future::join_all;
@@ -82,6 +84,9 @@ pub struct CodeBlock {
 pub struct Page {
     pub url: String,
     pub status: PageStatus,
+    /// HTTP status code of the main document, when Chrome reported one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,11 +110,13 @@ pub struct Page {
 
 /// Fetch one or more URLs in parallel and print structured JSON to stdout.
 ///
+/// Returns `true` when no page came back dead (4xx, 5xx or unreachable).
+///
 /// # Errors
 ///
 /// Returns an error if the browser pool fails to initialize, pages cannot
 /// be serialized, or the browser cannot be closed cleanly.
-pub async fn run_fetch(args: FetchArgs) -> Result<()> {
+pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
     let url_count = args.urls.len();
     let parallel = args.parallel.min(url_count).max(1);
 
@@ -163,7 +170,8 @@ pub async fn run_fetch(args: FetchArgs) -> Result<()> {
     }
 
     eprintln!("Done: {ok_count}/{url_count} OK");
-    Ok(())
+    let none_dead = results.iter().all(|p| p.status != PageStatus::Dead);
+    Ok(none_dead && results.len() == url_count)
 }
 
 pub(crate) async fn fetch_one(
@@ -194,6 +202,7 @@ pub(crate) async fn fetch_one(
         return Page {
             url: url.to_string(),
             status: PageStatus::Dead,
+            http: None,
             title: nav.title,
             site: None,
             author: None,
@@ -218,6 +227,7 @@ pub(crate) async fn fetch_one(
                     return Page {
                         url: url.to_string(),
                         status: PageStatus::Redirect,
+                        http: nav.status,
                         title: nav.title,
                         site: None,
                         author: None,
@@ -239,13 +249,25 @@ pub(crate) async fn fetch_one(
         Err(e) => return error_page(url, &e.to_string()),
     };
 
-    parse_page(&html, url, raw, selector)
+    let mut parsed = parse_page(&html, url, raw, selector);
+    apply_http_status(&mut parsed, nav.status);
+    parsed
+}
+
+/// Record the HTTP status and mark 4xx and 5xx responses as dead.
+fn apply_http_status(page: &mut Page, http: Option<u16>) {
+    page.http = http;
+    if let Some(code) = http.filter(|c| *c >= 400) {
+        page.status = PageStatus::Dead;
+        page.alerts.insert(0, format!("HTTP {code}"));
+    }
 }
 
 fn error_page(url: &str, error: &str) -> Page {
     Page {
         url: url.to_string(),
         status: PageStatus::Dead,
+        http: None,
         title: None,
         site: None,
         author: None,
@@ -321,6 +343,7 @@ pub(crate) fn parse_page(html: &str, url: &str, raw: bool, selector: Option<&str
     Page {
         url: url.to_string(),
         status,
+        http: None,
         title,
         site,
         author,
@@ -367,42 +390,11 @@ fn extract_doi(doc: &Html) -> Option<String> {
 }
 
 fn detect_status(html: &str) -> PageStatus {
-    let lower = html.to_lowercase();
-
-    // Paywall indicators
-    let paywall_patterns = [
-        "subscribe to continue",
-        "subscription required",
-        "premium content",
-        "paywall",
-        "member-only",
-        "members only",
-        "unlock this article",
-        "purchase to read",
-    ];
-    for pattern in paywall_patterns {
-        if lower.contains(pattern) {
-            return PageStatus::Paywall;
-        }
+    match access::detect(html) {
+        Access::Open => PageStatus::Ok,
+        Access::Paywall => PageStatus::Paywall,
+        Access::Login => PageStatus::Login,
     }
-
-    // Login indicators
-    let login_patterns = [
-        "sign in to continue",
-        "log in to continue",
-        "login to continue",
-        "please sign in",
-        "please log in",
-        "create an account to",
-        "sign up to view",
-    ];
-    for pattern in login_patterns {
-        if lower.contains(pattern) {
-            return PageStatus::Login;
-        }
-    }
-
-    PageStatus::Ok
 }
 
 fn extract_main_content(doc: &Html) -> String {
@@ -646,26 +638,6 @@ fn select_attr(doc: &Html, sel: &str, attr: &str) -> Option<String> {
 }
 
 /// Find the largest valid char boundary <= pos
-fn floor_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut i = pos;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let end = floor_char_boundary(s, max - 3);
-        format!("{}...", &s[..end])
-    }
-}
-
 fn truncate_section(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -702,6 +674,49 @@ mod tests {
         assert_eq!(page.status, PageStatus::Ok);
         assert_eq!(page.title, Some("Test Page".to_string()));
         assert!(!page.sections.is_empty());
+    }
+
+    fn ok_page() -> Page {
+        parse_page(
+            "<html><body><main><h1>Title</h1><p>Body text long enough.</p></main></body></html>",
+            "https://test.com",
+            false,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_http_404_marks_page_dead() {
+        let mut page = ok_page();
+        apply_http_status(&mut page, Some(404));
+        assert_eq!(page.status, PageStatus::Dead);
+        assert_eq!(page.http, Some(404));
+        assert_eq!(page.alerts.first().map(String::as_str), Some("HTTP 404"));
+    }
+
+    #[test]
+    fn test_http_200_keeps_status() {
+        let mut page = ok_page();
+        apply_http_status(&mut page, Some(200));
+        assert_eq!(page.status, PageStatus::Ok);
+        assert_eq!(page.http, Some(200));
+        assert!(page.alerts.is_empty());
+
+        let mut page = ok_page();
+        apply_http_status(&mut page, None);
+        assert_eq!(page.status, PageStatus::Ok);
+        assert_eq!(page.http, None);
+    }
+
+    #[test]
+    fn test_title_with_500_is_not_an_error() {
+        let page = parse_page(
+            "<html><head><title>Fortune 500 Companies</title></head><body><p>Ranked list of companies.</p></body></html>",
+            "https://test.com",
+            false,
+            None,
+        );
+        assert_eq!(page.status, PageStatus::Ok);
     }
 
     #[test]
@@ -743,14 +758,14 @@ mod tests {
 
     #[test]
     fn test_extract_sections_document_order() {
-        let html = r#"
+        let html = r"
             <html><body>
                 <h1>Alpha</h1>
                 <p>Content under alpha, long enough to be meaningful here.</p>
                 <h2>Beta</h2>
                 <p>Content under beta, also long enough to be meaningful.</p>
             </body></html>
-        "#;
+        ";
         let page = parse_page(html, "https://test.com", false, None);
         assert!(!page.sections.is_empty(), "should have sections");
         // Find Alpha section
@@ -812,12 +827,12 @@ mod tests {
 
     #[test]
     fn test_parse_page_selector_fallback() {
-        let html = r#"
+        let html = r"
             <html><body>
                 <h1>Normal Heading</h1>
                 <p>Normal content that is long enough to be meaningful here.</p>
             </body></html>
-        "#;
+        ";
         // Selector that matches nothing — should fall back gracefully
         let page = parse_page(html, "https://test.com", false, Some(".nonexistent-class"));
         assert!(

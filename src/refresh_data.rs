@@ -4,6 +4,7 @@
 
 use crate::browser::BrowserPool;
 use crate::extract::{extract_amounts, extract_percentages, AmountMatch};
+use crate::text::truncate;
 use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
@@ -321,14 +322,6 @@ fn extract_title(content: &str) -> Option<String> {
     // Fall back to <title>
     let title_re = Regex::new(r"<title[^>]*>([^<]+)</title>").unwrap();
     title_re.captures(content).map(|c| c[1].trim().to_string())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max - 3])
-    }
 }
 
 #[cfg(test)]

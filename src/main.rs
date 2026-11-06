@@ -3,9 +3,10 @@
 //! LLM-optimized reference tools with headless Chrome.
 //! Bypasses bot protection (403/999) that blocks curl/wget.
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::process::ExitCode;
 
+mod access;
 mod browser;
 mod check_links;
 mod extract;
@@ -16,6 +17,7 @@ mod pdf;
 mod refresh_data;
 mod scan;
 mod schema;
+mod text;
 mod update;
 mod verify_refs;
 
@@ -63,19 +65,30 @@ enum Commands {
     Mcp,
 }
 
+/// Exit codes: 0 = everything succeeded, 1 = some URLs or files failed,
+/// 2 = the command itself failed (bad arguments, Chrome missing, I/O error).
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Fetch(args) => run_fetch(args).await,
         Commands::Pdf(args) => run_pdf(&args).await,
-        Commands::Init(args) => run_init(args).await,
-        Commands::Scan(args) => run_scan(args).await,
+        Commands::Init(args) => run_init(args).await.map(|()| true),
+        Commands::Scan(args) => run_scan(args).await.map(|()| true),
         Commands::CheckLinks(args) => run_check_links(args).await,
-        Commands::RefreshData(args) => run_refresh_data(args).await,
+        Commands::RefreshData(args) => run_refresh_data(args).await.map(|()| true),
         Commands::VerifyRefs(args) => run_verify_refs(args).await,
-        Commands::Update(args) => run_update(args).await,
-        Commands::Mcp => mcp::run_mcp().await,
+        Commands::Update(args) => run_update(args).await.map(|()| true),
+        Commands::Mcp => mcp::run_mcp().await.map(|()| true),
+    };
+
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            ExitCode::from(2)
+        }
     }
 }

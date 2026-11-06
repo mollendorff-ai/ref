@@ -2,6 +2,22 @@
 
 All notable changes to Möllendorff Ref.
 
+## [Unreleased]
+
+### Fixed
+
+- **Real HTTP status**: `fetch`, `check-links` and `verify-refs` now read the main document's HTTP status from Chrome instead of guessing from the page title. A 404 page was reported as 200, and a page titled "Fortune 500" as 500.
+- `fetch` marks any 4xx or 5xx response as `dead`, adds an `HTTP <code>` alert, and reports the code in a new `http` field.
+- `verify-refs` treats every 4xx as dead (it only caught 404 and 5xx).
+- Paywall and login detection no longer fire on ordinary articles that mention those words. A page is flagged only for structured data (`isAccessibleForFree: false`), a wall overlay element, or wall wording or a password field on a page with little readable text. `fetch` and `verify-refs` now share one detector.
+- `check-links` no longer panics on long non-ASCII URLs (byte slicing inside a character).
+- Fixed two `clippy::needless_raw_string_hashes` errors that failed the Lint job on current stable.
+
+### Changed
+
+- **Exit codes**: 0 when everything succeeded, 1 when any URL or file failed, 2 when the command itself failed. Previously failures exited 0.
+- Navigation errors keep Chrome's message after the short label (for example `DNS_FAILED: net::ERR_NAME_NOT_RESOLVED`).
+
 ## [1.6.0] - 2026-03-07
 
 PDF from URL and targeted extraction with CSS selector.

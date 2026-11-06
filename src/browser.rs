@@ -3,11 +3,12 @@
 //! v1.2.0: Added `networkIdle` wait for SPA support (ADR-002)
 
 use anyhow::{Context, Result};
+use chromiumoxide::cdp::browser_protocol::network::{EventResponseReceived, ResourceType};
 use chromiumoxide::cdp::browser_protocol::page::{
     EventLifecycleEvent, SetLifecycleEventsEnabledParams,
 };
 use chromiumoxide::{Browser, BrowserConfig, Page};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -162,12 +163,17 @@ impl BrowserPage {
     /// # Errors
     /// Returns an error if the lifecycle event subscription fails.
     pub async fn goto(&self, url: &str, timeout_ms: u64) -> Result<PageResult> {
-        // Subscribe to lifecycle events BEFORE navigation
+        // Subscribe to lifecycle and response events BEFORE navigation
         let mut lifecycle = self
             .page
             .event_listener::<EventLifecycleEvent>()
             .await
             .context("Failed to subscribe to lifecycle events")?;
+        let mut responses = self
+            .page
+            .event_listener::<EventResponseReceived>()
+            .await
+            .context("Failed to subscribe to network responses")?;
 
         // Start navigation with overall timeout
         let nav_result =
@@ -179,7 +185,18 @@ impl BrowserPage {
                 // Navigation succeeded, now wait for networkIdle
                 self.wait_for_network_idle(&mut lifecycle).await;
 
-                let status = self.get_status().await;
+                let main_frame = self.page.mainframe().await.ok().flatten();
+                let mut documents = Vec::new();
+                while let Some(Some(event)) = responses.next().now_or_never() {
+                    if event.r#type == ResourceType::Document {
+                        documents.push(DocumentResponse {
+                            frame: event.frame_id.as_ref().map(|f| f.inner().clone()),
+                            status: event.response.status,
+                        });
+                    }
+                }
+                let main_frame = main_frame.as_ref().map(|f| f.inner().as_str());
+                let status = main_document_status(&documents, main_frame);
                 let title = self.page.get_title().await.ok().flatten();
                 Ok(PageResult {
                     status,
@@ -187,16 +204,13 @@ impl BrowserPage {
                     error: None,
                 })
             }
-            Ok(Err(e)) => {
-                let (status, _) = parse_error(&e.to_string());
-                Ok(PageResult {
-                    status,
-                    title: None,
-                    error: Some(e.to_string()),
-                })
-            }
+            Ok(Err(e)) => Ok(PageResult {
+                status: None,
+                title: None,
+                error: Some(describe_error(&e.to_string())),
+            }),
             Err(_) => Ok(PageResult {
-                status: 0,
+                status: None,
                 title: None,
                 error: Some("Navigation timeout".to_string()),
             }),
@@ -232,29 +246,6 @@ impl BrowserPage {
         let _ = wait_result;
     }
 
-    /// Try to get HTTP status from the page (heuristic based on page content)
-    async fn get_status(&self) -> u16 {
-        // chromiumoxide doesn't expose HTTP status directly
-        // We check if page loaded successfully by looking for error pages
-        if let Ok(Some(t)) = self.page.get_title().await {
-            let t_lower = t.to_lowercase();
-            if t_lower.contains("404") || t_lower.contains("not found") {
-                return 404;
-            }
-            if t_lower.contains("403")
-                || t_lower.contains("forbidden")
-                || t_lower.contains("access denied")
-            {
-                return 403;
-            }
-            if t_lower.contains("500") || t_lower.contains("internal server error") {
-                return 500;
-            }
-        }
-        // If we got here, assume success
-        200
-    }
-
     /// Get page content (for data extraction)
     ///
     /// # Errors
@@ -278,26 +269,47 @@ enum WaitResult {
     StreamEnded,
 }
 
+/// A `Document` response seen during navigation
+struct DocumentResponse {
+    frame: Option<String>,
+    status: i64,
+}
+
+/// Pick the HTTP status of the main document.
+///
+/// Prefers the response for the main frame; falls back to the first document
+/// response (iframes load after the main document).
+/// Returns `None` when Chrome reported no HTTP response (for example `data:` URLs).
+fn main_document_status(documents: &[DocumentResponse], main_frame: Option<&str>) -> Option<u16> {
+    let main = main_frame
+        .and_then(|id| documents.iter().find(|d| d.frame.as_deref() == Some(id)))
+        .or_else(|| documents.first())?;
+    u16::try_from(main.status).ok()
+}
+
 /// Result of a page navigation
 #[derive(Debug)]
 pub struct PageResult {
-    pub status: u16,
+    /// HTTP status of the main document, when Chrome reported one
+    pub status: Option<u16>,
     pub title: Option<String>,
     pub error: Option<String>,
 }
 
-fn parse_error(error: &str) -> (u16, String) {
-    if error.contains("ERR_NAME_NOT_RESOLVED") {
-        (0, "DNS_FAILED".to_string())
+/// Turn a Chrome navigation error into a short, stable label plus the raw message.
+fn describe_error(error: &str) -> String {
+    let label = if error.contains("ERR_NAME_NOT_RESOLVED") {
+        "DNS_FAILED"
     } else if error.contains("ERR_CONNECTION_REFUSED") {
-        (0, "CONNECTION_REFUSED".to_string())
-    } else if error.contains("ERR_CONNECTION_TIMED_OUT") {
-        (0, "TIMEOUT".to_string())
+        "CONNECTION_REFUSED"
+    } else if error.contains("ERR_CONNECTION_TIMED_OUT") || error.contains("ERR_TIMED_OUT") {
+        "TIMEOUT"
     } else if error.contains("ERR_CERT") || error.contains("SSL") {
-        (0, "SSL_ERROR".to_string())
+        "SSL_ERROR"
     } else {
-        (0, "NETWORK_ERROR".to_string())
-    }
+        "NETWORK_ERROR"
+    };
+    format!("{label}: {error}")
 }
 
 #[cfg(test)]
@@ -305,13 +317,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_error() {
-        assert_eq!(parse_error("net::ERR_NAME_NOT_RESOLVED").1, "DNS_FAILED");
-        assert_eq!(
-            parse_error("ERR_CONNECTION_REFUSED").1,
-            "CONNECTION_REFUSED"
-        );
-        assert_eq!(parse_error("random error").1, "NETWORK_ERROR");
+    fn test_describe_error() {
+        assert!(describe_error("net::ERR_NAME_NOT_RESOLVED").starts_with("DNS_FAILED: "));
+        assert!(describe_error("ERR_CONNECTION_REFUSED").starts_with("CONNECTION_REFUSED: "));
+        assert!(describe_error("net::ERR_CERT_DATE_INVALID").starts_with("SSL_ERROR: "));
+        assert!(describe_error("random error").starts_with("NETWORK_ERROR: "));
+        assert!(describe_error("random error").ends_with("random error"));
+    }
+
+    fn doc(frame: Option<&str>, status: i64) -> DocumentResponse {
+        DocumentResponse {
+            frame: frame.map(String::from),
+            status,
+        }
+    }
+
+    #[test]
+    fn test_main_document_status_prefers_main_frame() {
+        let docs = [doc(Some("iframe"), 200), doc(Some("main"), 404)];
+        assert_eq!(main_document_status(&docs, Some("main")), Some(404));
+    }
+
+    #[test]
+    fn test_main_document_status_falls_back_to_first() {
+        let docs = [doc(Some("a"), 503), doc(Some("b"), 200)];
+        assert_eq!(main_document_status(&docs, Some("missing")), Some(503));
+        assert_eq!(main_document_status(&docs, None), Some(503));
+    }
+
+    #[test]
+    fn test_main_document_status_none_without_responses() {
+        assert_eq!(main_document_status(&[], Some("main")), None);
+        assert_eq!(main_document_status(&[doc(None, -1)], None), None);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 use crate::browser::BrowserPool;
 use crate::extract::extract_urls;
+use crate::text::truncate;
 use anyhow::{Context, Result};
 use clap::Args;
 use futures::future::join_all;
@@ -70,7 +71,8 @@ pub struct LinkReport {
 /// # Errors
 ///
 /// Returns error if URLs can't be read or the browser pool fails.
-pub async fn run_check_links(args: CheckLinksArgs) -> Result<()> {
+/// Returns `Ok(false)` when any link failed.
+pub async fn run_check_links(args: CheckLinksArgs) -> Result<bool> {
     let urls = get_urls(&args).await?;
 
     if urls.is_empty() {
@@ -97,7 +99,7 @@ pub async fn run_check_links(args: CheckLinksArgs) -> Result<()> {
 
     eprintln!("Done: {}/{} OK", report.ok, report.ok + report.failed);
 
-    Ok(())
+    Ok(report.failed == 0)
 }
 
 /// Get URLs from file, --url, or stdin
@@ -128,7 +130,7 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
     eprintln!("  ref check-links <file.md>    Check URLs in markdown file");
     eprintln!("  ref check-links --url <URL>  Check single URL");
     eprintln!("  ref check-links --stdin      Read URLs from stdin");
-    std::process::exit(1);
+    std::process::exit(2);
 }
 
 /// Check multiple links and generate report.
@@ -202,8 +204,8 @@ async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> 
         }
     };
 
-    // Retry on failure
-    if result.status == 0 && retries > 0 {
+    // Retry on failure (no HTTP response at all)
+    if result.status.is_none() && retries > 0 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         if let Ok(r) = page.goto(url, timeout).await {
             result = r;
@@ -211,7 +213,8 @@ async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> 
     }
 
     // Determine if redirect (check final URL)
-    let redirect_to = if result.status >= 200 && result.status < 400 {
+    let status = result.status.unwrap_or(0);
+    let redirect_to = if (200..400).contains(&status) {
         if let Some(final_url) = page.current_url().await {
             let orig_host = url::Url::parse(url)
                 .ok()
@@ -240,17 +243,9 @@ async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> 
 
     LinkResult {
         url: url.to_string(),
-        status: result.status,
+        status,
         error: result.error,
         redirect_to,
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max - 3])
     }
 }
 
@@ -271,8 +266,9 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate() {
-        assert_eq!(truncate("short", 10), "short");
-        assert_eq!(truncate("this is a very long string", 10), "this is...");
+    fn test_truncate_non_ascii_url() {
+        // Used to panic: byte slicing inside a multi-byte character
+        let url = format!("https://exemple.ca/{}", "é".repeat(40));
+        assert!(truncate(&url, 60).ends_with("..."));
     }
 }

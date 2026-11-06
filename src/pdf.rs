@@ -6,6 +6,7 @@
 //! v1.2.0: Table detection and improved heading detection
 
 use crate::fetch::{CodeBlock, Link, Page, PageStatus, Section};
+use crate::text::truncate;
 use anyhow::Result;
 use clap::Args;
 use regex::Regex;
@@ -30,7 +31,8 @@ fn is_url(path: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error if JSON serialization or network request fails.
-pub async fn run_pdf(args: &PdfArgs) -> Result<()> {
+/// Returns `Ok(false)` when any file could not be read or downloaded.
+pub async fn run_pdf(args: &PdfArgs) -> Result<bool> {
     let file_count = args.files.len();
     eprintln!(
         "Extracting {} PDF{}...",
@@ -65,7 +67,7 @@ pub async fn run_pdf(args: &PdfArgs) -> Result<()> {
     }
 
     eprintln!("Done: {ok_count}/{file_count} OK");
-    Ok(())
+    Ok(results.iter().all(|p| p.base.status != PageStatus::Dead))
 }
 
 // ============================================================================
@@ -746,6 +748,7 @@ pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
         base: Page {
             url: file_url,
             status: PageStatus::Ok,
+            http: None,
             title,
             site: None,
             author: extract_author(&text),
@@ -766,6 +769,7 @@ fn error_page(url: &str, error: &str) -> PdfPage {
         base: Page {
             url: url.to_string(),
             status: PageStatus::Dead,
+            http: None,
             title: None,
             site: None,
             author: None,
@@ -968,14 +972,6 @@ fn detect_language(code: &str) -> Option<String> {
         Some("c".to_string())
     } else {
         None
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max - 3])
     }
 }
 
