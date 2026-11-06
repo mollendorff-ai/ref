@@ -82,12 +82,33 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
         .find(|a| a.name == asset_name)
         .with_context(|| format!("No release found for platform: {target}"))?;
 
+    let checksums = release
+        .assets
+        .iter()
+        .find(|a| a.name == "checksums.txt")
+        .context("Release has no checksums.txt; refusing to install an unverified binary")?;
+
     eprintln!("Downloading {}...", asset.name);
 
-    // Download to temp file
-    let temp_dir = env::temp_dir();
+    // Download into a fresh private folder (not a predictable shared path)
+    let temp_dir = env::temp_dir().join(format!("ref-update-{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).context("Failed to create temp folder")?;
     let archive_path = temp_dir.join(&asset.name);
-    download_file(&asset.browser_download_url, &archive_path).await?;
+    let archive = download_bytes(&asset.browser_download_url).await?;
+    let sums = download_bytes(&checksums.browser_download_url).await?;
+
+    let expected = expected_checksum(&String::from_utf8_lossy(&sums), &asset.name)
+        .with_context(|| format!("checksums.txt has no entry for {}", asset.name))?;
+    let actual = sha256_hex(&archive);
+    if actual != expected {
+        let _ = fs::remove_dir_all(&temp_dir);
+        bail!(
+            "Checksum mismatch for {}: expected {expected}, got {actual}",
+            asset.name
+        );
+    }
+    eprintln!("Checksum verified (SHA-256).");
+    fs::File::create(&archive_path)?.write_all(&archive)?;
 
     // Extract binary
     eprintln!("Extracting...");
@@ -101,8 +122,7 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
     install_binary(&binary_path, &current_exe)?;
 
     // Cleanup
-    let _ = fs::remove_file(&archive_path);
-    let _ = fs::remove_file(&binary_path);
+    let _ = fs::remove_dir_all(&temp_dir);
 
     let output = serde_json::json!({
         "status": "updated",
@@ -142,7 +162,7 @@ async fn fetch_latest_release() -> Result<Release> {
     Ok(release)
 }
 
-async fn download_file(url: &str, path: &Path) -> Result<()> {
+async fn download_bytes(url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::builder()
         .user_agent("ref-update")
         .build()?;
@@ -153,11 +173,28 @@ async fn download_file(url: &str, path: &Path) -> Result<()> {
         bail!("Download failed: {}", response.status());
     }
 
-    let bytes = response.bytes().await?;
-    let mut file = fs::File::create(path)?;
-    file.write_all(&bytes)?;
+    Ok(response.bytes().await?.to_vec())
+}
 
-    Ok(())
+/// Find the hash for `file` in a `sha256sum`-style listing (`<hex>  <name>`).
+fn expected_checksum(listing: &str, file: &str) -> Option<String> {
+    listing.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let name = parts.next()?.trim_start_matches('*');
+        (name == file).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 fn extract_binary(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
@@ -233,6 +270,31 @@ fn get_target_triple() -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_expected_checksum() {
+        let listing = "AABB11  ref-x86_64-unknown-linux-musl.tar.gz\nccdd22 *ref-aarch64-apple-darwin.tar.gz\n\n";
+        assert_eq!(
+            expected_checksum(listing, "ref-x86_64-unknown-linux-musl.tar.gz").as_deref(),
+            Some("aabb11")
+        );
+        assert_eq!(
+            expected_checksum(listing, "ref-aarch64-apple-darwin.tar.gz").as_deref(),
+            Some("ccdd22")
+        );
+        assert_eq!(
+            expected_checksum(listing, "ref-x86_64-pc-windows-msvc.zip"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_sha256_hex() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn test_get_target_triple() {

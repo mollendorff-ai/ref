@@ -193,6 +193,19 @@ async fn extract_from_page(
     ext_type: &str,
     timeout_ms: u64,
 ) -> ExtractedData {
+    if let Err(e) = crate::guard::check_web_url(url) {
+        return ExtractedData {
+            url: url.to_string(),
+            extractor_type: ext_type.to_string(),
+            success: false,
+            title: None,
+            amounts: None,
+            percentages: None,
+            followers: None,
+            username: None,
+            error: Some(e),
+        };
+    }
     let nav_result = page.goto(url, timeout_ms).await;
     if let Err(e) = nav_result {
         return ExtractedData {

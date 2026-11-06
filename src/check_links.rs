@@ -180,6 +180,15 @@ pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<L
 async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> LinkResult {
     eprintln!("  -> {}", truncate(url, 60));
 
+    if let Err(e) = crate::guard::check_web_url(url) {
+        return LinkResult {
+            url: url.to_string(),
+            status: 0,
+            error: Some(e),
+            redirect_to: None,
+        };
+    }
+
     let page = match pool.new_page().await {
         Ok(p) => p,
         Err(e) => {

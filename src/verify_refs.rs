@@ -223,6 +223,12 @@ struct VerifyResult {
 }
 
 async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult {
+    if let Err(e) = crate::guard::check_web_url(url) {
+        return VerifyResult {
+            status: Status::Dead,
+            notes: Some(e),
+        };
+    }
     let page = match pool.new_page().await {
         Ok(p) => p,
         Err(e) => {

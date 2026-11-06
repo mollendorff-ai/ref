@@ -8,7 +8,7 @@ use crate::browser::BrowserPool;
 pub use crate::content::Section;
 use crate::content::{self, MAX_SECTIONS};
 use crate::text::{cut_at_word, truncate};
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use futures::future::join_all;
 use scraper::{Html, Selector};
@@ -129,7 +129,16 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
         parallel
     );
 
-    let pool = Arc::new(BrowserPool::new(parallel).await?);
+    let mut pool = BrowserPool::new(parallel).await?;
+    if let Some(path) = &args.cookies {
+        let text = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("Failed to read cookie file {path}"))?;
+        let cookies = crate::cookies::parse(&text).map_err(|e| anyhow!("{path}: {e}"))?;
+        eprintln!("Loaded {} cookies from {path}", cookies.len());
+        pool.set_cookies(&cookies);
+    }
+    let pool = Arc::new(pool);
     let timeout = args.timeout;
     let raw = args.raw;
     let selector: Option<Arc<str>> = args.selector.map(|s| Arc::from(s.as_str()));
@@ -188,6 +197,10 @@ pub(crate) async fn fetch_one(
     max_chars: usize,
 ) -> Page {
     eprintln!("  -> {}", truncate(url, 60));
+
+    if let Err(e) = crate::guard::check_web_url(url) {
+        return error_page(url, &e);
+    }
 
     let page = match pool.new_page().await {
         Ok(p) => p,
