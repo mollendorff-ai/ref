@@ -140,7 +140,10 @@ impl BrowserPool {
             unique_profile_dir,
         );
         match &chosen {
-            Profile::Saved(dir) => prepare_saved_profile(dir, home.as_deref())?,
+            Profile::Saved(dir) => {
+                prepare_saved_profile(dir, home.as_deref())?;
+                eprintln!("Using saved profile {}", dir.display());
+            }
             Profile::Fresh(dir) => track_profile(dir, true),
         }
         let profile_dir = chosen.path().to_path_buf();

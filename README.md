@@ -19,10 +19,12 @@ LLM agents are bad at getting fresh web content:
 - **Stale training data**: without explicit tooling, models answer from their training corpus, even when a search tool is available.
 - **Raw HTML is noisy**: a fetched page is mostly navigation, scripts and markup, which costs tokens and hides the content.
 - **JavaScript-heavy sites**: many sites return an empty HTML shell and load the content with JavaScript, so a plain HTTP fetch sees nothing.
+- **Sign-ins and human checks**: much of what is worth reading sits behind a login, a subscription or an "I am human" check, which an agent's web tool cannot get past.
 
 ## What ref does
 
 Chrome renders the page and waits for the network to go quiet (so JavaScript-loaded content arrives), then ref keeps the main content and outputs compact JSON.
+With a [saved profile](#signed-in-pages-your-saved-profile), Chrome does this signed in to your sites, with the sessions you set up yourself.
 
 ```
 ┌──────────┐    ┌────────────┐    ┌───────────────┐    ┌──────────┐
@@ -112,23 +114,42 @@ Progress goes to stderr; JSON goes to stdout.
 ## Signed-in pages: your saved profile
 
 Many useful pages sit behind a sign-in, a subscription or an "I am human" check.
-ref can read them with your own sessions:
+ref reads them with your own sessions, which you set up once in a normal Chrome window.
 
-```bash
-ref login https://www.example-news.com https://portal.example.org
-```
+### First time
 
-This opens a normal, visible Chrome window with ref's saved profile (`~/.ref/chrome-profile`).
-Sign in to your sites, accept their cookie banners and pass any checks yourself, then quit Chrome completely (Cmd-Q on a Mac) so it saves everything.
-From then on, every `ref fetch`, `ref pdf` and MCP call runs headless Chrome with that profile and sees those sites as you, signed in.
-Run `ref login` again whenever a session expires.
+1. Run `ref login`, optionally with the sites you want to open:
 
-- The saved profile is separate from your everyday Chrome, which keeps running as usual.
+   ```bash
+   ref login https://www.example-news.com https://portal.example.org
+   ```
+
+   A normal, visible Chrome window opens with ref's saved profile.
+   Without URLs it opens an empty window.
+2. In that window, sign in to your sites, accept their cookie banners and pass any "I am human" checks yourself.
+3. Quit that Chrome completely (Cmd-Q on a Mac, or close every window elsewhere).
+   Chrome writes cookies to disk every few seconds and on quit; quitting makes sure everything is saved and frees the profile for ref.
+4. Use ref as usual. `ref fetch`, `ref pdf` and the MCP tools now run headless Chrome with that profile and see those sites signed in.
+   ref prints `Using saved profile <folder>` on stderr, so you can tell which profile a run used.
+
+### Later
+
+- **A session expired** (a page comes back as `login` or `paywall`, or with much less content than you see in your browser): run `ref login <that site>` again, sign in, quit.
+- **Adding a site**: the same, `ref login <new site>`.
+- **Upgrading from 1.7 or earlier**: older versions kept cookies only by accident, in a temporary folder, so run `ref login` once to set up the saved profile.
+
+### Where it lives and how it behaves
+
+- The saved profile is the folder `.ref/chrome-profile` in your home folder (`~/.ref/chrome-profile` on macOS and Linux, `%USERPROFILE%\.ref\chrome-profile` on Windows).
+  ref uses it automatically once it exists and never deletes it.
+- It is separate from your everyday Chrome, which keeps running as usual.
   ref cannot use your everyday profile: since version 136, Chrome refuses remote control of it to protect its cookies, and ref says so if you point it there.
 - Only one Chrome can use the profile at a time: quit the `ref login` window before fetching, and stop `ref mcp` before running `ref login`.
-- `REF_CHROME_PROFILE=<folder>` uses another saved profile; `REF_CHROME_PROFILE=fresh` runs once with an empty, temporary profile instead.
+  ref says which process holds it if you forget.
+- `REF_CHROME_PROFILE=<folder>` uses another saved profile (for example one per project); `REF_CHROME_PROFILE=fresh` runs with an empty, temporary profile instead, deleted afterwards.
 - With the saved profile, ref sends Chrome's normal user agent, because sessions and human-check passes are often tied to it.
-- Treat the profile folder like a password, and remember that an agent using ref through MCP browses those sites as you.
+- Treat the profile folder like a password: it holds your sessions.
+  An agent using ref through MCP browses those sites as you, so only connect agents you trust.
 
 `ref fetch --cookies cookies.txt` sends cookies from a Netscape-format cookie file instead, for a one-off run.
 Treat that file like a password too.
