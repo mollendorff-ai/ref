@@ -50,6 +50,26 @@ Add to `.vscode/mcp.json`:
 }
 ```
 
+## Signed-in sites
+
+The MCP server uses ref's saved profile (`~/.ref/chrome-profile`) when it exists, so tools see the sites you signed in to with `ref login`.
+Stop the server before running `ref login`, since only one Chrome can use the profile at a time.
+To use another profile, set `REF_CHROME_PROFILE` in the server's environment:
+
+```json
+{
+  "mcpServers": {
+    "ref": {
+      "command": "ref",
+      "args": ["mcp"],
+      "env": { "REF_CHROME_PROFILE": "/Users/me/.ref/work-profile" }
+    }
+  }
+}
+```
+
+An agent using these tools browses those sites as you.
+
 ## Tools
 
 All tools return JSON in `CallToolResult` content.

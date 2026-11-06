@@ -101,6 +101,7 @@ Same JSON structure, plus table detection (whitespace column analysis, header in
 | `ref verify-refs <file>` | Check reference entries, update status |
 | `ref check-links <file>` | Validate URL health (HTTP status codes) |
 | `ref refresh-data --url <url>` | Pull amounts and percentages from a page's main content |
+| `ref login [urls]` | Open Chrome with ref's saved profile to sign in to your sites once |
 | `ref init` | Create references.yaml template |
 | `ref update` | Self-update from GitHub releases (SHA-256 verified) |
 | `ref mcp` | Start MCP server (JSON-RPC 2.0 over stdio) |
@@ -108,8 +109,29 @@ Same JSON structure, plus table detection (whitespace column analysis, header in
 Exit codes: `0` when everything succeeded, `1` when any URL or file failed, `2` when the command itself failed.
 Progress goes to stderr; JSON goes to stdout.
 
-`ref fetch --cookies cookies.txt` sends cookies from a Netscape-format cookie file, for pages you are entitled to see while signed in.
-Treat that file like a password.
+## Signed-in pages: your saved profile
+
+Many useful pages sit behind a sign-in, a subscription or an "I am human" check.
+ref can read them with your own sessions:
+
+```bash
+ref login https://www.example-news.com https://portal.example.org
+```
+
+This opens a normal, visible Chrome window with ref's saved profile (`~/.ref/chrome-profile`).
+Sign in to your sites, accept their cookie banners and pass any checks yourself, then quit Chrome completely (Cmd-Q on a Mac) so it saves everything.
+From then on, every `ref fetch`, `ref pdf` and MCP call runs headless Chrome with that profile and sees those sites as you, signed in.
+Run `ref login` again whenever a session expires.
+
+- The saved profile is separate from your everyday Chrome, which keeps running as usual.
+  ref cannot use your everyday profile: since version 136, Chrome refuses remote control of it to protect its cookies, and ref says so if you point it there.
+- Only one Chrome can use the profile at a time: quit the `ref login` window before fetching, and stop `ref mcp` before running `ref login`.
+- `REF_CHROME_PROFILE=<folder>` uses another saved profile; `REF_CHROME_PROFILE=fresh` runs once with an empty, temporary profile instead.
+- With the saved profile, ref sends Chrome's normal user agent, because sessions and human-check passes are often tied to it.
+- Treat the profile folder like a password, and remember that an agent using ref through MCP browses those sites as you.
+
+`ref fetch --cookies cookies.txt` sends cookies from a Netscape-format cookie file instead, for a one-off run.
+Treat that file like a password too.
 
 ## MCP Server Mode
 
@@ -160,16 +182,17 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 
 - Only `http` and `https` URLs are opened; `file://`, `data:` and other schemes are refused.
 - Chrome runs with its sandbox unless ref runs as root, `REF_CHROME_NO_SANDBOX=1` is set, or Chrome cannot start with it (ref then retries without it and prints a warning).
-- Each run uses its own temporary Chrome profile, deleted afterwards (also after Ctrl-C or SIGTERM).
+- Without a saved profile, each run uses its own temporary Chrome profile, deleted afterwards (also after Ctrl-C or SIGTERM).
   If a run is killed outright (SIGKILL), the next run on Linux stops its leftover Chrome and removes its profile.
+  A saved profile (see above) is never deleted.
 - ref turns off Chrome's optional background services (sync, metrics, safe-browsing updates, translation and others).
   Chrome still makes a few calls of its own to Google, such as component update and account checks, that these switches do not stop; block them at your firewall or proxy if that matters to you.
-- The user agent is Chrome's own plus `mollendorff-ref/<version>`, so sites can see who is asking.
-  ref does not try to defeat bot detection.
+- With a temporary profile, the user agent is Chrome's own plus `mollendorff-ref/<version>`; with your saved profile it is Chrome's own.
+  ref reuses the sessions and checks you completed yourself; it does not solve CAPTCHAs or disguise itself in other ways.
 
 ## Limitations
 
-- **Bot walls and CAPTCHAs**: sites that block automated browsers will block ref too; those pages come back as `dead` or with little content.
+- **Bot walls and CAPTCHAs**: ref does not solve them. With your saved profile, a check you passed in `ref login` usually carries over until it expires; without it, sites that block automated browsers will block ref too, and those pages come back as `dead` or with little content.
 - **Content heuristics**: main-content selection (`main`, `article`, then common class names, then `body`) can miss content on unusual layouts; use `--selector` or `--raw`.
 - **Late rendering**: content that appears only after a timer, with no network activity, can be missed; ref waits for the network to go quiet, not for arbitrary scripts.
   In tests, content added 200 ms after load was kept and content added 2.5 s after load was missed.

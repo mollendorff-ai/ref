@@ -3,6 +3,7 @@
 //! v1.2.0: Added `networkIdle` wait for SPA support (ADR-002)
 
 use crate::cookies::Cookie;
+use crate::profile::{self, Profile};
 use anyhow::{Context, Result};
 use chromiumoxide::browser::BrowserConfigBuilder;
 use chromiumoxide::cdp::browser_protocol::network::{
@@ -22,7 +23,7 @@ use tokio::sync::Semaphore;
 const NETWORK_IDLE_TIMEOUT_MS: u64 = 10000;
 
 /// Auto-detect Chrome/Chromium executable path based on OS
-fn detect_chrome_path() -> Option<PathBuf> {
+pub(crate) fn detect_chrome_path() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     let candidates = [
         "/usr/bin/google-chrome-stable",
@@ -104,7 +105,7 @@ pub struct BrowserPool {
     browser: Browser,
     semaphore: Arc<Semaphore>,
     user_agent: String,
-    profile_dir: PathBuf,
+    profile: Profile,
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
 }
@@ -131,8 +132,18 @@ impl BrowserPool {
         })?;
 
         sweep_orphans();
-        let profile_dir = unique_profile_dir();
-        track_profile(&profile_dir, true);
+        let home = profile::home_dir();
+        let default_saved = profile::default_saved_dir(home.as_deref());
+        let chosen = profile::choose(
+            std::env::var(profile::PROFILE_ENV).ok().as_deref(),
+            default_saved.as_deref(),
+            unique_profile_dir,
+        );
+        match &chosen {
+            Profile::Saved(dir) => prepare_saved_profile(dir, home.as_deref())?,
+            Profile::Fresh(dir) => track_profile(dir, true),
+        }
+        let profile_dir = chosen.path().to_path_buf();
         let sandbox = want_sandbox(
             std::env::var(NO_SANDBOX_ENV).ok().as_deref(),
             running_as_root(),
@@ -148,8 +159,10 @@ impl BrowserPool {
                 launch(&chrome_path, &profile_dir, false).await?
             }
             Err(e) => {
-                let _ = std::fs::remove_dir_all(&profile_dir);
-                track_profile(&profile_dir, false);
+                if !chosen.is_saved() {
+                    let _ = std::fs::remove_dir_all(&profile_dir);
+                    track_profile(&profile_dir, false);
+                }
                 return Err(e);
             }
         };
@@ -160,11 +173,19 @@ impl BrowserPool {
             .map(|v| v.user_agent)
             .unwrap_or_default();
 
+        // With a saved profile, sites see the same browser you signed in with
+        // (sessions and "I am human" passes are often tied to the user agent)
+        let user_agent = if chosen.is_saved() {
+            chrome_ua.replace("HeadlessChrome", "Chrome")
+        } else {
+            honest_user_agent(&chrome_ua)
+        };
+
         Ok(Self {
             browser,
             semaphore: Arc::new(Semaphore::new(concurrency)),
-            user_agent: honest_user_agent(&chrome_ua),
-            profile_dir,
+            user_agent,
+            profile: chosen,
             cookies: Vec::new(),
             cookie_jar: Vec::new(),
         })
@@ -228,8 +249,10 @@ impl BrowserPool {
     pub async fn close(mut self) -> Result<()> {
         let closed = self.browser.close().await;
         let _ = self.browser.wait().await;
-        let _ = std::fs::remove_dir_all(&self.profile_dir);
-        track_profile(&self.profile_dir, false);
+        if let Profile::Fresh(dir) = &self.profile {
+            let _ = std::fs::remove_dir_all(dir);
+            track_profile(dir, false);
+        }
         closed?;
         Ok(())
     }
@@ -240,7 +263,9 @@ impl Drop for BrowserPool {
         // Chrome is killed on drop by chromiumoxide but may still write to the
         // profile while it exits; the folder stays tracked so the final
         // `remove_open_profiles` call in main removes it after that.
-        let _ = std::fs::remove_dir_all(&self.profile_dir);
+        if let Profile::Fresh(dir) = &self.profile {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -332,6 +357,60 @@ async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result
     Ok(browser)
 }
 
+/// Make sure a saved profile can be used: not Chrome's everyday folder (Chrome
+/// 136+ refuses remote control there), created if missing, and not open in
+/// another Chrome.
+///
+/// # Errors
+/// Returns an error explaining what to do instead.
+pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<()> {
+    if profile::is_chrome_default_dir(dir, home) {
+        anyhow::bail!(
+            "{} is your everyday Chrome profile. Chrome (version 136 and later) does not \
+             let tools like ref control that profile, to protect its cookies. Use ref's \
+             own saved profile instead: run `ref login` (without --profile), sign in to \
+             your sites there once, and ref reuses those sessions.",
+            dir.display()
+        );
+    }
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("Cannot create the profile folder {}", dir.display()))?;
+    if let Some(pid) = profile_in_use(dir) {
+        anyhow::bail!(
+            "The profile {} is open in another Chrome (process {pid}). Close that Chrome \
+             window (for example the one `ref login` opened, quitting it fully) and try again.",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// The live process holding Chrome's `SingletonLock` in `dir`, if any
+fn profile_in_use(dir: &Path) -> Option<u32> {
+    let target = std::fs::read_link(dir.join("SingletonLock")).ok()?;
+    let pid = profile::lock_owner_pid(&target.to_string_lossy())?;
+    process_alive(pid).then_some(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
 /// Clean up after ref runs that were killed outright (SIGKILL, power loss):
 /// their Chrome may still be running and their profile is still on disk.
 /// A profile is stale when the ref process named in it no longer exists.
@@ -408,18 +487,18 @@ fn unique_profile_dir() -> PathBuf {
 }
 
 /// Chrome refuses its sandbox as root; users can also opt out explicitly.
-fn want_sandbox(env_value: Option<&str>, root: bool) -> bool {
+pub(crate) fn want_sandbox(env_value: Option<&str>, root: bool) -> bool {
     let opted_out = env_value.is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
     !opted_out && !root
 }
 
 #[cfg(target_os = "linux")]
-fn running_as_root() -> bool {
+pub(crate) fn running_as_root() -> bool {
     std::fs::read_to_string("/proc/self/status").is_ok_and(|s| uid_is_root(&s))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn running_as_root() -> bool {
+pub(crate) fn running_as_root() -> bool {
     false
 }
 

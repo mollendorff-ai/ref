@@ -2,6 +2,18 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.8.0] - 2026-11-06
+
+### Added
+
+- **Saved profile for signed-in sites.** `ref login [urls]` opens a visible Chrome with ref's saved profile (`~/.ref/chrome-profile`); you sign in, accept cookie banners and pass "I am human" checks yourself, and every later `fetch`, `pdf` and MCP call reuses those sessions headless. The profile is never deleted. 1.7.0 made every run start from an empty temporary profile, which lost these sessions.
+- `REF_CHROME_PROFILE=<folder>` selects another saved profile; `REF_CHROME_PROFILE=fresh` forces a temporary one.
+- Clear errors when the profile is open in another Chrome, and when it points at your everyday Chrome profile (Chrome 136 and later refuses remote control of it).
+
+### Changed
+
+- With a saved profile, the user agent is Chrome's own (sessions and human-check passes are often tied to it); temporary profiles keep the `mollendorff-ref/<version>` suffix.
+
 ## [1.7.1] - 2026-11-06
 
 Fixes from a second independent review of 1.7.0.

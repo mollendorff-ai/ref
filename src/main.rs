@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use mollendorff_ref::check_links::{run_check_links, CheckLinksArgs};
 use mollendorff_ref::fetch::{run_fetch, FetchArgs};
 use mollendorff_ref::init::{run_init, InitArgs};
+use mollendorff_ref::login::{run_login, LoginArgs};
 use mollendorff_ref::pdf::{run_pdf, PdfArgs};
 use mollendorff_ref::refresh_data::{run_refresh_data, RefreshDataArgs};
 use mollendorff_ref::scan::{run_scan, ScanArgs};
@@ -44,6 +45,8 @@ enum Commands {
     Pdf(PdfArgs),
     /// Create references.yaml template
     Init(InitArgs),
+    /// Open Chrome with ref's saved profile to sign in to your sites once
+    Login(LoginArgs),
     /// Scan markdown files for URLs, build references.yaml
     Scan(ScanArgs),
     /// Verify references.yaml entries and update status
@@ -83,6 +86,7 @@ async fn run(cli: Cli) -> ExitCode {
             Commands::Fetch(args) => run_fetch(args).await,
             Commands::Pdf(args) => run_pdf(&args).await,
             Commands::Init(args) => run_init(&args).map(|()| true),
+            Commands::Login(args) => run_login(&args).map(|()| true),
             Commands::Scan(args) => run_scan(args).await.map(|()| true),
             Commands::CheckLinks(args) => run_check_links(args).await,
             Commands::RefreshData(args) => run_refresh_data(args).await,
