@@ -465,30 +465,11 @@ fn extract_main_content(doc: &Html) -> String {
         }
     }
 
-    // Fallback: body with nav/header/footer/aside stripped
+    // Fallback: the whole body; page chrome (nav, header, footer, aside,
+    // forms) is skipped later by content::extract_sections
     if let Ok(body_sel) = Selector::parse("body") {
         if let Some(body) = doc.select(&body_sel).next() {
-            let html = body.html();
-            // Remove common non-content elements
-            let strip_patterns = [
-                "<nav",
-                "</nav>",
-                "<header",
-                "</header>",
-                "<footer",
-                "</footer>",
-                "<aside",
-                "</aside>",
-                "cookie",
-                "Cookie",
-            ];
-            for pattern in strip_patterns {
-                if html.contains(pattern) {
-                    // Simple removal - in practice we'd use proper DOM manipulation
-                    // but for now we rely on html2text to handle this
-                }
-            }
-            return html;
+            return body.html();
         }
     }
 
