@@ -25,9 +25,37 @@ pub fn truncate(s: &str, max: usize) -> String {
     format!("{}...", &s[..end])
 }
 
+/// Cut `s` to at most `max` bytes plus `...`, preferring a word boundary
+/// within the last 50 bytes. Never splits a multi-byte character.
+#[must_use]
+pub fn cut_at_word(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let end = floor_char_boundary(s, max);
+    let head = &s[..end];
+    match head.rfind(' ') {
+        Some(space) if space > end.saturating_sub(50) => format!("{}...", &s[..space]),
+        _ => format!("{head}..."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_at_word_prefers_spaces() {
+        assert_eq!(cut_at_word("short", 10), "short");
+        assert_eq!(cut_at_word("hello wonderful world", 12), "hello...");
+        assert_eq!(
+            cut_at_word(&"x".repeat(100), 10),
+            format!("{}...", "x".repeat(10))
+        );
+        let far = format!("a {}", "b".repeat(100));
+        assert_eq!(cut_at_word(&far, 80), format!("a {}...", "b".repeat(78)));
+        assert_eq!(cut_at_word("ééééé", 3), "é...");
+    }
 
     #[test]
     fn short_strings_are_unchanged() {

@@ -43,6 +43,9 @@ pub struct FetchParams {
     pub raw: Option<bool>,
     /// CSS selector to extract a specific element (skips content heuristics)
     pub selector: Option<String>,
+    /// Maximum characters per section; longer sections are cut and marked
+    /// truncated (default: 5000, 0 = no limit)
+    pub max_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -150,12 +153,16 @@ impl RefMcpServer {
         let pool = self.get_or_init_pool(parallel).await?;
 
         let selector = params.selector.as_deref();
+        let max_chars = params.max_chars.unwrap_or(fetch::DEFAULT_MAX_CHARS);
 
-        let mut pages = Vec::new();
-        for url in &params.urls {
-            let page = fetch::fetch_one(pool, url, timeout, raw, selector).await;
-            pages.push(page);
-        }
+        // Pages run concurrently; the pool's semaphore caps open tabs at `parallel`
+        let pages: Vec<_> = futures::future::join_all(
+            params
+                .urls
+                .iter()
+                .map(|url| fetch::fetch_one(pool, url, timeout, raw, selector, max_chars)),
+        )
+        .await;
 
         let json = if pages.len() == 1 {
             serde_json::to_string(&pages[0])
@@ -299,6 +306,9 @@ impl RefMcpServer {
     }
 }
 
+// The macro generates async fns without `.await`; clippy 1.99 flags them.
+#[allow(unknown_lints)]
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler]
 impl rmcp::handler::server::ServerHandler for RefMcpServer {
     fn get_info(&self) -> ServerInfo {

@@ -9,6 +9,7 @@ use std::process::ExitCode;
 mod access;
 mod browser;
 mod check_links;
+mod content;
 mod extract;
 mod fetch;
 mod init;

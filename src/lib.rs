@@ -6,6 +6,7 @@
 pub mod access;
 pub mod browser;
 pub mod check_links;
+pub mod content;
 pub mod extract;
 pub mod fetch;
 pub mod init;
