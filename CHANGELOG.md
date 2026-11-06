@@ -21,6 +21,12 @@ All notable changes to Möllendorff Ref.
 - The user agent is Chrome's own (with "HeadlessChrome" shown as "Chrome") plus `mollendorff-ref/<version>`, instead of a hard-coded 2023 Mac Chrome 120 string.
 - Fixed two `clippy::needless_raw_string_hashes` errors that failed the Lint job on current stable.
 
+### Documentation
+
+- README rewritten to match what the code does: no "bypasses bot protection" claim (also removed from the CLI help, crate docs and MCP server instructions), a status note that says it is a young personal project built with AI assistance, documented exit codes, status values, truncation, security defaults and a Limitations section. The Asimov section no longer recommends forbidding other web tools.
+- `docs/mcp-integration.md` documents `max_chars`, concurrent fetching and the working-directory rule for paths.
+- Removed the `deploy-kveldulf` Makefile target (a personal machine).
+
 ### Maintenance
 
 - **rmcp 0.16 → 3.9** (MCP SDK; clears RUSTSEC-2026-0189, which affected only its HTTP transport) and **scraper 0.25 → 0.27**. Supersedes Dependabot PRs #20 and #21.

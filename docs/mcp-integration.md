@@ -55,9 +55,15 @@ Add to `.vscode/mcp.json`:
 All tools return JSON in `CallToolResult` content.
 Error responses use MCP error codes (invalid params, internal error).
 
+File paths (`ref_pdf` local files, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`'s `file`) must stay inside the directory the server was started in.
+Absolute paths elsewhere, `..` and symlinks that lead outside are refused with an invalid-params error.
+Only `http` and `https` URLs are fetched.
+
 ### ref_fetch
 
 Render web pages via headless Chrome and return structured JSON.
+URLs in one call are fetched concurrently, up to `parallel` tabs.
+Each page reports `status`, `http` and, when content was cut, `"truncated": true`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -66,6 +72,7 @@ Render web pages via headless Chrome and return structured JSON.
 | `timeout` | number | 30000 | Timeout per URL in ms |
 | `raw` | boolean | false | Skip content cleaning |
 | `selector` | string | - | CSS selector to extract a specific element, skipping content heuristics |
+| `max_chars` | number | 5000 | Characters per section before it is cut and marked truncated (0 = no limit) |
 
 ```json
 {
@@ -80,11 +87,11 @@ Extract text, tables, and headings from PDF files.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `files` | string[] | (required) | Absolute paths to PDF files or https:// URLs |
+| `files` | string[] | (required) | PDF paths inside the working directory, or http(s):// URLs |
 
 ```json
 {
-  "files": ["/tmp/report.pdf"]
+  "files": ["docs/report.pdf"]
 }
 ```
 

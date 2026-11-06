@@ -1,7 +1,7 @@
 //! Möllendorff Ref CLI
 //!
 //! LLM-optimized reference tools with headless Chrome.
-//! Bypasses bot protection (403/999) that blocks curl/wget.
+//! Renders pages in headless Chrome, including JavaScript-heavy sites.
 
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -21,7 +21,7 @@ use mollendorff_ref::verify_refs::{run_verify_refs, VerifyRefsArgs};
 #[command(version)]
 #[command(about = "Möllendorff Ref - LLM-optimized reference toolkit")]
 #[command(
-    long_about = "Reference verification and web fetching for AI agents.\nBypasses bot protection (403/999) that blocks curl/wget.\nAll output is JSON for LLM consumption."
+    long_about = "Reference verification and web fetching for AI agents.\nRenders pages in headless Chrome, including JavaScript-heavy sites.\nAll output is JSON for LLM consumption.\n\nExit codes: 0 = all succeeded, 1 = some URLs or files failed, 2 = command error."
 )]
 struct Cli {
     #[command(subcommand)]

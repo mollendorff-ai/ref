@@ -152,7 +152,7 @@ fn json_err(e: serde_json::Error) -> ErrorData {
 
 #[tool_router]
 impl RefMcpServer {
-    /// Render web pages via headless Chrome and return structured JSON with sections, links, and code blocks.
+    /// Render web pages in headless Chrome and return structured JSON: sections (lists and tables as Markdown), links, code blocks, HTTP status and a truncated flag.
     #[tool(name = "ref_fetch")]
     async fn ref_fetch(
         &self,
@@ -334,8 +334,10 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("ref", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Möllendorff Ref: LLM-optimized web fetching and PDF extraction. \
-                 Renders pages via headless Chrome, bypasses bot protection.",
+                "Möllendorff Ref: compact JSON from web pages and PDFs for AI agents. \
+                 Renders JavaScript-heavy pages in headless Chrome. \
+                 Each result has a status (ok, dead, redirect, paywall, login) and an http code; \
+                 check `truncated` before treating content as complete.",
             )
     }
 }
