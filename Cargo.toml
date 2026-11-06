@@ -32,7 +32,7 @@ serde_yaml = "0.9"
 
 # HTML parsing & readability
 scraper = "0.25"
-html2text = "0.16"
+html2text = "0.17"
 
 # Regex for URL extraction
 regex = "1.12"
