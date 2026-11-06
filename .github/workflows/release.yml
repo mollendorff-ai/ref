@@ -164,7 +164,7 @@ jobs:
         run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: Möllendorff Ref ${{ steps.version.outputs.version }}
           body: |
