@@ -991,7 +991,7 @@ mod tests {
     fn test_find_gaps() {
         let line = "Name      Age    City";
         let gaps = find_gaps(line, 2);
-        assert!(!gaps.is_empty());
+        assert_ne!(gaps, Vec::<usize>::new());
         assert!(gaps.len() >= 2);
     }
 

@@ -700,7 +700,7 @@ mod tests {
         apply_http_status(&mut page, Some(200));
         assert_eq!(page.status, PageStatus::Ok);
         assert_eq!(page.http, Some(200));
-        assert!(page.alerts.is_empty());
+        assert_eq!(page.alerts, Vec::<String>::new());
 
         let mut page = ok_page();
         apply_http_status(&mut page, None);

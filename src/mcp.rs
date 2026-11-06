@@ -299,6 +299,9 @@ impl RefMcpServer {
     }
 }
 
+// The macro generates async fns without `.await`; clippy 1.99 flags them.
+#[allow(unknown_lints)]
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler]
 impl rmcp::handler::server::ServerHandler for RefMcpServer {
     fn get_info(&self) -> ServerInfo {
