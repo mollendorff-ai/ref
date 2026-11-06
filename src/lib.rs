@@ -1,7 +1,7 @@
 //! Möllendorff Ref: LLM-optimized reference toolkit
 //!
 //! JSON output for agents, not humans.
-//! Bypasses bot protection via headless Chrome.
+//! Renders pages in headless Chrome, including JavaScript-heavy sites.
 
 pub mod access;
 pub mod browser;

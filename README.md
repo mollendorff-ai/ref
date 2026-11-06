@@ -3,84 +3,91 @@
 [![CI](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml/badge.svg)](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/mollendorff-ref.svg)](https://crates.io/crates/mollendorff-ref)
 [![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-tests.json)](https://github.com/mollendorff-ai/ref/actions)
-[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-coverage.json)](https://github.com/mollendorff-ai/ref/actions)
+[![Logic coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-coverage.json)](https://github.com/mollendorff-ai/ref/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Renders web pages and PDFs into token-optimized JSON for LLM agents.
+Renders web pages and PDFs into compact JSON for LLM agents.
+
+> **Status:** a personal open-source project, usable but young (no known production users).
+> It was built with AI coding assistants (Claude) under the maintainer's direction; changes go through pull requests and CI.
+> See [Limitations](#limitations) before relying on it.
 
 ## The problem
 
 LLM agents are bad at getting fresh web content:
 
-- **Stale training data** — without explicit tooling, models default to their training corpus, returning confident answers from months-old snapshots.
-Even with web search enabled, models can weight stale training knowledge over fresh results.
-- **Bot protection** — `curl`, `wget`, and built-in web tools get blocked (403/999) by most sites.
-When they do get through, they return raw HTML — 10,000-50,000 tokens of navigation, ads, and markup noise.
-- **SPA blindness** — modern sites return empty HTML shells.
-The actual content loads via JavaScript after the initial response.
+- **Stale training data**: without explicit tooling, models answer from their training corpus, even when a search tool is available.
+- **Raw HTML is noisy**: a fetched page is mostly navigation, scripts and markup, which costs tokens and hides the content.
+- **JavaScript-heavy sites**: many sites return an empty HTML shell and load the content with JavaScript, so a plain HTTP fetch sees nothing.
 
 ## What ref does
 
-Chrome renders the page, waits for all network requests to settle (SPAs included), then ref extracts structured content and outputs compact JSON.
-
-**100 KB of rendered HTML becomes 1-5 KB of structured JSON.**
+Chrome renders the page and waits for the network to go quiet (so JavaScript-loaded content arrives), then ref keeps the main content and outputs compact JSON.
 
 ```
-┌──────────┐    ┌───────────┐    ┌──────────┐    ┌──────────┐
-│ Headless │ →  │ networkIdle│ →  │ Strip    │ →  │ Compact  │
-│ Chrome   │    │ wait (SPA) │    │ nav/ads  │    │ JSON out │
-└──────────┘    └───────────┘    └──────────┘    └──────────┘
+┌──────────┐    ┌────────────┐    ┌───────────────┐    ┌──────────┐
+│ Headless │ →  │ networkIdle│ →  │ Keep content, │ →  │ Compact  │
+│ Chrome   │    │ wait (SPA) │    │ drop page UI  │    │ JSON out │
+└──────────┘    └────────────┘    └───────────────┘    └──────────┘
 ```
 
 ### Output example
 
 ```bash
-ref fetch https://example.com 2>/dev/null | jq .
+ref fetch https://example.com/report 2>/dev/null | jq .
 ```
 
 ```json
 {
-  "url": "https://example.com",
+  "url": "https://example.com/report",
   "status": "ok",
-  "title": "Example Domain",
+  "http": 200,
+  "title": "Quarterly report",
   "sections": [
     {
       "level": 1,
-      "heading": "Example Domain",
-      "content": "This domain is for use in illustrative examples..."
+      "heading": "Quarterly report",
+      "content": "Intro paragraph.\n\n- Revenue up 12%\n- Costs flat\n\n| Region | Q3 |\n| --- | --- |\n| North | 150 |\n\n> Strong quarter, said the CFO."
     }
   ],
-  "links": [
-    { "text": "More information...", "url": "https://www.iana.org/domains/example" }
-  ],
-  "chars": 1256
+  "chars": 175
 }
 ```
 
-Extract a specific element with `--selector`:
+- Paragraphs, lists, tables, block quotes and definition lists are kept in document order; lists and tables come out as Markdown.
+- Navigation, headers, footers, asides and forms outside the article are dropped (`--raw` keeps them).
+- Code blocks go to a separate `code` array with the detected language.
+- Null fields and empty arrays are omitted.
+
+### Status and HTTP code
+
+`status` is one of `ok`, `dead`, `redirect`, `paywall` or `login`; `http` is the HTTP status of the main document as Chrome received it.
+Any 4xx or 5xx response is `dead`.
+A page is `paywall` or `login` only when there is a real sign of a wall: `isAccessibleForFree: false` structured data, a wall overlay element, or wall wording or a password field on a page with little readable text.
+
+### Size limits are reported, never silent
+
+Each section is limited to 5,000 characters by default.
+A cut section has `"truncated": true`, the page has `"truncated": true`, and an alert says how to get everything:
+
+```bash
+ref fetch --max-chars 0 https://example.com/long-article   # no limit
+```
+
+Extract one element with `--selector`:
 
 ```bash
 ref fetch --selector "#pricing-table" https://example.com 2>/dev/null | jq .
 ```
 
-Null fields and empty arrays are omitted.
-Sections are capped (200 char headings, 2,000 char content).
-Code blocks include detected language.
-Status detects paywalls, login walls, and dead links.
-
 ### PDF extraction
 
 ```bash
 ref pdf document.pdf 2>/dev/null | jq .
-```
-
-Same JSON structure, plus table detection (whitespace column analysis, header inference, markdown output) and heading detection (numbered sections, Roman numerals, ALL CAPS, academic/legal formats).
-
-Also accepts URLs — downloads and extracts in one step:
-
-```bash
 ref pdf https://example.com/report.pdf 2>/dev/null | jq .
 ```
+
+Same JSON structure, plus table detection (whitespace column analysis, header inference, Markdown output) and heading detection (numbered sections, Roman numerals, ALL CAPS, academic and legal formats).
 
 ## Commands
 
@@ -88,18 +95,24 @@ ref pdf https://example.com/report.pdf 2>/dev/null | jq .
 |---------|-------------|
 | `ref fetch <url>` | Render page via Chrome, output structured JSON |
 | `ref pdf <file\|url>` | Extract text and tables from PDFs |
-| `ref scan <files>` | Find URLs in markdown, build references.yaml |
+| `ref scan <files>` | Find URLs in Markdown, build references.yaml |
 | `ref verify-refs <file>` | Check reference entries, update status |
 | `ref check-links <file>` | Validate URL health (HTTP status codes) |
-| `ref refresh-data --url <url>` | Extract live data (market sizes, stats) |
+| `ref refresh-data --url <url>` | Pull amounts and percentages from a page |
 | `ref init` | Create references.yaml template |
-| `ref update` | Self-update from GitHub releases |
+| `ref update` | Self-update from GitHub releases (SHA-256 verified) |
 | `ref mcp` | Start MCP server (JSON-RPC 2.0 over stdio) |
+
+Exit codes: `0` when everything succeeded, `1` when any URL or file failed, `2` when the command itself failed.
+Progress goes to stderr; JSON goes to stdout.
+
+`ref fetch --cookies cookies.txt` sends cookies from a Netscape-format cookie file, for pages you are entitled to see while signed in.
+Treat that file like a password.
 
 ## MCP Server Mode
 
 `ref mcp` starts a persistent MCP server over stdio.
-AI applications call tools directly — no shell spawning, browser pool stays warm between calls.
+AI applications call tools directly; the browser stays warm between calls.
 
 Six tools: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`.
 
@@ -129,21 +142,32 @@ Six tools: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_re
 }
 ```
 
-See [docs/mcp-integration.md](docs/mcp-integration.md) for full setup guide and tool reference.
+MCP tools only read and write files inside the directory the server was started in.
 
-## AI orchestration
+See [docs/mcp-integration.md](docs/mcp-integration.md) for the full setup guide and tool reference.
 
-ref is designed to work with [Asimov](https://github.com/mollendorff-ai/asimov), a vendor-neutral orchestrator for AI coding CLIs (Claude Code, Gemini CLI, Codex CLI).
+## Use with agent orchestrators
 
-Asimov's `freshness` protocol forces agents to use `ref fetch` for all web content instead of relying on built-in search tools or training data:
+ref can be the web tool for [Asimov](https://github.com/mollendorff-ai/asimov), a vendor-neutral orchestrator for AI coding CLIs (Claude Code, Gemini CLI, Codex CLI).
+Asimov's `freshness` protocol can tell agents to prefer `ref fetch` over built-in search, so they read current pages instead of answering from training data.
+Whether to forbid other tools entirely is your call; check that ref works for the sites you need first.
 
-```json
-{
-  "rule": "MUST use ref fetch <url> for all web fetching. NEVER use WebSearch or WebFetch."
-}
-```
+## Security
 
-This ensures agents work with current, verified content rather than stale or hallucinated sources.
+- Only `http` and `https` URLs are opened; `file://`, `data:` and other schemes are refused.
+- Chrome runs with its sandbox unless ref runs as root, `REF_CHROME_NO_SANDBOX=1` is set, or Chrome cannot start with it (ref then retries without it and prints a warning).
+- Each run uses its own temporary Chrome profile, deleted afterwards, and Chrome's background calls to Google are disabled.
+- The user agent is Chrome's own plus `mollendorff-ref/<version>`, so sites can see who is asking.
+  ref does not try to defeat bot detection.
+
+## Limitations
+
+- **Bot walls and CAPTCHAs**: sites that block automated browsers will block ref too; those pages come back as `dead` or with little content.
+- **Content heuristics**: main-content selection (`main`, `article`, then common class names, then `body`) can miss content on unusual layouts; use `--selector` or `--raw`.
+- **Late rendering**: content that appears only after a timer, with no network activity, can be missed; ref waits for the network to go quiet, not for arbitrary scripts.
+- **Paywall and login detection** are heuristics and can be wrong either way.
+- **PDFs**: text-based PDFs only (no OCR); table detection relies on column alignment.
+- **Platforms**: CI tests Linux; macOS and Windows builds are produced but not tested end to end.
 
 ## Install
 
@@ -167,6 +191,8 @@ curl -L https://github.com/mollendorff-ai/ref/releases/latest/download/ref-aarch
 sudo mv ref /usr/local/bin/
 ```
 
+Each release includes `checksums.txt` (SHA-256) to verify the download.
+
 From crates.io:
 
 ```bash
@@ -175,7 +201,7 @@ cargo install mollendorff-ref
 
 ## Requirements
 
-- Chrome or Chromium (for fetch, check-links, verify-refs)
+- Chrome or Chromium (for fetch, check-links, verify-refs, refresh-data)
 - Rust toolchain (build from source only)
 
 ## License
