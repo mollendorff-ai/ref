@@ -2,7 +2,9 @@
 
 All notable changes to Möllendorff Ref.
 
-## [Unreleased]
+## [1.7.0] - 2026-11-06
+
+Correctness, safety and honesty release: real HTTP status, no silently dropped or cut content, http(s)-only fetching, a contained MCP server, verified self-update, and a README that matches the code.
 
 ### Fixed (from an independent review after the first round)
 

@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*'
+  # Started by CI's Auto Release job: a tag pushed with GITHUB_TOKEN does not
+  # trigger the push event above, but a workflow_dispatch does.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
