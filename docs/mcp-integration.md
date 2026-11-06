@@ -125,8 +125,8 @@ Scan markdown files for URLs and build/update references.yaml.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `files` | string[] | (required) | File paths or glob patterns |
-| `output` | string | "references.yaml" | Output file path |
-| `merge` | boolean | true | Merge with existing file |
+| `output` | string | "references.yaml" | Output file inside the workspace: `.yaml` or `.yml`, new, empty or already a references file, not hard-linked |
+| `merge` | boolean | true | Merge with the existing file (`false` replaces it) |
 
 ```json
 {

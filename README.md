@@ -173,6 +173,7 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 - **Content heuristics**: main-content selection (`main`, `article`, then common class names, then `body`) can miss content on unusual layouts; use `--selector` or `--raw`.
 - **Late rendering**: content that appears only after a timer, with no network activity, can be missed; ref waits for the network to go quiet, not for arbitrary scripts.
   In tests, content added 200 ms after load was kept and content added 2.5 s after load was missed.
+- **Web components**: text in open shadow roots is read; closed shadow roots cannot be.
 - **Paywall and login detection** are heuristics and can be wrong either way.
 - **PDFs**: text-based PDFs only (no OCR); table detection relies on column alignment.
 - **Platforms**: CI tests Linux; macOS and Windows builds are produced but not tested end to end.
