@@ -106,6 +106,20 @@ fn route(path: &str) -> (&'static str, String, String) {
             String::new(),
             r#"{"t":"Loaded later","p":"This paragraph arrived through fetch() after the page loaded."}"#.to_string(),
         ),
+        "/aspnet" => (
+            "200 OK",
+            String::new(),
+            page(
+                "Form page",
+                "<form id='aspnetForm' method='post'><h1>Annual report</h1><p>Revenue rose this year.</p><input type='hidden' name='v'></form>",
+            ),
+        ),
+        "/empty" => ("200 OK", String::new(), page("Empty", "<div id='app'></div>")),
+        "/no-paywall" => (
+            "200 OK",
+            String::new(),
+            page("Open", "<article class='no-paywall'><h1>Open article</h1><p>Free to read for everyone.</p></article>"),
+        ),
         "/moved" => ("301 Moved Permanently", "Location: /report\r\n".to_string(), String::new()),
         "/broken" => ("500 Internal Server Error", String::new(), page("Oops", "<p>Server error page.</p>")),
         _ => ("404 Not Found", String::new(), page("Not found", "<p>Nothing here.</p>")),
@@ -267,4 +281,40 @@ fn check_links_reports_real_status_codes() {
     assert_eq!(report["results"][0]["status"], 404);
     assert_eq!(report["failed"], 1);
     assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn page_wrapped_in_a_form_keeps_its_content() {
+    let base = serve();
+    let (_, page) = fetch(&[&format!("{base}/aspnet")]);
+    assert!(
+        all_content(&page).contains("Revenue rose this year."),
+        "{page}"
+    );
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn empty_pages_and_unmatched_selectors_say_so() {
+    let base = serve();
+    let (_, empty) = fetch(&[&format!("{base}/empty")]);
+    assert!(
+        empty["alerts"].to_string().contains("No readable content"),
+        "{empty}"
+    );
+
+    let (_, page) = fetch(&["--selector", "#missing", &format!("{base}/report")]);
+    assert!(
+        page["alerts"].to_string().contains("matched nothing"),
+        "{page}"
+    );
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn no_paywall_class_is_not_a_paywall() {
+    let base = serve();
+    let (_, page) = fetch(&[&format!("{base}/no-paywall")]);
+    assert_eq!(page["status"], "ok");
 }

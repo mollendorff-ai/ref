@@ -113,20 +113,6 @@ fn test_check_links_empty_file() {
 }
 
 #[test]
-#[ignore = "e2e: requires Chrome (ADR-003)"]
-fn test_check_links_with_urls() {
-    let dir = tempdir().unwrap();
-    let file_path = dir.path().join("links.md");
-    fs::write(&file_path, "Check https://example.com for more info.").unwrap();
-
-    ref_cmd()
-        .args(["check-links", file_path.to_str().unwrap()])
-        .timeout(std::time::Duration::from_secs(30))
-        .assert()
-        .success();
-}
-
-#[test]
 fn test_mcp_subcommand_registered() {
     ref_cmd()
         .arg("--help")

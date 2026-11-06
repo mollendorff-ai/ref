@@ -14,8 +14,8 @@ use serde::Serialize;
 /// Maximum heading length in characters (bytes, on a character boundary)
 const MAX_HEADING: usize = 200;
 
-/// Maximum number of sections returned for one page
-pub const MAX_SECTIONS: usize = 50;
+/// Default maximum number of sections returned for one page
+pub const DEFAULT_MAX_SECTIONS: usize = 50;
 
 /// A content section with heading hierarchy
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -35,7 +35,7 @@ pub struct Section {
 #[derive(Debug, Default)]
 pub struct Extracted {
     pub sections: Vec<Section>,
-    /// True when any section was cut or sections were dropped past [`MAX_SECTIONS`]
+    /// True when any section was cut or sections were dropped past the section limit
     pub truncated: bool,
 }
 
@@ -45,8 +45,10 @@ const SKIP_ALWAYS: [&str; 14] = [
     "select", "option", "textarea", "input", "pre",
 ];
 
-/// Page chrome, skipped unless `raw` is set or it sits inside the article itself
-const CHROME: [&str; 5] = ["nav", "header", "footer", "aside", "form"];
+/// Page chrome, skipped unless `raw` is set or it sits inside the article itself.
+/// Forms are not chrome: many sites (ASP.NET, for one) wrap the whole page in one;
+/// their controls are skipped through [`SKIP_ALWAYS`] instead.
+const CHROME: [&str; 4] = ["nav", "header", "footer", "aside"];
 
 /// Block elements whose whole text becomes one block
 const TEXT_BLOCKS: [&str; 6] = ["p", "dt", "dd", "figcaption", "address", "summary"];
@@ -59,12 +61,14 @@ const INLINE: [&str; 20] = [
 
 /// Extract sections from a content document.
 ///
-/// `max_chars` limits each section's content; `0` means no limit.
-/// `raw` keeps navigation, headers, footers, asides and forms.
+/// `max_chars` limits each section's content in characters and `max_sections`
+/// the number of sections; `0` means no limit for either.
+/// `raw` keeps navigation, headers, footers and asides.
 #[must_use]
-pub fn extract_sections(doc: &Html, max_chars: usize, raw: bool) -> Extracted {
+pub fn extract_sections(doc: &Html, max_chars: usize, max_sections: usize, raw: bool) -> Extracted {
     let mut b = Builder {
         max_chars,
+        max_sections,
         raw,
         ..Builder::default()
     };
@@ -79,6 +83,7 @@ struct Builder {
     sections: Vec<Section>,
     current: Option<Section>,
     max_chars: usize,
+    max_sections: usize,
     raw: bool,
     truncated: bool,
 }
@@ -183,10 +188,13 @@ impl Builder {
             section.content.push_str("\n\n");
         }
         section.content.push_str(text);
-        if max > 0 && section.content.len() > max {
-            section.content = cut_at_word(&section.content, max);
-            section.truncated = true;
-            self.truncated = true;
+        if max > 0 {
+            // Limit in characters, not bytes, so accented text is not cut short
+            if let Some((byte_at_limit, _)) = section.content.char_indices().nth(max) {
+                section.content = cut_at_word(&section.content, byte_at_limit);
+                section.truncated = true;
+                self.truncated = true;
+            }
         }
     }
 
@@ -200,8 +208,8 @@ impl Builder {
 
     fn finish(mut self) -> Extracted {
         self.close_section();
-        if self.sections.len() > MAX_SECTIONS {
-            self.sections.truncate(MAX_SECTIONS);
+        if self.max_sections > 0 && self.sections.len() > self.max_sections {
+            self.sections.truncate(self.max_sections);
             self.truncated = true;
         }
         Extracted {
@@ -336,7 +344,7 @@ mod tests {
     use super::*;
 
     fn sections(html: &str) -> Extracted {
-        extract_sections(&Html::parse_document(html), 0, false)
+        extract_sections(&Html::parse_document(html), 0, 0, false)
     }
 
     #[test]
@@ -410,7 +418,7 @@ mod tests {
             <script>var hidden = 1;</script><style>.x{}</style>
             <main><header><h1>Kept title</h1></header><p>Kept body text.</p>
             <pre><code>fn main() {}</code></pre><footer>Article footer note</footer></main>
-            <footer>Site footer text</footer><form>Log in here</form></body>";
+            <footer>Site footer text</footer><form><input type='password'><button>Log in</button></form></body>";
         let out = sections(html);
         let all: String = out
             .sections
@@ -436,7 +444,7 @@ mod tests {
     #[test]
     fn raw_mode_keeps_chrome() {
         let doc = Html::parse_document("<nav>Navigation links</nav><p>Body text.</p>");
-        let out = extract_sections(&doc, 0, true);
+        let out = extract_sections(&doc, 0, 0, true);
         assert!(out.sections[0].content.contains("Navigation links"));
     }
 
@@ -444,12 +452,40 @@ mod tests {
     fn long_sections_are_cut_and_flagged() {
         let body = "word ".repeat(2000);
         let html = format!("<h1>Long</h1><p>{body}</p><p>Never reached.</p>");
-        let out = extract_sections(&Html::parse_document(&html), 500, false);
+        let out = extract_sections(&Html::parse_document(&html), 500, 0, false);
         let s = &out.sections[0];
         assert!(s.truncated);
         assert!(out.truncated);
         assert!(s.content.len() <= 503);
         assert!(!s.content.contains("Never reached"));
+    }
+
+    #[test]
+    fn limit_counts_characters_not_bytes() {
+        // 300 two-byte characters fit a 400-character limit
+        let body = "é".repeat(300);
+        let out = extract_sections(
+            &Html::parse_document(&format!("<p>{body}</p>")),
+            400,
+            0,
+            false,
+        );
+        assert!(!out.truncated);
+        let out = extract_sections(
+            &Html::parse_document(&format!("<p>{body}</p>")),
+            100,
+            0,
+            false,
+        );
+        assert!(out.truncated);
+        assert!(out.sections[0].content.chars().count() <= 103);
+    }
+
+    #[test]
+    fn page_wrapped_in_a_form_keeps_its_content() {
+        let out = sections("<form id='aspnetForm'><h1>Title</h1><p>Body text here.</p><input name='x'><button>Go</button></form>");
+        assert_eq!(out.sections[0].heading, "Title");
+        assert_eq!(out.sections[0].content, "Body text here.");
     }
 
     #[test]
@@ -466,9 +502,13 @@ mod tests {
             .map(|n| format!("<h2>Part {n}</h2><p>Text {n}.</p>"))
             .collect::<Vec<_>>()
             .concat();
-        let out = sections(&html);
-        assert_eq!(out.sections.len(), MAX_SECTIONS);
+        let doc = Html::parse_document(&html);
+        let out = extract_sections(&doc, 0, DEFAULT_MAX_SECTIONS, false);
+        assert_eq!(out.sections.len(), DEFAULT_MAX_SECTIONS);
         assert!(out.truncated);
+        let all = extract_sections(&doc, 0, 0, false);
+        assert_eq!(all.sections.len(), 60);
+        assert!(!all.truncated);
     }
 
     #[test]

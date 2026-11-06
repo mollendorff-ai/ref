@@ -4,6 +4,30 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+### Fixed (from an independent review after the first round)
+
+- **Chrome flags were never applied.** chromiumoxide adds the leading `--` itself, so every extra switch ref passed (including `--headless=new` and the background-networking switches) reached Chrome as `----flag` and was ignored. Flags are now passed correctly. The README no longer claims Chrome's calls to Google are disabled: the switches reduce them, but Chrome still makes some (component update, account checks).
+- **MCP tab leak**: tabs were never closed, so a long-running server grew by one Chrome target per call. A tab now closes when its page is done.
+- **MCP parallelism was fixed by the first call**: the shared browser now allows 16 tabs and each call is limited by its own `parallel`. Four 3-second pages take about 3 s, not 12 s.
+- **Workspace guard escapes**: files matched by a `ref_scan` glob through a symlinked folder, and outputs that are symlinks to missing files, are now refused. `ref mcp --root <folder>` sets the workspace explicitly; file tools are refused when the workspace is the filesystem root.
+- **Hangs**: `parallel` / `concurrency` of 0 (or above 20) is rejected in MCP and the CLI instead of hanging. PDF downloads have a 15 s connect and 60 s total timeout, and the 100 MB cap is checked while streaming (and against `Content-Length`), not after downloading everything. PDFs are parsed from memory, with no temporary file.
+- **`refresh-data` reported success on 404s and refused connections**; navigation errors and 4xx/5xx are now failures with the HTTP code, and the command exits 1 when any URL failed. Numbers come from the page's main content, so ads no longer leak in.
+- **Silent empty results**: a page wrapped in `<form>` (ASP.NET style) lost all its content; forms are no longer dropped. New alerts for pages with no readable content, a `--selector` that matched nothing or is invalid, and the 50-link cap. A URL that turns out to be a PDF is extracted as `ref pdf` would.
+- **Paywall detection** matched class substrings, so `class="no-paywall"` was flagged; markers now match whole name parts and negated names are ignored.
+- **Ctrl-C and SIGTERM** close Chrome and remove its temporary profile (exit code 130). Leftover profiles from killed Chrome processes are also removed on normal exit.
+- **Character counts**: `chars` and the section limit count characters, not bytes (French text was cut early).
+- `ref pdf` on a relative path reports a proper absolute `file://` URL.
+- `ref scan --merge` could not be turned off; use `--no-merge` to overwrite (`--merge` is still accepted).
+
+### Added
+
+- `--max-sections <N>` for `fetch` (and `max_sections` for MCP `ref_fetch`), default 50, `0` for no limit; the truncation alert names every limit that applied.
+
+### Removed
+
+- The Instagram-follower and Statista extractors in `refresh-data`; it now has one generic extractor for amounts and percentages. The JSON fields `type`, `followers` and `username` are gone; `http` was added.
+- The e2e test that needed example.com (the local-server suite covers check-links), and the stale `RUSTSEC-2025-0057` ignore (fxhash is no longer a dependency).
+
 ### Fixed
 
 - **Real HTTP status**: `fetch`, `check-links` and `verify-refs` now read the main document's HTTP status from Chrome instead of guessing from the page title. A 404 page was reported as 200, and a page titled "Fortune 500" as 500.

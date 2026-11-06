@@ -1,12 +1,17 @@
-//! refresh-data command: Extract live data from URLs
+//! refresh-data command: pull amounts and percentages from live pages
 //!
 //! LLM-optimized output - JSON compact only.
+//! Numbers are taken from the page's main content (the same content `fetch`
+//! returns), so ads and navigation do not leak in.
 
-use crate::browser::BrowserPool;
-use crate::extract::{extract_amounts, extract_percentages, AmountMatch};
+use crate::browser::{BrowserPage, BrowserPool};
+use crate::content;
+use crate::extract::{extract_amounts, extract_percentages, extract_urls, AmountMatch};
+use crate::fetch::extract_main_content;
 use crate::text::truncate;
 use anyhow::{Context, Result};
 use clap::Args;
+use scraper::Html;
 use serde::Serialize;
 use tokio::fs;
 
@@ -34,19 +39,16 @@ pub struct RefreshConfig {
 #[derive(Debug, Serialize)]
 pub struct ExtractedData {
     pub url: String,
-    #[serde(rename = "type")]
-    pub extractor_type: String,
     pub success: bool,
+    /// HTTP status of the page, when Chrome reported one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amounts: Option<Vec<AmountMatch>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub percentages: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub followers: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -61,13 +63,15 @@ pub struct RefreshReport {
 
 /// Run the refresh-data command
 ///
+/// Returns `Ok(false)` when any URL failed.
+///
 /// # Errors
 /// Returns an error if URLs cannot be resolved, the browser fails to launch, or JSON serialization fails.
-pub async fn run_refresh_data(args: RefreshDataArgs) -> Result<()> {
-    let urls = get_extractable_urls(&args).await?;
+pub async fn run_refresh_data(args: RefreshDataArgs) -> Result<bool> {
+    let urls = get_urls(&args).await?;
 
     if urls.is_empty() {
-        eprintln!("No extractable URLs found.");
+        eprintln!("No URLs found.");
         std::process::exit(1);
     }
 
@@ -84,257 +88,114 @@ pub async fn run_refresh_data(args: RefreshDataArgs) -> Result<()> {
 
     eprintln!("Done: {}/{} OK", report.ok, report.ok + report.failed);
 
-    Ok(())
-}
-
-/// Determine extractor type from URL (auto-detect)
-fn get_extractor_type(url: &str) -> &'static str {
-    if url.contains("instagram.com") {
-        "instagram"
-    } else if url.contains("statista.com") {
-        "statista"
-    } else {
-        "generic"
-    }
+    Ok(report.failed == 0)
 }
 
 /// Get URLs to extract from
-async fn get_extractable_urls(args: &RefreshDataArgs) -> Result<Vec<(String, String)>> {
+async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
     if let Some(url) = &args.url {
-        let ext_type = get_extractor_type(url);
-        return Ok(vec![(url.clone(), ext_type.to_string())]);
+        return Ok(vec![url.clone()]);
     }
 
     if let Some(file) = &args.file {
         let content = fs::read_to_string(file)
             .await
             .with_context(|| format!("Failed to read file: {file}"))?;
-
-        return Ok(extract_extractable_urls(&content));
+        return Ok(extract_urls(&content));
     }
 
     eprintln!("Usage:");
     eprintln!("  ref refresh-data --url <URL>  Extract from single URL");
     eprintln!("  ref refresh-data <file.md>    Extract from all URLs in file");
-    std::process::exit(1);
+    std::process::exit(2);
 }
 
-/// Extract URLs that have extractors
-fn extract_extractable_urls(content: &str) -> Vec<(String, String)> {
-    use regex::Regex;
-    use std::collections::HashSet;
-
-    let patterns = [
-        (Regex::new(r"https?://(?:www\.)?instagram\.com/[^\s\)\]]+").unwrap(), "instagram"),
-        (Regex::new(r"https?://(?:www\.)?statista\.com/[^\s\)\]]+").unwrap(), "statista"),
-        (Regex::new(r"https?://(?:www\.)?(?:influencermarketinghub|emarketer|techcrunch)\.com/[^\s\)\]]+").unwrap(), "market"),
-    ];
-
-    let mut seen = HashSet::new();
-    let mut urls = Vec::new();
-
-    for (re, ext_type) in &patterns {
-        for mat in re.find_iter(content) {
-            let url = mat.as_str().trim_end_matches([',', '.', ')', ']']);
-            if !seen.contains(url) {
-                seen.insert(url.to_string());
-                urls.push((url.to_string(), (*ext_type).to_string()));
-            }
-        }
-    }
-
-    urls
-}
-
-/// Extract data from multiple URLs
+/// Extract data from multiple URLs, one at a time with a one-second pause
 ///
 /// # Errors
-/// Returns an error if the browser pool cannot be created or page navigation fails.
-pub async fn refresh_data(
-    urls: &[(String, String)],
-    config: &RefreshConfig,
-) -> Result<RefreshReport> {
-    let pool = BrowserPool::new(1).await?; // Sequential for rate limiting
+/// Returns an error if the browser pool cannot be created.
+pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<RefreshReport> {
+    let pool = BrowserPool::new(1).await?;
     let mut results = Vec::with_capacity(urls.len());
-    let mut ok_count = 0;
-    let mut failed_count = 0;
 
-    for (url, ext_type) in urls {
-        eprintln!("  -> [{}] {}", ext_type, truncate(url, 50));
-
-        let page = pool.new_page().await?;
-        let result = extract_from_page(&page, url, ext_type, config.timeout_ms).await;
-
-        if result.success {
-            ok_count += 1;
-        } else {
-            failed_count += 1;
+    for (i, url) in urls.iter().enumerate() {
+        eprintln!("  -> {}", truncate(url, 60));
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-
+        let result = match pool.new_page().await {
+            Ok(page) => extract_from_page(&page, url, config.timeout_ms).await,
+            Err(e) => failure(url, None, format!("Browser error: {e}")),
+        };
         results.push(result);
-
-        // Rate limit
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     pool.close().await?;
 
+    let ok = results.iter().filter(|r| r.success).count();
     Ok(RefreshReport {
-        ok: ok_count,
-        failed: failed_count,
+        ok,
+        failed: results.len() - ok,
         results,
     })
 }
 
-/// Extract data from a single page
-async fn extract_from_page(
-    page: &crate::browser::BrowserPage,
-    url: &str,
-    ext_type: &str,
-    timeout_ms: u64,
-) -> ExtractedData {
-    if let Err(e) = crate::guard::check_web_url(url) {
-        return ExtractedData {
-            url: url.to_string(),
-            extractor_type: ext_type.to_string(),
-            success: false,
-            title: None,
-            amounts: None,
-            percentages: None,
-            followers: None,
-            username: None,
-            error: Some(e),
-        };
-    }
-    let nav_result = page.goto(url, timeout_ms).await;
-    if let Err(e) = nav_result {
-        return ExtractedData {
-            url: url.to_string(),
-            extractor_type: ext_type.to_string(),
-            success: false,
-            title: None,
-            amounts: None,
-            percentages: None,
-            followers: None,
-            username: None,
-            error: Some(e.to_string()),
-        };
-    }
-
-    let content = match page.content().await {
-        Ok(c) => c,
-        Err(e) => {
-            return ExtractedData {
-                url: url.to_string(),
-                extractor_type: ext_type.to_string(),
-                success: false,
-                title: None,
-                amounts: None,
-                percentages: None,
-                followers: None,
-                username: None,
-                error: Some(e.to_string()),
-            };
-        }
-    };
-
-    match ext_type {
-        "instagram" => extract_instagram(url, &content),
-        "statista" => extract_statista(url, &content),
-        _ => extract_generic(url, &content),
-    }
-}
-
-fn extract_instagram(url: &str, content: &str) -> ExtractedData {
-    use regex::Regex;
-
-    let follower_re = Regex::new(r"([0-9,.]+[KMB]?)\s*[Ff]ollowers").unwrap();
-    let followers = follower_re.captures(content).map(|c| c[1].to_string());
-
-    // Extract username from URL
-    let username = url
-        .trim_end_matches('/')
-        .split('/')
-        .next_back()
-        .map(std::string::ToString::to_string);
-
+fn failure(url: &str, http: Option<u16>, error: String) -> ExtractedData {
     ExtractedData {
         url: url.to_string(),
-        extractor_type: "instagram".to_string(),
-        success: true,
+        success: false,
+        http,
         title: None,
         amounts: None,
         percentages: None,
-        followers,
-        username,
-        error: None,
+        error: Some(error),
     }
 }
 
-fn extract_statista(url: &str, content: &str) -> ExtractedData {
-    let amounts = extract_amounts(content);
-    let percentages = extract_percentages(content);
-    let title = extract_title(content);
+/// Extract data from a single page; navigation errors and 4xx/5xx are failures
+async fn extract_from_page(page: &BrowserPage, url: &str, timeout_ms: u64) -> ExtractedData {
+    if let Err(e) = crate::guard::check_web_url(url) {
+        return failure(url, None, e);
+    }
+    let nav = match page.goto(url, timeout_ms).await {
+        Ok(nav) => nav,
+        Err(e) => return failure(url, None, e.to_string()),
+    };
+    if let Some(error) = nav.error {
+        return failure(url, nav.status, error);
+    }
+    if let Some(code) = nav.status.filter(|c| *c >= 400) {
+        return failure(url, Some(code), format!("HTTP {code}"));
+    }
+    match page.content().await {
+        Ok(html) => extract_numbers(url, nav.status, &html),
+        Err(e) => failure(url, nav.status, e.to_string()),
+    }
+}
+
+/// Amounts and percentages from the main content of a rendered page
+fn extract_numbers(url: &str, http: Option<u16>, html: &str) -> ExtractedData {
+    let doc = Html::parse_document(html);
+    let title = crate::fetch::page_title(&doc);
+    let main = Html::parse_document(&extract_main_content(&doc));
+    let text = content::extract_sections(&main, 0, usize::MAX, false)
+        .sections
+        .iter()
+        .map(|s| format!("{}\n{}", s.heading, s.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let amounts = extract_amounts(&text);
+    let percentages = extract_percentages(&text);
 
     ExtractedData {
         url: url.to_string(),
-        extractor_type: "statista".to_string(),
         success: true,
+        http,
         title,
-        amounts: if amounts.is_empty() {
-            None
-        } else {
-            Some(amounts)
-        },
-        percentages: if percentages.is_empty() {
-            None
-        } else {
-            Some(percentages)
-        },
-        followers: None,
-        username: None,
+        amounts: (!amounts.is_empty()).then_some(amounts),
+        percentages: (!percentages.is_empty()).then_some(percentages),
         error: None,
     }
-}
-
-fn extract_generic(url: &str, content: &str) -> ExtractedData {
-    let amounts = extract_amounts(content);
-    let percentages = extract_percentages(content);
-    let title = extract_title(content);
-
-    ExtractedData {
-        url: url.to_string(),
-        extractor_type: "generic".to_string(),
-        success: true,
-        title,
-        amounts: if amounts.is_empty() {
-            None
-        } else {
-            Some(amounts)
-        },
-        percentages: if percentages.is_empty() {
-            None
-        } else {
-            Some(percentages)
-        },
-        followers: None,
-        username: None,
-        error: None,
-    }
-}
-
-fn extract_title(content: &str) -> Option<String> {
-    use regex::Regex;
-
-    // Try <h1> first
-    let h1_re = Regex::new(r"<h1[^>]*>([^<]+)</h1>").unwrap();
-    if let Some(cap) = h1_re.captures(content) {
-        return Some(cap[1].trim().to_string());
-    }
-
-    // Fall back to <title>
-    let title_re = Regex::new(r"<title[^>]*>([^<]+)</title>").unwrap();
-    title_re.captures(content).map(|c| c[1].trim().to_string())
 }
 
 #[cfg(test)]
@@ -342,47 +203,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_extractor_type() {
-        assert_eq!(
-            get_extractor_type("https://instagram.com/user"),
-            "instagram"
-        );
-        assert_eq!(
-            get_extractor_type("https://www.statista.com/stats"),
-            "statista"
-        );
-        assert_eq!(get_extractor_type("https://example.com"), "generic");
+    fn test_numbers_come_from_main_content_only() {
+        let html = "<html><head><title>Survey</title></head><body>\
+                    <div class='ad'>BUY NOW 50% OFF</div>\
+                    <article><h1>Survey</h1><p>About 41% use it at work; the Pro plan costs $12.</p></article>\
+                    </body></html>";
+        let data = extract_numbers("https://x.test", Some(200), html);
+        assert!(data.success);
+        assert_eq!(data.title.as_deref(), Some("Survey"));
+        assert_eq!(data.percentages, Some(vec!["41%".to_string()]));
+        assert_eq!(data.amounts.map(|a| a.len()), Some(1));
     }
 
     #[test]
-    fn test_extract_title() {
-        let html =
-            "<html><head><title>Test Page</title></head><body><h1>Main Title</h1></body></html>";
-        assert_eq!(extract_title(html), Some("Main Title".to_string()));
-
-        let html_no_h1 = "<html><head><title>Test Page</title></head></html>";
-        assert_eq!(extract_title(html_no_h1), Some("Test Page".to_string()));
-    }
-
-    #[test]
-    fn test_extract_instagram() {
-        let content = "Profile has 577K Followers and 100 posts";
-        let result = extract_instagram("https://instagram.com/testuser", content);
-        assert_eq!(result.followers, Some("577K".to_string()));
-        assert_eq!(result.username, Some("testuser".to_string()));
-    }
-
-    #[test]
-    fn test_extract_extractable_urls() {
-        let content = r"
-            Check https://instagram.com/user1 and
-            https://www.statista.com/statistics/123
-            and https://example.com for more.
-        ";
-
-        let urls = extract_extractable_urls(content);
-        assert_eq!(urls.len(), 2); // Only instagram and statista
-        assert!(urls.iter().any(|(u, _)| u.contains("instagram")));
-        assert!(urls.iter().any(|(u, _)| u.contains("statista")));
+    fn test_failure_shape() {
+        let f = failure("https://x.test", Some(404), "HTTP 404".into());
+        assert!(!f.success);
+        assert_eq!(f.http, Some(404));
+        assert_eq!(f.error.as_deref(), Some("HTTP 404"));
     }
 }

@@ -681,57 +681,83 @@ pub struct PdfPage {
 /// Largest PDF downloaded from a URL (bytes)
 const MAX_PDF_DOWNLOAD: usize = 100 * 1024 * 1024;
 
+/// Connect timeout for PDF downloads
+const PDF_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Total time allowed for one PDF download
+const PDF_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
+
 pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
     if let Err(e) = crate::guard::check_web_url(url) {
         return error_page(url, &e);
     }
-    let bytes = match reqwest::get(url)
+    match download_pdf(url).await {
+        Ok(bytes) => {
+            let name = url
+                .split(['?', '#'])
+                .next()
+                .and_then(|u| u.rsplit('/').next())
+                .unwrap_or("document.pdf");
+            extract_pdf_bytes(&bytes, url.to_string(), Path::new(name))
+        }
+        Err(e) => error_page(url, &e),
+    }
+}
+
+/// Download with timeouts and a size cap checked while streaming, so a huge or
+/// stalled response cannot exhaust memory or hang the caller.
+async fn download_pdf(url: &str) -> Result<Vec<u8>, String> {
+    let too_big = || format!("PDF is larger than {} MB", MAX_PDF_DOWNLOAD / 1024 / 1024);
+    let client = reqwest::Client::builder()
+        .connect_timeout(PDF_CONNECT_TIMEOUT)
+        .timeout(PDF_DOWNLOAD_TIMEOUT)
+        .user_agent(concat!("mollendorff-ref/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("Download failed: {e}"))?;
+    let mut resp = client
+        .get(url)
+        .send()
         .await
         .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("Download failed: {e}"))?;
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_PDF_DOWNLOAD as u64)
     {
-        Ok(resp) => match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => return error_page(url, &format!("Failed to read response: {e}")),
-        },
-        Err(e) => return error_page(url, &format!("Download failed: {e}")),
-    };
-    if bytes.len() > MAX_PDF_DOWNLOAD {
-        return error_page(
-            url,
-            &format!("PDF is larger than {} MB", MAX_PDF_DOWNLOAD / 1024 / 1024),
-        );
+        return Err(too_big());
     }
-
-    let temp_path = std::env::temp_dir().join(format!(
-        "ref-pdf-{}.pdf",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-
-    if let Err(e) = std::fs::write(&temp_path, &bytes) {
-        return error_page(url, &format!("Failed to write temp file: {e}"));
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to read response: {e}"))?
+    {
+        if bytes.len() + chunk.len() > MAX_PDF_DOWNLOAD {
+            return Err(too_big());
+        }
+        bytes.extend_from_slice(&chunk);
     }
-
-    let mut page = extract_pdf(&temp_path);
-    page.base.url = url.to_string();
-    let _ = std::fs::remove_file(&temp_path);
-    page
+    Ok(bytes)
 }
 
 pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
-    let file_url = format!("file://{}", path.display());
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.clone());
+    let file_url = format!("file://{}", absolute.display());
 
-    // Check file exists
-    if !path.exists() {
-        return error_page(&file_url, "File not found");
-    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return error_page(&file_url, "File not found")
+        }
+        Err(e) => return error_page(&file_url, &format!("Failed to read file: {e}")),
+    };
+    extract_pdf_bytes(&bytes, file_url, path)
+}
 
-    // Extract text using pdf-extract
+/// Extract a PDF held in memory; `name` gives the fallback title.
+fn extract_pdf_bytes(bytes: &[u8], file_url: String, name: &Path) -> PdfPage {
     // pdf-extract can panic on malformed files; keep that from taking down
     // the whole command or the MCP server.
-    let text = match std::panic::catch_unwind(|| pdf_extract::extract_text(path)) {
+    let text = match std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes)) {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => {
             return error_page(&file_url, &format!("PDF extraction failed: {e}"));
@@ -753,12 +779,12 @@ pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
     let links = extract_links(&text);
 
     // Try to extract title from first line or filename
-    let title = extract_title(&text, path);
+    let title = extract_title(&text, name);
 
     // Calculate total chars
     let chars: usize = sections
         .iter()
-        .map(|s| s.content.len() + s.heading.len())
+        .map(|s| s.content.chars().count() + s.heading.chars().count())
         .sum();
 
     let truncated = sections.len() == PDF_MAX_SECTIONS || sections.iter().any(|s| s.truncated);

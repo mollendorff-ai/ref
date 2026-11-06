@@ -55,8 +55,12 @@ Add to `.vscode/mcp.json`:
 All tools return JSON in `CallToolResult` content.
 Error responses use MCP error codes (invalid params, internal error).
 
-File paths (`ref_pdf` local files, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`'s `file`) must stay inside the directory the server was started in.
-Absolute paths elsewhere, `..` and symlinks that lead outside are refused with an invalid-params error.
+File paths (`ref_pdf` local files, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`'s `file`) must stay inside the workspace: the directory the server was started in, or `ref mcp --root <folder>`.
+Absolute paths elsewhere, `..`, symlinks that lead outside (including files matched by a `ref_scan` glob) and symlinks to missing files are refused with an invalid-params error.
+When the workspace is the filesystem root, file tools are refused.
+
+`parallel` and `concurrency` must be between 1 and 20.
+The server keeps one browser with up to 16 tabs; each call uses at most its own `parallel` value, and every tab is closed when its page is done.
 Only `http` and `https` URLs are fetched.
 
 ### ref_fetch
@@ -68,11 +72,12 @@ Each page reports `status`, `http` and, when content was cut, `"truncated": true
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `urls` | string[] | (required) | URLs to fetch |
-| `parallel` | number | 4 | Max parallel browser tabs |
+| `parallel` | number | 4 | Pages fetched at once (1-20) |
 | `timeout` | number | 30000 | Timeout per URL in ms |
 | `raw` | boolean | false | Skip content cleaning |
 | `selector` | string | - | CSS selector to extract a specific element, skipping content heuristics |
 | `max_chars` | number | 5000 | Characters per section before it is cut and marked truncated (0 = no limit) |
+| `max_sections` | number | 50 | Sections per page before the rest are dropped and the page is marked truncated (0 = no limit) |
 
 ```json
 {
@@ -137,7 +142,7 @@ Verify references.yaml entries by fetching each URL.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `file` | string | (required) | Path to references.yaml |
-| `parallel` | number | 4 | Parallel browser tabs |
+| `parallel` | number | 4 | Parallel browser tabs (1-20) |
 | `category` | string[] | (all) | Filter by categories |
 | `timeout` | number | 30000 | Timeout per URL in ms |
 | `dry_run` | boolean | false | Don't write changes |

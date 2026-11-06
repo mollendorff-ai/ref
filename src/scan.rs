@@ -21,9 +21,13 @@ pub struct ScanArgs {
     #[arg(short, long, default_value = "references.yaml")]
     pub output: PathBuf,
 
-    /// Merge with existing file instead of overwriting
-    #[arg(long, default_value = "true")]
+    /// Overwrite the output file instead of merging with what it already holds
+    #[arg(long = "no-merge", action = clap::ArgAction::SetFalse)]
     pub merge: bool,
+
+    /// Merge with the existing file (the default; kept for older scripts)
+    #[arg(long = "merge", hide = true)]
+    pub merge_compat: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,7 +173,7 @@ pub(crate) async fn scan_files(args: ScanArgs) -> Result<ScanOutput> {
 }
 
 /// Expand file patterns to actual file paths
-async fn expand_files(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
+pub(crate) async fn expand_files(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
     for pattern in patterns {
