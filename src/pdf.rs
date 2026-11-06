@@ -687,10 +687,18 @@ const PDF_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const PDF_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 
 pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
+    extract_pdf_from_url_with(url, &crate::browser::DownloadHeaders::default()).await
+}
+
+/// Download and extract a PDF, sending the given user agent and cookies
+pub(crate) async fn extract_pdf_from_url_with(
+    url: &str,
+    headers: &crate::browser::DownloadHeaders,
+) -> PdfPage {
     if let Err(e) = crate::guard::check_web_url(url) {
         return error_page(url, &e);
     }
-    match download_pdf(url).await {
+    match download_pdf(url, headers).await {
         Ok(bytes) => {
             let name = url
                 .split(['?', '#'])
@@ -705,20 +713,39 @@ pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
 
 /// Download with timeouts and a size cap checked while streaming, so a huge or
 /// stalled response cannot exhaust memory or hang the caller.
-async fn download_pdf(url: &str) -> Result<Vec<u8>, String> {
+async fn download_pdf(
+    url: &str,
+    headers: &crate::browser::DownloadHeaders,
+) -> Result<Vec<u8>, String> {
     let too_big = || format!("PDF is larger than {} MB", MAX_PDF_DOWNLOAD / 1024 / 1024);
+    let user_agent = if headers.user_agent.is_empty() {
+        concat!("mollendorff-ref/", env!("CARGO_PKG_VERSION")).to_string()
+    } else {
+        headers.user_agent.clone()
+    };
     let client = reqwest::Client::builder()
         .connect_timeout(PDF_CONNECT_TIMEOUT)
         .timeout(PDF_DOWNLOAD_TIMEOUT)
-        .user_agent(concat!("mollendorff-ref/", env!("CARGO_PKG_VERSION")))
+        .user_agent(user_agent)
         .build()
         .map_err(|e| format!("Download failed: {e}"))?;
-    let mut resp = client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| format!("Download failed: {e}"))?;
+    let mut request = client.get(url);
+    if let Some(cookie) = &headers.cookie {
+        request = request.header(reqwest::header::COOKIE, cookie);
+    }
+    let mut resp = request.send().await.map_err(|e| {
+        if e.is_timeout() {
+            format!(
+                "Download timed out (limit {} s)",
+                PDF_DOWNLOAD_TIMEOUT.as_secs()
+            )
+        } else {
+            format!("Download failed: {e}")
+        }
+    })?;
+    if !resp.status().is_success() {
+        return Err(format!("Download failed: HTTP {}", resp.status().as_u16()));
+    }
     if resp
         .content_length()
         .is_some_and(|n| n > MAX_PDF_DOWNLOAD as u64)
@@ -726,11 +753,16 @@ async fn download_pdf(url: &str) -> Result<Vec<u8>, String> {
         return Err(too_big());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("Failed to read response: {e}"))?
-    {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| {
+        if e.is_timeout() {
+            format!(
+                "Download timed out (limit {} s)",
+                PDF_DOWNLOAD_TIMEOUT.as_secs()
+            )
+        } else {
+            format!("Failed to read response: {e}")
+        }
+    })? {
         if bytes.len() + chunk.len() > MAX_PDF_DOWNLOAD {
             return Err(too_big());
         }

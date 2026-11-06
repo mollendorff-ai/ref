@@ -4,6 +4,7 @@
 
 use crate::cookies::Cookie;
 use anyhow::{Context, Result};
+use chromiumoxide::browser::BrowserConfigBuilder;
 use chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, EventResponseReceived, ResourceType, SetCookiesParams, TimeSinceEpoch,
 };
@@ -105,6 +106,7 @@ pub struct BrowserPool {
     user_agent: String,
     profile_dir: PathBuf,
     cookies: Vec<CookieParam>,
+    cookie_jar: Vec<Cookie>,
 }
 
 impl BrowserPool {
@@ -128,6 +130,7 @@ impl BrowserPool {
             )
         })?;
 
+        sweep_orphans();
         let profile_dir = unique_profile_dir();
         track_profile(&profile_dir, true);
         let sandbox = want_sandbox(
@@ -163,12 +166,26 @@ impl BrowserPool {
             user_agent: honest_user_agent(&chrome_ua),
             profile_dir,
             cookies: Vec::new(),
+            cookie_jar: Vec::new(),
         })
     }
 
     /// Send these cookies with every page opened from now on.
     pub fn set_cookies(&mut self, cookies: &[Cookie]) {
         self.cookies = cookies.iter().filter_map(to_cookie_param).collect();
+        self.cookie_jar = cookies.to_vec();
+    }
+
+    /// Headers for a download outside Chrome that should look like the page
+    /// Chrome just loaded: the same user agent and the cookies that apply.
+    #[must_use]
+    pub fn download_headers(&self, url: &str) -> DownloadHeaders {
+        DownloadHeaders {
+            user_agent: self.user_agent.clone(),
+            cookie: url::Url::parse(url)
+                .ok()
+                .and_then(|u| crate::cookies::header_for(&self.cookie_jar, &u)),
+        }
     }
 
     /// Get a new page with resource blocking
@@ -227,40 +244,70 @@ impl Drop for BrowserPool {
     }
 }
 
-/// Extra Chrome switches, without the leading `--`.
+/// Extra Chrome switches as (name, value) pairs, without the leading `--`
+/// (chromiumoxide adds it; an empty value means a bare switch).
 ///
 /// Most keep Chrome from calling Google (component updates, sync, sign-in,
 /// safe browsing, metrics, field trials) while it renders pages for ref.
-/// `disable-features` repeats chromiumoxide's own list because Chrome keeps
-/// only the last value of a repeated switch.
-const CHROME_FLAGS: [&str; 22] = [
-    "headless=new",
-    "disable-gpu",
-    "disable-dev-shm-usage",
-    "no-first-run",
-    "no-default-browser-check",
-    "disable-background-networking",
-    "disable-component-update",
-    "disable-sync",
-    "disable-default-apps",
-    "disable-extensions",
-    "disable-component-extensions-with-background-pages",
-    "disable-domain-reliability",
-    "disable-client-side-phishing-detection",
-    "disable-breakpad",
-    "disable-field-trial-config",
-    "metrics-recording-only",
-    "no-pings",
-    "no-service-autorun",
-    "password-store=basic",
-    "use-mock-keychain",
-    "safebrowsing-disable-auto-update",
-    "disable-features=TranslateUI,WebUIOmniboxPopup,WebUIOmniboxAimPopup,WebUIReloadButton,\
-     AimEnabled,AutofillServerCommunication,NetworkTimeServiceQuerying,PreconnectToSearch,\
-     OptimizationHints,OptimizationGuideModelDownloading,MediaRouter,DialMediaRouteProvider,\
-     Translate,CertificateTransparencyComponentUpdater,InterestFeedContentSuggestions,\
-     AccountConsistency,GlobalMediaControls,SafeBrowsingEnhancedProtection",
+const CHROME_SWITCHES: [(&str, &str); 21] = [
+    ("headless", "new"),
+    ("disable-gpu", ""),
+    ("disable-dev-shm-usage", ""),
+    ("no-first-run", ""),
+    ("no-default-browser-check", ""),
+    ("disable-background-networking", ""),
+    ("disable-component-update", ""),
+    ("disable-sync", ""),
+    ("disable-default-apps", ""),
+    ("disable-extensions", ""),
+    ("disable-component-extensions-with-background-pages", ""),
+    ("disable-domain-reliability", ""),
+    ("disable-client-side-phishing-detection", ""),
+    ("disable-breakpad", ""),
+    ("disable-field-trial-config", ""),
+    ("metrics-recording-only", ""),
+    ("no-pings", ""),
+    ("no-service-autorun", ""),
+    ("password-store", "basic"),
+    ("use-mock-keychain", ""),
+    ("safebrowsing-disable-auto-update", ""),
 ];
+
+/// Chrome features to turn off. Passed under the same `disable-features` key
+/// chromiumoxide uses (its default is `TranslateUI`), so its builder merges
+/// both lists into one switch
+/// (Chrome keeps only the last of repeated switches, and the order of
+/// separately keyed switches is random).
+const DISABLED_FEATURES: [&str; 16] = [
+    "Translate",
+    "AutofillServerCommunication",
+    "NetworkTimeServiceQuerying",
+    "PreconnectToSearch",
+    "OptimizationHints",
+    "OptimizationGuideModelDownloading",
+    "MediaRouter",
+    "DialMediaRouteProvider",
+    "CertificateTransparencyComponentUpdater",
+    "InterestFeedContentSuggestions",
+    "AccountConsistency",
+    "GlobalMediaControls",
+    "SafeBrowsingEnhancedProtection",
+    "PrivacySandboxSettings4",
+    "AimEnabled",
+    "WebUIOmniboxPopup",
+];
+
+/// Apply [`CHROME_SWITCHES`] and [`DISABLED_FEATURES`] to a launch config.
+fn with_chrome_args(mut builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
+    for (key, value) in CHROME_SWITCHES {
+        builder = if value.is_empty() {
+            builder.arg(key)
+        } else {
+            builder.arg((key, value))
+        };
+    }
+    builder.arg(("disable-features", &DISABLED_FEATURES[..]))
+}
 
 async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result<Browser> {
     // chromiumoxide adds the leading "--" itself, so flags are written without it
@@ -268,9 +315,7 @@ async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result
     let mut builder = BrowserConfig::builder()
         .chrome_executable(chrome_path)
         .user_data_dir(profile_dir);
-    for flag in CHROME_FLAGS {
-        builder = builder.arg(flag);
-    }
+    builder = with_chrome_args(builder);
     if !sandbox {
         builder = builder.no_sandbox();
     }
@@ -285,6 +330,73 @@ async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result
     // Spawn handler in background
     tokio::spawn(async move { while handler.next().await.is_some() {} });
     Ok(browser)
+}
+
+/// Clean up after ref runs that were killed outright (SIGKILL, power loss):
+/// their Chrome may still be running and their profile is still on disk.
+/// A profile is stale when the ref process named in it no longer exists.
+#[cfg(target_os = "linux")]
+fn sweep_orphans() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pid) = profile_owner(&name) else {
+            continue;
+        };
+        if pid == std::process::id() || Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        let dir = entry.path();
+        let killed = kill_chrome_using(&dir);
+        // A killed Chrome can still write to its profile while it exits
+        for _ in 0..if killed { 3 } else { 1 } {
+            let _ = std::fs::remove_dir_all(&dir);
+            if killed {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sweep_orphans() {}
+
+/// Kill every process whose command line uses `profile` as its user-data-dir;
+/// true when any was found
+#[cfg(target_os = "linux")]
+fn kill_chrome_using(profile: &Path) -> bool {
+    let needle = format!("--user-data-dir={}", profile.display());
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    let mut killed = false;
+    for proc_entry in procs.flatten() {
+        let pid = proc_entry.file_name().to_string_lossy().into_owned();
+        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let cmdline = std::fs::read(proc_entry.path().join("cmdline")).unwrap_or_default();
+        let uses_profile = cmdline
+            .split(|b| *b == 0)
+            .any(|arg| arg == needle.as_bytes());
+        if uses_profile {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid])
+                .status();
+            killed = true;
+        }
+    }
+    killed
+}
+
+/// The ref process id in a profile folder name `ref-chrome-<pid>-<nanos>`
+fn profile_owner(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("ref-chrome-")?;
+    let (pid, nanos) = rest.split_once('-')?;
+    nanos.parse::<u32>().ok()?;
+    pid.parse().ok()
 }
 
 /// A profile folder unique to this process and pool
@@ -349,6 +461,33 @@ fn to_cookie_param(c: &Cookie) -> Option<CookieParam> {
         b = b.expires(TimeSinceEpoch::new(exp));
     }
     b.build().ok()
+}
+
+/// Copies each open shadow root's HTML into a `<div data-ref-shadow>` inside its
+/// host, innermost hosts first so nested components are included.
+const FLATTEN_SHADOW_ROOTS: &str = r"(() => {
+  const hosts = [];
+  const roots = [document];
+  while (roots.length) {
+    const root = roots.shift();
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) { hosts.push(el); roots.push(el.shadowRoot); }
+    }
+  }
+  for (const host of hosts.reverse()) {
+    const copy = document.createElement('div');
+    copy.setAttribute('data-ref-shadow', '');
+    copy.innerHTML = host.shadowRoot.innerHTML;
+    host.appendChild(copy);
+  }
+  return hosts.length;
+})()";
+
+/// Request headers for a download made outside Chrome
+#[derive(Debug, Clone, Default)]
+pub struct DownloadHeaders {
+    pub user_agent: String,
+    pub cookie: Option<String>,
 }
 
 /// A browser tab. Dropping it closes the tab and then frees its slot in the pool,
@@ -476,9 +615,16 @@ impl BrowserPage {
 
     /// Get page content (for data extraction)
     ///
+    /// Text inside open shadow roots (web components) is not part of the
+    /// serialized HTML, so it is copied into the page first; closed shadow
+    /// roots cannot be read.
+    ///
     /// # Errors
     /// Returns an error if content extraction fails.
     pub async fn content(&self) -> Result<String> {
+        // Best effort: a page without web components, or with scripts blocked,
+        // is read as it is
+        let _ = self.page.evaluate(FLATTEN_SHADOW_ROOTS).await;
         self.page
             .content()
             .await
@@ -599,11 +745,12 @@ mod tests {
     }
 
     #[test]
-    fn test_chrome_flags_have_no_leading_dashes() {
-        for flag in CHROME_FLAGS {
-            assert!(!flag.starts_with('-'), "{flag}");
-            assert!(!flag.contains(' '), "{flag}");
+    fn test_chrome_switches_are_bare_names() {
+        for (key, value) in CHROME_SWITCHES {
+            assert!(!key.starts_with('-') && !key.contains('='), "{key}");
+            assert!(!value.contains(' '), "{value}");
         }
+        assert!(DISABLED_FEATURES.iter().all(|f| !f.contains([',', ' '])));
     }
 
     #[test]
@@ -631,6 +778,18 @@ mod tests {
         assert!(!ua.contains("Headless"));
         assert!(ua.contains("mollendorff-ref/"));
         assert!(honest_user_agent("").starts_with("Mozilla/5.0 (compatible) mollendorff-ref/"));
+    }
+
+    #[test]
+    fn test_profile_owner() {
+        assert_eq!(profile_owner("ref-chrome-4195-594839600"), Some(4195));
+        assert_eq!(profile_owner("ref-chrome-x-1"), None);
+        assert_eq!(profile_owner("ref-chrome-12"), None);
+        assert_eq!(profile_owner("ref-chrome-12-abc"), None);
+        assert_eq!(profile_owner("chromiumoxide-runner"), None);
+        let own = unique_profile_dir();
+        let name = own.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(profile_owner(&name), Some(std::process::id()));
     }
 
     #[test]

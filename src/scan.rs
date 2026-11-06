@@ -61,6 +61,7 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
 ///
 /// Returns an error if file patterns cannot be expanded, files cannot be read, or output cannot be written.
 pub(crate) async fn scan_files(args: ScanArgs) -> Result<ScanOutput> {
+    crate::guard::check_references_output(&args.output).map_err(|e| anyhow::anyhow!(e))?;
     let files = expand_files(&args.files).await?;
 
     if files.is_empty() {
@@ -161,7 +162,8 @@ pub(crate) async fn scan_files(args: ScanArgs) -> Result<ScanOutput> {
     refs_file.references.sort_by(|a, b| a.url.cmp(&b.url));
 
     let yaml = serde_yaml::to_string(&refs_file)?;
-    tokio::fs::write(&args.output, yaml).await?;
+    crate::guard::write_atomic(&args.output, yaml.as_bytes())
+        .with_context(|| format!("Failed to write {}", args.output.display()))?;
 
     Ok(ScanOutput {
         file: args.output.display().to_string(),

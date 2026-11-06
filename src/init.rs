@@ -28,7 +28,7 @@ pub struct InitOutput {
 
 /// # Errors
 /// Returns an error if the output file already exists (without `--force`) or cannot be written.
-pub async fn run_init(args: InitArgs) -> Result<()> {
+pub fn run_init(args: &InitArgs) -> Result<()> {
     // Check if file exists
     if args.output.exists() && !args.force {
         let error = serde_json::json!({
@@ -66,7 +66,7 @@ pub async fn run_init(args: InitArgs) -> Result<()> {
     let yaml = serde_yaml::to_string(&refs_file)?;
 
     // Write file
-    tokio::fs::write(&args.output, yaml).await?;
+    crate::guard::write_atomic(&args.output, yaml.as_bytes())?;
 
     // Output JSON result
     let output = InitOutput {

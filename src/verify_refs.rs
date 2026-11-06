@@ -176,8 +176,7 @@ pub(crate) async fn verify_refs_core(args: VerifyRefsArgs) -> Result<VerifyOutpu
     } else {
         let file = refs_file.lock().await;
         let yaml = serde_yaml::to_string(&*file)?;
-        tokio::fs::write(&args.file, yaml)
-            .await
+        crate::guard::write_atomic(&args.file, yaml.as_bytes())
             .with_context(|| format!("Failed to write {}", args.file.display()))?;
         eprintln!("Updated {}", args.file.display());
     }

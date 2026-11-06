@@ -30,12 +30,30 @@ fn handle(mut stream: TcpStream) {
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
-    // Drain headers
+    // Read headers (kept for the cookie check)
+    let mut headers = String::new();
     let mut line = String::new();
     while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+        headers.push_str(&line.to_ascii_lowercase());
         line.clear();
     }
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+    if path == "/signed-in.pdf" {
+        // Only for readers who send the session cookie, like a members-only PDF
+        let pdf: &[u8] = include_bytes!("fixtures/signed-in.pdf");
+        let (status, body): (&str, &[u8]) = if headers.contains("sid=letmein") {
+            ("200 OK", pdf)
+        } else {
+            ("403 Forbidden", b"forbidden")
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body);
+        return;
+    }
     let (status, extra, body) = route(path);
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
@@ -120,6 +138,28 @@ fn route(path: &str) -> (&'static str, String, String) {
             String::new(),
             page("Open", "<article class='no-paywall'><h1>Open article</h1><p>Free to read for everyone.</p></article>"),
         ),
+        "/components" => (
+            "200 OK",
+            String::new(),
+            page(
+                "Components",
+                "<main><h1>Components</h1><x-card></x-card></main><script>\
+                 customElements.define('x-card', class extends HTMLElement { constructor() { super();\
+                 this.attachShadow({mode: 'open'}).innerHTML = '<p>Text that lives in a shadow root.</p>'; } });\
+                 </script>",
+            ),
+        ),
+        "/hidden-overlay" => {
+            let text = "Open article text for everyone to read. ".repeat(60);
+            (
+                "200 OK",
+                String::new(),
+                page(
+                    "Open",
+                    &format!("<article><h1>Open</h1><p>{text}</p></article><div class='tp-modal' style='display:none'>Subscribe</div>"),
+                ),
+            )
+        }
         "/moved" => ("301 Moved Permanently", "Location: /report\r\n".to_string(), String::new()),
         "/broken" => ("500 Internal Server Error", String::new(), page("Oops", "<p>Server error page.</p>")),
         _ => ("404 Not Found", String::new(), page("Not found", "<p>Nothing here.</p>")),
@@ -317,4 +357,59 @@ fn no_paywall_class_is_not_a_paywall() {
     let base = serve();
     let (_, page) = fetch(&[&format!("{base}/no-paywall")]);
     assert_eq!(page["status"], "ok");
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn shadow_dom_text_is_kept() {
+    let base = serve();
+    let (_, page) = fetch(&[&format!("{base}/components")]);
+    assert!(
+        all_content(&page).contains("Text that lives in a shadow root."),
+        "{page}"
+    );
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn hidden_overlay_is_not_a_paywall() {
+    let base = serve();
+    let (_, page) = fetch(&[&format!("{base}/hidden-overlay")]);
+    assert_eq!(page["status"], "ok", "{page}");
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn signed_in_pdf_uses_the_cookie_file() {
+    let base = serve();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let jar = dir.path().join("cookies.txt");
+    std::fs::write(&jar, "127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\tletmein\n").expect("write jar");
+    let url = format!("{base}/signed-in.pdf");
+
+    let (code, page) = fetch(&["--cookies", jar.to_str().expect("path"), &url]);
+    assert_eq!(page["status"], "ok", "{page}");
+    assert!(all_content(&page).contains("signed-in readers"), "{page}");
+    assert_eq!(code, 0);
+
+    let (_, without) = fetch(&[&url]);
+    assert_eq!(without["status"], "dead", "{without}");
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn scan_refuses_to_overwrite_other_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("notes.md"), "See https://example.com/a").expect("write");
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}").expect("write");
+    let out = cargo_bin_cmd!("ref")
+        .current_dir(dir.path())
+        .args(["scan", "notes.md", "--output", "main.rs", "--no-merge"])
+        .output()
+        .expect("run ref");
+    assert!(!out.status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("main.rs")).expect("read"),
+        "fn main() {}"
+    );
 }

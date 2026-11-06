@@ -13,7 +13,7 @@ use crate::pdf;
 use crate::refresh_data::{refresh_data, RefreshConfig};
 use crate::scan::{self, ScanArgs};
 use crate::verify_refs::{self, VerifyRefsArgs};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -404,7 +404,9 @@ pub async fn run_mcp(root: Option<PathBuf>) -> Result<()> {
         Some(dir) => dir,
         None => std::env::current_dir()?,
     };
-    let root = root.canonicalize()?;
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("Workspace folder {} is not available", root.display()))?;
     info!("Workspace for file tools: {}", root.display());
 
     let server = RefMcpServer::new(root);

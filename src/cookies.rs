@@ -58,6 +58,27 @@ pub fn parse(text: &str) -> Result<Vec<Cookie>, String> {
     Ok(cookies)
 }
 
+/// The `Cookie` request header a browser would send to `url`, if any cookie applies.
+///
+/// Matches the cookie's domain or any subdomain of it, the path prefix and the
+/// secure flag. Expiry is not checked: the file is the user's own, loaded for
+/// this run.
+#[must_use]
+pub fn header_for(cookies: &[Cookie], url: &url::Url) -> Option<String> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    let secure = url.scheme() == "https";
+    let pairs: Vec<String> = cookies
+        .iter()
+        .filter(|c| {
+            let domain = c.domain.trim_start_matches('.').to_ascii_lowercase();
+            let domain_ok = host == domain || host.ends_with(&format!(".{domain}"));
+            domain_ok && url.path().starts_with(&c.path) && (secure || !c.secure)
+        })
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect();
+    (!pairs.is_empty()).then(|| pairs.join("; "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +116,27 @@ mod tests {
 
         let err = parse("example.com\tTRUE\t/\tFALSE\tsoon\tname\tvalue").unwrap_err();
         assert!(err.contains("not a number"), "{err}");
+    }
+
+    #[test]
+    fn header_matches_domain_path_and_scheme() {
+        let jar = parse(
+            ".example.com\tTRUE\t/\tFALSE\t0\ta\t1\n\
+             example.com\tFALSE\t/docs\tTRUE\t0\tb\t2\n\
+             other.org\tFALSE\t/\tFALSE\t0\tc\t3\n",
+        )
+        .unwrap();
+        let url = |u: &str| url::Url::parse(u).unwrap();
+        assert_eq!(
+            header_for(&jar, &url("https://example.com/docs/report.pdf")).as_deref(),
+            Some("a=1; b=2")
+        );
+        assert_eq!(
+            header_for(&jar, &url("http://www.example.com/docs/x")).as_deref(),
+            Some("a=1")
+        );
+        assert_eq!(header_for(&jar, &url("https://notexample.com/")), None);
+        assert_eq!(header_for(&jar, &url("data:text/plain,hi")), None);
     }
 
     #[test]
