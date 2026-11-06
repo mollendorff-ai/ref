@@ -3,6 +3,7 @@
 //! JSON output for agents, not humans.
 //! Bypasses bot protection via headless Chrome.
 
+pub mod access;
 pub mod browser;
 pub mod check_links;
 pub mod extract;
@@ -13,6 +14,7 @@ pub mod pdf;
 pub mod refresh_data;
 pub mod scan;
 pub mod schema;
+pub mod text;
 pub mod update;
 pub mod verify_refs;
 

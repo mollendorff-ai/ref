@@ -7,13 +7,14 @@
 //! - paywall: 200 but content blocked by paywall
 //! - login: 200 but login required
 
+use crate::access::{self, Access};
 use crate::browser::BrowserPool;
 use crate::schema::{ReferencesFile, Status};
+use crate::text::truncate;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Args;
 use futures::future::join_all;
-use scraper::{Html, Selector};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -68,10 +69,11 @@ pub struct VerifyOutput {
 /// # Errors
 ///
 /// Returns error if the references file can't be read, parsed, or written back.
-pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<()> {
+/// Returns `Ok(false)` when any reference is dead.
+pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<bool> {
     let output = verify_refs_core(args).await?;
     println!("{}", serde_json::to_string(&output)?);
-    Ok(())
+    Ok(output.summary.dead == 0)
 }
 
 /// Core verification logic: read references, verify each URL, update file.
@@ -255,11 +257,11 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
         };
     }
 
-    // Check HTTP status heuristics
-    if nav.status == 404 || nav.status >= 500 {
+    // Any 4xx or 5xx response means the reference is dead
+    if let Some(code) = nav.status.filter(|c| *c >= 400) {
         return VerifyResult {
             status: Status::Dead,
-            notes: Some(format!("HTTP {}", nav.status)),
+            notes: Some(format!("HTTP {code}")),
         };
     }
 
@@ -289,20 +291,20 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
         };
     };
 
-    // Check for paywall indicators
-    if is_paywall(&html) {
-        return VerifyResult {
-            status: Status::Paywall,
-            notes: Some("Paywall detected".to_string()),
-        };
-    }
-
-    // Check for login wall indicators
-    if is_login_wall(&html) {
-        return VerifyResult {
-            status: Status::Login,
-            notes: Some("Login required".to_string()),
-        };
+    match access::detect(&html) {
+        Access::Paywall => {
+            return VerifyResult {
+                status: Status::Paywall,
+                notes: Some("Paywall detected".to_string()),
+            }
+        }
+        Access::Login => {
+            return VerifyResult {
+                status: Status::Login,
+                notes: Some("Login required".to_string()),
+            }
+        }
+        Access::Open => {}
     }
 
     VerifyResult {
@@ -311,118 +313,28 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
     }
 }
 
-/// Detect paywall indicators in HTML
-fn is_paywall(html: &str) -> bool {
-    let doc = Html::parse_document(html);
-    let lower = html.to_lowercase();
-
-    // Common paywall indicators
-    let paywall_patterns = [
-        "subscribe to continue",
-        "subscription required",
-        "premium content",
-        "paywall",
-        "member-only",
-        "members only",
-        "unlock this article",
-        "purchase to read",
-        "buy now to read",
-        "paid subscribers",
-    ];
-
-    for pattern in paywall_patterns {
-        if lower.contains(pattern) {
-            return true;
-        }
-    }
-
-    // Check for paywall-specific CSS classes/IDs
-    let paywall_selectors = [
-        "[class*='paywall']",
-        "[id*='paywall']",
-        "[class*='subscription-wall']",
-        "[class*='piano-offer']",
-        "[class*='premium-wall']",
-    ];
-
-    for sel_str in paywall_selectors {
-        if let Ok(sel) = Selector::parse(sel_str) {
-            if doc.select(&sel).next().is_some() {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Detect login wall indicators in HTML
-fn is_login_wall(html: &str) -> bool {
-    let doc = Html::parse_document(html);
-    let lower = html.to_lowercase();
-
-    // Common login wall indicators
-    let login_patterns = [
-        "sign in to continue",
-        "log in to continue",
-        "login to continue",
-        "please sign in",
-        "please log in",
-        "create an account",
-        "sign up to view",
-        "register to view",
-        "authentication required",
-    ];
-
-    for pattern in login_patterns {
-        if lower.contains(pattern) {
-            return true;
-        }
-    }
-
-    // Check for login-specific elements that block content
-    let login_selectors = [
-        "[class*='login-wall']",
-        "[class*='auth-wall']",
-        "[class*='signup-wall']",
-        "[id*='login-modal']",
-        "[class*='gate-content']",
-    ];
-
-    for sel_str in login_selectors {
-        if let Ok(sel) = Selector::parse(sel_str) {
-            if doc.select(&sel).next().is_some() {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max - 3])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_is_paywall() {
-        assert!(is_paywall("<div>Subscribe to continue reading</div>"));
-        assert!(is_paywall("<div class='paywall-overlay'>content</div>"));
-        assert!(!is_paywall("<div>Normal content here</div>"));
-    }
-
-    #[test]
-    fn test_is_login_wall() {
-        assert!(is_login_wall("<div>Please sign in to continue</div>"));
-        assert!(is_login_wall("<div class='login-wall'>content</div>"));
-        assert!(!is_login_wall("<div>Normal content here</div>"));
+    fn test_compute_summary_counts_each_status() {
+        let statuses = [
+            Status::Ok,
+            Status::Dead,
+            Status::Dead,
+            Status::Paywall,
+            Status::Login,
+            Status::Redirect,
+        ];
+        let summary = compute_summary(8, 2, &statuses);
+        assert_eq!(summary.total, 8);
+        assert_eq!(summary.verified, 6);
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.dead, 2);
+        assert_eq!(summary.paywall, 1);
+        assert_eq!(summary.login, 1);
+        assert_eq!(summary.redirect, 1);
+        assert_eq!(summary.skipped, 2);
     }
 }
