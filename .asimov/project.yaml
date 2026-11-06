@@ -2,18 +2,20 @@ identity:
   name: "ref"
   type: rust
 
-description: "CLI for fetching web pages (via headless Chrome) and extracting structured content from PDFs — tables, headings, text. Single static binary, no runtime deps."
+description: "CLI and MCP server for fetching web pages (via headless Chrome) and extracting structured content from PDFs — tables, headings, text. Single static binary; needs Chrome or Chromium installed."
 
 stack:
   - "chromiumoxide (headless Chrome)"
-  - "lopdf (PDF parsing)"
+  - "pdf-extract (PDF parsing)"
+  - "scraper (HTML parsing)"
+  - "rmcp (MCP server)"
   - "clap (CLI)"
   - "tokio (async runtime)"
-  - "thiserror (error types)"
+  - "anyhow (error handling)"
 
 conventions:
   - "Result<T, E> for errors, no panics"
-  - "No unwrap() in library code"
+  - "No unwrap() in library code (constant regexes excepted)"
   - "clippy pedantic, zero warnings"
   - "Colocated tests (#[cfg(test)] mod tests)"
   - "One sentence per line in docs (for git diffs)"

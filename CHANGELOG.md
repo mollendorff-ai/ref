@@ -2,6 +2,29 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.8.2] - 2026-11-06
+
+Small fixes from the 1.8.1 evaluation.
+
+### Fixed
+
+- **`refresh-data` amounts**: a currency sign with no number beside it (for example `M$.` at the end of a sentence) was reported as the amount `"."`. A number is now required, and trailing punctuation and spaces are no longer part of `raw`. Percentages follow the same rule.
+- **`ref_scan` refusals**: an output that is not `.yaml` or `.yml`, or an existing file that is not a references file, now returns invalid params (`-32602`) like the other workspace refusals, instead of an internal error (`-32603`).
+
+### Added
+
+- `refresh-data` reads amounts written with the sign after the number (`4,5 M$`, `150 €`) and the signs `€`, `£`, `CA$`, `US$`, `C$` and `A$`, not only `$`. Each amount has a new `currency` field.
+
+### Changed
+
+- Makefile: the Linux ARM64 build targets `aarch64-unknown-linux-musl` like the release workflow; the Windows targets are removed (the Release workflow builds Windows with MSVC); `make lint` uses `--all-targets` and the coverage exclusions match CI.
+- CHANGELOG: the dates of 0.6.0 to 1.1.0 are corrected to match the git history (the repository starts on 2025-12-07). 0.6.0, 0.7.0 and 0.7.1 are dated by month only because no commit marks them.
+
+### Documentation
+
+- README: the `Content` heading for text before the first heading, the character-encoding limitation, and the Chrome 144+ opt-in to remote debugging.
+- ADR-001: an update note (rmcp 3.9, only `ref_fetch` shares a browser, saved profile). `.asimov/project.yaml` lists the real dependencies.
+
 ## [1.8.1] - 2026-11-06
 
 ### Added
@@ -267,7 +290,7 @@ Enhanced extraction & SPA support.
 - PDF output now includes `tables` field (empty array if no tables detected)
 - Heading detection uses confidence threshold (0.5+) instead of simple regex
 
-## [1.1.0] - 2025-01-02
+## [1.1.0] - 2026-01-01
 
 Rebrand & Release Infrastructure.
 
@@ -284,7 +307,7 @@ Rebrand & Release Infrastructure.
 - `update` command: self-update from GitHub releases
 - Updated LICENSE, README, schemas for new branding
 
-## [1.0.0] - 2024-12-31
+## [1.0.0] - 2025-12-15
 
 Full LLM reference toolkit.
 
@@ -293,7 +316,7 @@ Full LLM reference toolkit.
 - `pdf` command: extract text from PDF files
 - `pdf` command: output same JSON structure as fetch
 
-## [0.9.0] - 2024-12-30
+## [0.9.0] - 2025-12-15
 
 ### Added
 
@@ -302,21 +325,21 @@ Full LLM reference toolkit.
 - `scan` command: dedupe, track cited_in per reference
 - `scan` command: infer categories from file paths
 
-## [0.8.0] - 2024-12-29
+## [0.8.0] - 2025-12-15
 
 ### Added
 
 - deploy-kveldulf target (remote build)
 - Simplified Makefile
 
-## [0.7.1] - 2024-12-28
+## [0.7.1] - 2025-12
 
 ### Added
 
 - `check-links` command: compact JSON output
 - `refresh-data` command: compact JSON output
 
-## [0.7.0] - 2024-12-27
+## [0.7.0] - 2025-12
 
 ### Added
 
@@ -324,7 +347,7 @@ Full LLM reference toolkit.
 - Content cleaning (strip nav/footer/aside)
 - `--raw` and `--cookies` flags
 
-## [0.6.0] - 2024-12-26
+## [0.6.0] - 2025-12
 
 ### Added
 

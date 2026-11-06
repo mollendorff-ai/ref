@@ -59,6 +59,7 @@ ref fetch https://example.com/report 2>/dev/null | jq .
 - Paragraphs, lists, tables, block quotes and definition lists are kept in document order; lists and tables come out as Markdown.
 - Navigation, headers, footers, asides and forms outside the article are dropped (`--raw` keeps them).
 - Code blocks go to a separate `code` array with the detected language.
+- Text before the first heading goes into a section whose heading is `Content` (level 1).
 - Null fields and empty arrays are omitted.
 
 ### Status and HTTP code
@@ -143,7 +144,8 @@ ref reads them with your own sessions, which you set up once in a normal Chrome 
 - The saved profile is the folder `.ref/chrome-profile` in your home folder (`~/.ref/chrome-profile` on macOS and Linux, `%USERPROFILE%\.ref\chrome-profile` on Windows).
   ref uses it automatically once it exists and never deletes it.
 - It is separate from your everyday Chrome, which keeps running as usual.
-  ref cannot use your everyday profile: since version 136, Chrome refuses remote control of it to protect its cookies, and ref says so if you point it there.
+  ref does not use your everyday profile: since version 136, Chrome refuses remote control of it to protect its cookies, and ref says so if you point it there.
+  Chrome 144 and later let you opt in to remote debugging of your running browser (`chrome://inspect/#remote-debugging`) for tools that attach to it; ref does not do that, and a separate profile also keeps an agent out of your everyday sessions.
 - Only one Chrome can use the profile at a time: quit the `ref login` window before fetching, and stop `ref mcp` before running `ref login`.
   ref says which process holds it if you forget.
 - `REF_CHROME_PROFILE=<folder>` uses another saved profile (for example one per project); `REF_CHROME_PROFILE=fresh` runs with an empty, temporary profile instead, deleted afterwards.
@@ -214,6 +216,7 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 ## Limitations
 
 - **Bot walls and CAPTCHAs**: ref does not solve them. With your saved profile, a check you passed in `ref login` usually carries over until it expires; without it, sites that block automated browsers will block ref too, and those pages come back as `dead` or with little content.
+- **Character encoding**: a page that declares no encoding (no `Content-Type` charset and no `<meta charset>`) is decoded the way Chrome guesses, often as Windows-1252, so accented text can come out garbled; ref does not change that.
 - **Content heuristics**: main-content selection (`main`, `article`, then common class names, then `body`) can miss content on unusual layouts; use `--selector` or `--raw`.
 - **Late rendering**: content that appears only after a timer, with no network activity, can be missed; ref waits for the network to go quiet, not for arbitrary scripts.
   In tests, content added 200 ms after load was kept and content added 2.5 s after load was missed.

@@ -292,9 +292,13 @@ impl RefMcpServer {
         let output = params
             .output
             .unwrap_or_else(|| "references.yaml".to_string());
+        let output = guard::check_workspace_path(&output, &root).map_err(invalid)?;
+        // A refused output is a bad parameter, like a path outside the workspace
+        // (scan_files checks again for the CLI)
+        guard::check_references_output(&output).map_err(invalid)?;
         let args = ScanArgs {
             files,
-            output: guard::check_workspace_path(&output, &root).map_err(invalid)?,
+            output,
             merge: params.merge.unwrap_or(true),
             merge_compat: false,
         };
@@ -550,6 +554,34 @@ mod tests {
             let err = server.ref_pdf(Parameters(params)).await.unwrap_err();
             assert!(err.message.contains("working directory"), "{}", err.message);
         }
+    }
+
+    #[tokio::test]
+    async fn test_ref_scan_refused_output_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "see https://example.com").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a references file").unwrap();
+        std::fs::write(dir.path().join("other.yaml"), "just: some yaml").unwrap();
+        let server = RefMcpServer::new(dir.path().canonicalize().unwrap());
+        // not .yaml/.yml, and an existing file that is not a references file
+        for output in ["a.md", "notes.txt", "other.yaml"] {
+            let params = ScanParams {
+                files: vec!["a.md".to_string()],
+                output: Some(output.to_string()),
+                merge: None,
+            };
+            let err = server.ref_scan(Parameters(params)).await.unwrap_err();
+            assert_eq!(
+                err.code,
+                ErrorCode::INVALID_PARAMS,
+                "{output}: {}",
+                err.message
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("other.yaml")).unwrap(),
+            "just: some yaml"
+        );
     }
 
     #[tokio::test]

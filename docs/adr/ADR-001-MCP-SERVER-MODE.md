@@ -7,6 +7,14 @@
 
 ---
 
+## Update (2026-11-06, v1.8.1)
+
+The decision stands. Three things below describe the design as first written, not the code today:
+
+- `rmcp` is at 3.9 (see `Cargo.toml`). The 0.14 and 0.16 versions, download counts and star counts below are from when the decision was made.
+- Only `ref_fetch` reuses one shared browser (up to 16 tabs). `ref_check_links`, `ref_verify_refs` and `ref_refresh_data` start their own browser for each call, so the "Shared Browser Pool" box in the diagram applies to `ref_fetch` only.
+- When a saved profile exists (`ref login`), the MCP server runs Chrome with it, so tools see the sites you signed in to. See the README.
+
 ## Implementation Notes (v1.5.0)
 
 Implemented 2026-02-22 using `rmcp` 0.16.0 (up from 0.14.0 evaluated):
