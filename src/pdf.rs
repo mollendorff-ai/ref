@@ -430,27 +430,29 @@ fn generate_table_markdown(headers: Option<&Vec<String>>, rows: &[Vec<String>]) 
 
     let mut md = String::new();
 
-    // Header row
-    if let Some(hdrs) = headers {
-        md.push('|');
-        for (i, h) in hdrs.iter().enumerate() {
-            md.push_str(if h.is_empty() { " " } else { h });
-            if i < col_count - 1 {
-                md.push('|');
-            }
+    // Header row: Markdown requires one, so a table without detected
+    // headers gets an empty header row instead of promoting a data row.
+    let blank = vec![String::new(); col_count];
+    let hdrs = headers.unwrap_or(&blank);
+    md.push('|');
+    for i in 0..col_count {
+        let h = hdrs.get(i).map_or("", String::as_str);
+        md.push_str(if h.is_empty() { " " } else { h });
+        if i < col_count - 1 {
+            md.push('|');
         }
-        md.push_str("|\n");
-
-        // Separator
-        md.push('|');
-        for i in 0..col_count {
-            md.push_str("---");
-            if i < col_count - 1 {
-                md.push('|');
-            }
-        }
-        md.push_str("|\n");
     }
+    md.push_str("|\n");
+
+    // Separator
+    md.push('|');
+    for i in 0..col_count {
+        md.push_str("---");
+        if i < col_count - 1 {
+            md.push('|');
+        }
+    }
+    md.push_str("|\n");
 
     // Data rows
     for row in rows {
@@ -744,6 +746,15 @@ pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
         .map(|s| s.content.len() + s.heading.len())
         .sum();
 
+    let truncated = sections.len() == PDF_MAX_SECTIONS || sections.iter().any(|s| s.truncated);
+    let alerts = if truncated {
+        vec![format!(
+            "Content truncated: PDF sections are limited to {PDF_SECTION_CHARS} characters and {PDF_MAX_SECTIONS} sections"
+        )]
+    } else {
+        vec![]
+    };
+
     PdfPage {
         base: Page {
             url: file_url,
@@ -757,8 +768,9 @@ pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
             sections,
             links,
             code: extract_code(&text),
-            alerts: vec![],
+            alerts,
             chars,
+            truncated,
         },
         tables,
     }
@@ -780,10 +792,16 @@ fn error_page(url: &str, error: &str) -> PdfPage {
             code: vec![],
             alerts: vec![error.to_string()],
             chars: 0,
+            truncated: false,
         },
         tables: vec![],
     }
 }
+
+/// Maximum characters per PDF section
+const PDF_SECTION_CHARS: usize = 10_000;
+/// Maximum sections per PDF
+const PDF_MAX_SECTIONS: usize = 100;
 
 fn parse_sections(text: &str) -> Vec<Section> {
     let mut sections = Vec::new();
@@ -813,7 +831,8 @@ fn parse_sections(text: &str) -> Vec<Section> {
             sections.push(Section {
                 level: current_level,
                 heading: truncate(&current_heading, 200),
-                content: truncate(current_content.trim(), 10000),
+                content: truncate(current_content.trim(), PDF_SECTION_CHARS),
+                truncated: current_content.trim().len() > PDF_SECTION_CHARS,
             });
 
             // Start new section
@@ -834,11 +853,12 @@ fn parse_sections(text: &str) -> Vec<Section> {
         sections.push(Section {
             level: current_level,
             heading: truncate(&current_heading, 200),
-            content: truncate(current_content.trim(), 10000),
+            content: truncate(current_content.trim(), PDF_SECTION_CHARS),
+            truncated: current_content.trim().len() > PDF_SECTION_CHARS,
         });
     }
 
-    sections.truncate(100);
+    sections.truncate(PDF_MAX_SECTIONS);
     sections
 }
 
@@ -1100,6 +1120,16 @@ Bob           35     Chicago
         assert!(md.contains("|Name|Age|City|"));
         assert!(md.contains("|---|---|---|"));
         assert!(md.contains("|John|25|NYC|"));
+    }
+
+    #[test]
+    fn test_generate_table_markdown_without_headers_is_valid() {
+        let rows = vec![
+            vec!["North".to_string(), "120".to_string()],
+            vec!["South".to_string(), "90".to_string()],
+        ];
+        let md = generate_table_markdown(None, &rows);
+        assert!(md.starts_with("| | |\n|---|---|\n|North|120|"), "{md}");
     }
 
     // -------------------------------------------------------------------------

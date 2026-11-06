@@ -11,7 +11,17 @@ All notable changes to Möllendorff Ref.
 - `verify-refs` treats every 4xx as dead (it only caught 404 and 5xx).
 - Paywall and login detection no longer fire on ordinary articles that mention those words. A page is flagged only for structured data (`isAccessibleForFree: false`), a wall overlay element, or wall wording or a password field on a page with little readable text. `fetch` and `verify-refs` now share one detector.
 - `check-links` no longer panics on long non-ASCII URLs (byte slicing inside a character).
+- **No more silently dropped content**: `fetch` keeps lists (as Markdown bullets), tables (as Markdown tables), block quotes, definition lists, figure captions and loose text in `div`s, in document order. Before, only `<p>` and headings survived, so tables and lists vanished.
+- Text before the first heading is kept in a `Content` section (it was dropped).
+- Navigation, headers, footers, asides and forms are now actually stripped outside the article (the strip step was a no-op). `--raw` keeps them.
+- PDF tables without detected headers now produce valid Markdown (an empty header row plus the `---` separator).
+- MCP `ref_fetch` fetches its URLs concurrently (it ran them one at a time).
 - Fixed two `clippy::needless_raw_string_hashes` errors that failed the Lint job on current stable.
+
+### Added
+
+- **`--max-chars <N>`** for `fetch` (and `max_chars` for MCP `ref_fetch`): per-section limit, default 5000, `0` for no limit.
+- **Truncation is reported**: a cut section has `"truncated": true`, the page has `"truncated": true` and an alert saying how to get the full text. PDFs report their 10,000-character section limit the same way. Before, long content was cut to 2,000 characters per paragraph with no signal.
 
 ### Changed
 

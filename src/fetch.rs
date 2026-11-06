@@ -5,7 +5,9 @@
 
 use crate::access::{self, Access};
 use crate::browser::BrowserPool;
-use crate::text::{floor_char_boundary, truncate};
+pub use crate::content::Section;
+use crate::content::{self, MAX_SECTIONS};
+use crate::text::{cut_at_word, truncate};
 use anyhow::Result;
 use clap::Args;
 use futures::future::join_all;
@@ -40,7 +42,15 @@ pub struct FetchArgs {
     /// CSS selector to extract a specific element (skips content heuristics)
     #[arg(long)]
     pub selector: Option<String>,
+
+    /// Maximum characters per section; longer sections are cut and marked
+    /// "truncated" (0 = no limit)
+    #[arg(long, default_value_t = DEFAULT_MAX_CHARS)]
+    pub max_chars: usize,
 }
+
+/// Default per-section character limit
+pub const DEFAULT_MAX_CHARS: usize = 5000;
 
 /// Page status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -51,17 +61,6 @@ pub enum PageStatus {
     Login,
     Dead,
     Redirect,
-}
-
-/// A content section with heading hierarchy
-#[derive(Debug, Serialize, Clone)]
-pub struct Section {
-    /// Heading level (1-6)
-    pub level: u8,
-    /// Heading text
-    pub heading: String,
-    /// Content under this heading (cleaned text)
-    pub content: String,
 }
 
 /// A content link (not navigation)
@@ -106,6 +105,9 @@ pub struct Page {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub alerts: Vec<String>,
     pub chars: usize,
+    /// True when any content was cut to the size limits (see `alerts`)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// Fetch one or more URLs in parallel and print structured JSON to stdout.
@@ -131,6 +133,7 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
     let timeout = args.timeout;
     let raw = args.raw;
     let selector: Option<Arc<str>> = args.selector.map(|s| Arc::from(s.as_str()));
+    let max_chars = args.max_chars;
 
     // Spawn parallel fetch tasks
     let tasks: Vec<_> = args
@@ -139,7 +142,9 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
         .map(|url| {
             let pool = Arc::clone(&pool);
             let sel = selector.clone();
-            tokio::spawn(async move { fetch_one(&pool, &url, timeout, raw, sel.as_deref()).await })
+            tokio::spawn(async move {
+                fetch_one(&pool, &url, timeout, raw, sel.as_deref(), max_chars).await
+            })
         })
         .collect();
 
@@ -180,6 +185,7 @@ pub(crate) async fn fetch_one(
     timeout: u64,
     raw: bool,
     selector: Option<&str>,
+    max_chars: usize,
 ) -> Page {
     eprintln!("  -> {}", truncate(url, 60));
 
@@ -213,6 +219,7 @@ pub(crate) async fn fetch_one(
             code: vec![],
             alerts: vec![nav.error.unwrap_or_default()],
             chars: 0,
+            truncated: false,
         };
     }
 
@@ -238,6 +245,7 @@ pub(crate) async fn fetch_one(
                         code: vec![],
                         alerts: vec![format!("Redirected to: {}", final_u)],
                         chars: 0,
+                        truncated: false,
                     };
                 }
             }
@@ -249,7 +257,7 @@ pub(crate) async fn fetch_one(
         Err(e) => return error_page(url, &e.to_string()),
     };
 
-    let mut parsed = parse_page(&html, url, raw, selector);
+    let mut parsed = parse_page(&html, url, raw, selector, max_chars);
     apply_http_status(&mut parsed, nav.status);
     parsed
 }
@@ -278,10 +286,17 @@ fn error_page(url: &str, error: &str) -> Page {
         code: vec![],
         alerts: vec![error.to_string()],
         chars: 0,
+        truncated: false,
     }
 }
 
-pub(crate) fn parse_page(html: &str, url: &str, raw: bool, selector: Option<&str>) -> Page {
+pub(crate) fn parse_page(
+    html: &str,
+    url: &str,
+    raw: bool,
+    selector: Option<&str>,
+    max_chars: usize,
+) -> Page {
     let doc = Html::parse_document(html);
     let mut alerts = Vec::new();
 
@@ -322,7 +337,9 @@ pub(crate) fn parse_page(html: &str, url: &str, raw: bool, selector: Option<&str
     let content_doc = Html::parse_document(&content_html);
 
     // Extract sections
-    let sections = extract_sections(&content_doc);
+    let extracted = content::extract_sections(&content_doc, max_chars, raw);
+    let sections = extracted.sections;
+    let mut truncated = extracted.truncated;
 
     // Extract links (content only, not nav)
     let links = if raw {
@@ -332,7 +349,11 @@ pub(crate) fn parse_page(html: &str, url: &str, raw: bool, selector: Option<&str
     };
 
     // Extract code blocks
-    let code = extract_code_blocks(&content_doc);
+    let (code, code_truncated) = extract_code_blocks(&content_doc);
+    truncated |= code_truncated;
+    if truncated {
+        alerts.push(truncation_alert(max_chars));
+    }
 
     // Calculate total chars
     let chars: usize = sections
@@ -354,6 +375,19 @@ pub(crate) fn parse_page(html: &str, url: &str, raw: bool, selector: Option<&str
         code,
         alerts,
         chars,
+        truncated,
+    }
+}
+
+fn truncation_alert(max_chars: usize) -> String {
+    if max_chars == 0 {
+        format!(
+            "Content truncated: more than {MAX_SECTIONS} sections or {MAX_CODE_BLOCKS} code blocks, or a code block over {MAX_CODE_CHARS} characters"
+        )
+    } else {
+        format!(
+            "Content truncated: sections are limited to {max_chars} characters (use --max-chars 0 for full text)"
+        )
     }
 }
 
@@ -448,79 +482,6 @@ fn extract_main_content(doc: &Html) -> String {
     doc.html()
 }
 
-fn extract_sections(doc: &Html) -> Vec<Section> {
-    let mut sections = Vec::new();
-    let mut current_section: Option<Section> = None;
-
-    // Single-pass document-order traversal using a combined selector
-    let Ok(sel) = Selector::parse("h1, h2, h3, h4, h5, h6, p") else {
-        return sections;
-    };
-
-    for el in doc.select(&sel) {
-        let tag = el.value().name();
-        let text: String = el.text().collect::<String>().trim().to_string();
-        if text.is_empty() || text.len() < 3 {
-            continue;
-        }
-
-        if tag.starts_with('h') && tag.len() == 2 {
-            // Flush current section
-            if let Some(s) = current_section.take() {
-                if !s.content.is_empty() {
-                    sections.push(s);
-                }
-            }
-
-            let level = tag.chars().nth(1).and_then(|c| c.to_digit(10)).unwrap_or(1);
-            let level = u8::try_from(level).unwrap_or(1);
-            current_section = Some(Section {
-                level,
-                heading: truncate_section(&text, 200),
-                content: String::new(),
-            });
-        } else if tag == "p" {
-            if let Some(ref mut s) = current_section {
-                // Add paragraph to current section
-                if !s.content.is_empty() {
-                    s.content.push_str("\n\n");
-                }
-                s.content.push_str(&truncate_section(&text, 2000));
-            }
-        }
-    }
-
-    // Flush final section
-    if let Some(s) = current_section {
-        if !s.content.is_empty() {
-            sections.push(s);
-        }
-    }
-
-    // If no sections found, create one from all text
-    if sections.is_empty() {
-        let text = html2text::from_read(doc.html().as_bytes(), 120)
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .take(100)
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if !text.is_empty() {
-            sections.push(Section {
-                level: 1,
-                heading: "Content".to_string(),
-                content: truncate_section(&text, 10000),
-            });
-        }
-    }
-
-    // Limit total sections
-    sections.truncate(50);
-    sections
-}
-
 fn extract_content_links(doc: &Html, base_url: &str) -> Vec<Link> {
     let mut links = Vec::new();
     let mut seen = HashSet::new();
@@ -574,8 +535,14 @@ fn extract_all_links(doc: &Html, base_url: &str) -> Vec<Link> {
     extract_content_links(doc, base_url)
 }
 
-fn extract_code_blocks(doc: &Html) -> Vec<CodeBlock> {
+/// Maximum code blocks returned per page
+const MAX_CODE_BLOCKS: usize = 20;
+/// Maximum characters per code block
+const MAX_CODE_CHARS: usize = 5000;
+
+fn extract_code_blocks(doc: &Html) -> (Vec<CodeBlock>, bool) {
     let mut blocks = Vec::new();
+    let mut truncated = false;
     let mut seen_sources = HashSet::new();
 
     // Look for <pre><code> blocks first (more specific), then <pre>
@@ -606,18 +573,19 @@ fn extract_code_blocks(doc: &Html) -> Vec<CodeBlock> {
                     })
             });
 
-            blocks.push(CodeBlock {
-                lang,
-                source: truncate_section(&source, 5000),
-            });
-
-            if blocks.len() >= 20 {
+            truncated |= source.len() > MAX_CODE_CHARS;
+            if blocks.len() == MAX_CODE_BLOCKS {
+                truncated = true;
                 break;
             }
+            blocks.push(CodeBlock {
+                lang,
+                source: cut_at_word(&source, MAX_CODE_CHARS),
+            });
         }
     }
 
-    blocks
+    (blocks, truncated)
 }
 
 fn select_text(doc: &Html, sel: &str) -> Option<String> {
@@ -637,25 +605,10 @@ fn select_attr(doc: &Html, sel: &str, attr: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Find the largest valid char boundary <= pos
-fn truncate_section(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let end = floor_char_boundary(s, max);
-        let truncated = &s[..end];
-        if let Some(last_space) = truncated.rfind(' ') {
-            if last_space > end.saturating_sub(50) {
-                return format!("{}...", &s[..last_space]);
-            }
-        }
-        format!("{truncated}...")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::floor_char_boundary;
 
     #[test]
     fn test_parse_basic() {
@@ -670,10 +623,10 @@ mod tests {
             </body>
             </html>
         ";
-        let page = parse_page(html, "https://test.com", false, None);
+        let page = parse_page(html, "https://test.com", false, None, DEFAULT_MAX_CHARS);
         assert_eq!(page.status, PageStatus::Ok);
         assert_eq!(page.title, Some("Test Page".to_string()));
-        assert!(!page.sections.is_empty());
+        assert_ne!(page.sections, Vec::<Section>::new());
     }
 
     fn ok_page() -> Page {
@@ -682,6 +635,7 @@ mod tests {
             "https://test.com",
             false,
             None,
+            DEFAULT_MAX_CHARS,
         )
     }
 
@@ -715,6 +669,7 @@ mod tests {
             "https://test.com",
             false,
             None,
+            DEFAULT_MAX_CHARS,
         );
         assert_eq!(page.status, PageStatus::Ok);
     }
@@ -766,7 +721,7 @@ mod tests {
                 <p>Content under beta, also long enough to be meaningful.</p>
             </body></html>
         ";
-        let page = parse_page(html, "https://test.com", false, None);
+        let page = parse_page(html, "https://test.com", false, None, DEFAULT_MAX_CHARS);
         assert!(!page.sections.is_empty(), "should have sections");
         // Find Alpha section
         let alpha = page.sections.iter().find(|s| s.heading == "Alpha");
@@ -791,7 +746,8 @@ mod tests {
         let html =
             r#"<pre><code class="language-rust">fn main() { println!("hello"); }</code></pre>"#;
         let doc = Html::parse_document(html);
-        let blocks = extract_code_blocks(&doc);
+        let (blocks, truncated) = extract_code_blocks(&doc);
+        assert!(!truncated);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].lang, Some("rust".to_string()));
     }
@@ -812,8 +768,14 @@ mod tests {
                 <footer>Footer noise</footer>
             </body></html>
         "#;
-        let page = parse_page(html, "https://test.com", false, Some("#target"));
-        assert!(!page.sections.is_empty());
+        let page = parse_page(
+            html,
+            "https://test.com",
+            false,
+            Some("#target"),
+            DEFAULT_MAX_CHARS,
+        );
+        assert_ne!(page.sections, Vec::<Section>::new());
         let has_targeted = page
             .sections
             .iter()
@@ -834,7 +796,13 @@ mod tests {
             </body></html>
         ";
         // Selector that matches nothing — should fall back gracefully
-        let page = parse_page(html, "https://test.com", false, Some(".nonexistent-class"));
+        let page = parse_page(
+            html,
+            "https://test.com",
+            false,
+            Some(".nonexistent-class"),
+            DEFAULT_MAX_CHARS,
+        );
         assert!(
             !page.sections.is_empty(),
             "Should fall back to normal extraction"
