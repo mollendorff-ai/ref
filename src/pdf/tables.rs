@@ -542,7 +542,7 @@ Bob           35     Chicago
             ["Warm Sand", "150", "7 %"]
         );
         assert_eq!(cell_runs("one cell"), ["one cell"]);
-        assert!(cell_runs("   ").is_empty());
+        assert_eq!(cell_runs("   "), Vec::<String>::new());
     }
 
     #[test]

@@ -191,6 +191,9 @@ mod tests {
             extract_percentages("up 12 %, down 3,5% and 0.5%"),
             ["12 %", "3,5%", "0.5%"]
         );
-        assert!(extract_percentages("a . % or , % sign").is_empty());
+        assert_eq!(
+            extract_percentages("a . % or , % sign"),
+            Vec::<String>::new()
+        );
     }
 }
