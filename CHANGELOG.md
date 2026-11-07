@@ -27,6 +27,7 @@ PDF extraction fixes from the 1.8.1 evaluation.
 - `src/pdf.rs` (about 2,000 lines) is split into `src/pdf/` modules: `layout` (text and metadata from the PDF), `tables`, `headings`, `sections`, `fields` (title, author, date, DOI, links, code) and `mod` (command, download, page). No behaviour change: the output of 31 PDFs, fetch and refresh-data is byte-identical before and after the split.
 - Constant regexes are compiled once (`LazyLock` statics) instead of on every call, in `pdf`, `extract`, `scan` and `access`; the last `unwrap()` outside tests is gone. The unit tests run about 4× faster.
 - CI and Makefile coverage exclusions name the `pdf/` folder instead of `pdf.rs`, so the same code stays outside the 100% gate.
+- The author pattern uses Latin letter ranges (ASCII, Latin-1, Latin Extended-A) instead of Unicode classes, which took about 33 ms to compile on every PDF. With it, 1.8.3 extracts PDFs within 1–3% of 1.8.2's time (release build, median of 15 runs on 35-page documents).
 
 ## [1.8.2] - 2026-11-06
 

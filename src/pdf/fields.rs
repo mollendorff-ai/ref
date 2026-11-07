@@ -7,10 +7,12 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
-/// See [`extract_author`]
+/// See [`extract_author`]. Names use Latin letters (ASCII, Latin-1 and
+/// Latin Extended-A, so "Zoë Łukasiewicz" matches): Unicode classes such as
+/// `\p{L}` take about 30 ms to compile, paid on every PDF.
 static AUTHOR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?m)^[ \t]*(?:(?i:authors?|written by)[ \t]*:?[ \t]+(\p{Lu}[^\n]{0,150})|(?i:by)[ \t]+(\p{Lu}[\p{L}.' -]{1,60}(?:,[ \t]*\p{Lu}[\p{L}.' -]{1,60})*))[ \t]*$",
+        r"(?m)^[ \t]*(?:(?i:authors?|written by)[ \t]*:?[ \t]+([A-ZÀ-ÖØ-ÞĀ-ſ][^\n]{0,150})|(?i:by)[ \t]+([A-ZÀ-ÖØ-ÞĀ-ſ][A-Za-zÀ-ÖØ-öø-ÿĀ-ſ.' -]{1,60}(?:,[ \t]*[A-ZÀ-ÖØ-ÞĀ-ſ][A-Za-zÀ-ÖØ-öø-ÿĀ-ſ.' -]{1,60})*))[ \t]*$",
     )
     .expect("constant regex")
 });
@@ -189,6 +191,15 @@ mod tests {
         assert_eq!(
             extract_author("By the end of the quarter, sales grew."),
             None
+        );
+        // Accented Latin names, labelled or not
+        assert_eq!(
+            extract_author("By Zoë Łukasiewicz, José Ávila\n"),
+            Some("Zoë Łukasiewicz, José Ávila".to_string())
+        );
+        assert_eq!(
+            extract_author("Author: Élodie Côté\n"),
+            Some("Élodie Côté".to_string())
         );
     }
 
