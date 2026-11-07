@@ -110,45 +110,86 @@ impl Default for TableConfig {
     }
 }
 
-/// Detect tables in text using whitespace column analysis
+/// Detect tables in text using whitespace column analysis.
+///
+/// Blank lines inside a table do not end it: PDF text often has an empty line
+/// between rows when the rows are spaced out on the page.
 fn detect_tables(text: &str) -> Vec<Table> {
     let config = TableConfig::default();
     let lines: Vec<&str> = text.lines().collect();
     let mut tables = Vec::new();
-    let mut table_start: Option<usize> = None;
+    // (first table line, last table line, number of table lines)
+    let mut region: Option<(usize, usize, usize)> = None;
+    let mut blank_since_last = false;
+
+    let close = |region: Option<(usize, usize, usize)>, tables: &mut Vec<Table>| {
+        if let Some((start, last, count)) = region {
+            if count >= config.min_rows {
+                if let Some(table) = parse_table_region(&lines[start..=last], &config) {
+                    tables.push(table);
+                }
+            }
+        }
+    };
 
     for (i, line) in lines.iter().enumerate() {
-        let is_table_line = is_potential_table_line(line, &config);
-
-        match (table_start, is_table_line) {
-            (None, true) => {
-                table_start = Some(i);
-            }
-            (Some(start), false) => {
-                // End of table region
-                if i - start >= config.min_rows {
-                    if let Some(table) = parse_table_region(&lines[start..i], &config) {
-                        tables.push(table);
-                    }
+        if line.trim().is_empty() {
+            blank_since_last = true;
+            continue;
+        }
+        if is_potential_table_line(line, &config) && !is_heading_line(line) {
+            // After a blank line, only a row with as many cells continues the table
+            if let Some((_, last, _)) = region {
+                if blank_since_last && cell_runs(line).len() != cell_runs(lines[last]).len() {
+                    close(region.take(), &mut tables);
                 }
-                table_start = None;
             }
-            _ => {}
+            region = Some(match region {
+                Some((start, _, count)) => (start, i, count + 1),
+                None => (i, i, 1),
+            });
+        } else {
+            close(region.take(), &mut tables);
         }
+        blank_since_last = false;
     }
-
-    // Handle table at end of text
-    if let Some(start) = table_start {
-        if lines.len() - start >= config.min_rows {
-            if let Some(table) = parse_table_region(&lines[start..], &config) {
-                tables.push(table);
-            }
-        }
-    }
+    close(region, &mut tables);
 
     // Limit tables
     tables.truncate(20);
     tables
+}
+
+/// The cells of a line: text runs separated by two or more spaces
+fn cell_runs(line: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut spaces = 0;
+    for c in line.trim().chars() {
+        if c == ' ' || c == '\t' {
+            spaces += 1;
+            continue;
+        }
+        if spaces >= 2 && !cell.is_empty() {
+            cells.push(std::mem::take(&mut cell));
+        } else if spaces == 1 {
+            cell.push(' ');
+        }
+        spaces = 0;
+        cell.push(c);
+    }
+    if !cell.is_empty() {
+        cells.push(cell);
+    }
+    cells
+}
+
+/// A line that is a confident heading ("2.1  Notes on the data") is never a
+/// table row, even when a gap separates its number from its title
+fn is_heading_line(line: &str) -> bool {
+    find_gaps(line.trim(), 2).len() < 2
+        && detect_heading(line.trim(), &HeadingConfig::default())
+            .is_some_and(|h| h.confidence >= 0.8)
 }
 
 /// Check if a line looks like it could be part of a table
@@ -228,22 +269,31 @@ fn parse_table_region(lines: &[&str], config: &TableConfig) -> Option<Table> {
         return None;
     }
 
-    // Find consistent column boundaries across all lines
-    let column_positions = find_column_positions(lines, config)?;
+    // When every row has the same number of cells, split each row on its own
+    // gaps: this keeps right-aligned columns (numbers) intact
+    let split: Vec<Vec<String>> = lines
+        .iter()
+        .map(|l| cell_runs(l))
+        .filter(|cells| !cells.is_empty())
+        .collect();
+    let same_count = split.first().is_some_and(|first| {
+        first.len() >= config.min_columns && split.iter().all(|r| r.len() == first.len())
+    });
 
-    if column_positions.len() < config.min_columns - 1 {
-        return None;
-    }
-
-    // Extract cells using column positions
-    let mut rows: Vec<Vec<String>> = Vec::new();
-
-    for line in lines {
-        let cells = extract_cells(line, &column_positions);
-        if cells.iter().any(|c| !c.is_empty()) {
-            rows.push(cells);
+    let rows: Vec<Vec<String>> = if same_count {
+        split
+    } else {
+        // Rows with empty cells: find consistent column boundaries across all lines
+        let column_positions = find_column_positions(lines, config)?;
+        if column_positions.len() < config.min_columns - 1 {
+            return None;
         }
-    }
+        lines
+            .iter()
+            .map(|line| extract_cells(line, &column_positions))
+            .filter(|cells| cells.iter().any(|c| !c.is_empty()))
+            .collect()
+    };
 
     if rows.len() < config.min_rows {
         return None;
@@ -376,12 +426,9 @@ fn detect_header_row(rows: &[Vec<String>]) -> (Option<Vec<String>>, Vec<Vec<Stri
         header_score += 1;
     }
 
-    // Check if first row has title case or ALL CAPS
-    let first_has_caps = first_row.iter().filter(|c| !c.is_empty()).any(|c| {
-        is_title_case_word(c) || c.chars().all(|ch| !ch.is_alphabetic() || ch.is_uppercase())
-    });
-
-    if first_has_caps {
+    // Check if the first row is styled more like a header than the second
+    // (ALL CAPS over Title Case over lower case); rows styled alike say nothing
+    if caps_style(first_row) > caps_style(second_row) {
         header_score += 2;
     }
 
@@ -392,14 +439,35 @@ fn detect_header_row(rows: &[Vec<String>]) -> (Option<Vec<String>>, Vec<Vec<Stri
     }
 }
 
-/// Check if a string contains numeric values (currency, percentages, etc.)
+/// Check if a cell is a number (amounts, percentages, counts): it starts with
+/// a digit once signs, currency and brackets are removed.
+/// Labels with a digit inside ("Q3", "FY2026") are not numbers.
 fn has_numeric_value(s: &str) -> bool {
-    let cleaned: String = s
+    let mut cleaned = s
         .chars()
         .filter(|c| !['$', '€', '£', ',', '%', '(', ')', '-', '+', ' '].contains(c))
-        .collect();
+        .skip_while(|c| *c == '.')
+        .peekable();
+    cleaned.peek().is_some_and(char::is_ascii_digit)
+}
 
-    !cleaned.is_empty() && cleaned.chars().any(|c| c.is_ascii_digit())
+/// How header-like a row's capitals are: 2 = every word ALL CAPS,
+/// 1 = some word Title Case, 0 = neither
+fn caps_style(row: &[String]) -> u8 {
+    let words: Vec<&String> = row
+        .iter()
+        .filter(|c| c.chars().any(char::is_alphabetic))
+        .collect();
+    if words.is_empty() {
+        0
+    } else if words
+        .iter()
+        .all(|c| c.chars().all(|ch| !ch.is_alphabetic() || ch.is_uppercase()))
+    {
+        2
+    } else {
+        u8::from(words.iter().any(|c| is_title_case_word(c)))
+    }
 }
 
 /// Check if a word is title case
@@ -789,7 +857,7 @@ pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
 fn extract_pdf_bytes(bytes: &[u8], file_url: String, name: &Path) -> PdfPage {
     // pdf-extract can panic on malformed files; keep that from taking down
     // the whole command or the MCP server.
-    let text = match std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes)) {
+    let (text, info) = match std::panic::catch_unwind(|| extract_layout_text(bytes)) {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => {
             return error_page(&file_url, &format!("PDF extraction failed: {e}"));
@@ -810,8 +878,8 @@ fn extract_pdf_bytes(bytes: &[u8], file_url: String, name: &Path) -> PdfPage {
     // Extract any URLs from the text
     let links = extract_links(&text);
 
-    // Try to extract title from first line or filename
-    let title = extract_title(&text, name);
+    // Title: the PDF's metadata title, else its first line, else the file name
+    let title = info.title.or_else(|| extract_title(&text, name));
 
     // Calculate total chars
     let chars: usize = sections
@@ -835,7 +903,7 @@ fn extract_pdf_bytes(bytes: &[u8], file_url: String, name: &Path) -> PdfPage {
             http: None,
             title,
             site: None,
-            author: extract_author(&text),
+            author: info.author.or_else(|| extract_author(&text)),
             date: extract_date(&text),
             doi: extract_doi(&text),
             sections,
@@ -846,6 +914,232 @@ fn extract_pdf_bytes(bytes: &[u8], file_url: String, name: &Path) -> PdfPage {
             truncated,
         },
         tables,
+    }
+}
+
+/// Extract a PDF's text, keeping wide gaps between text runs as runs of spaces.
+///
+/// pdf-extract's own plain text output writes one space for any gap, so table
+/// cells drawn at separate positions on the page ("Region  Q3  Q4") come out as
+/// "Region Q3 Q4" and no column can be found. [`LayoutText`] writes the same
+/// text but pads a wide gap to the column where the next run starts.
+///
+/// Also returns the PDF's metadata, see [`PdfInfo`].
+fn extract_layout_text(bytes: &[u8]) -> Result<(String, PdfInfo), pdf_extract::OutputError> {
+    let mut doc = pdf_extract::Document::load_mem(bytes)?;
+    let mut out = LayoutText::default();
+    if doc.is_encrypted() {
+        // Many PDFs are encrypted with an empty user password (copy or print
+        // restrictions only); pdf-extract's own functions try the same.
+        pdf_extract::output_doc_encrypted(&mut doc, &mut out, "")?;
+    } else {
+        pdf_extract::output_doc(&doc, &mut out)?;
+    }
+    let info = PdfInfo {
+        title: info_string(&doc, b"Title").filter(|t| usable_title(t)),
+        author: info_string(&doc, b"Author").filter(|a| usable_author(a)),
+    };
+    Ok((out.text, info))
+}
+
+/// Title and author from the PDF's metadata (the Info dictionary), when usable
+#[derive(Debug, Default)]
+struct PdfInfo {
+    title: Option<String>,
+    author: Option<String>,
+}
+
+/// A text entry of the PDF's Info dictionary, with whitespace collapsed
+fn info_string(doc: &pdf_extract::Document, key: &[u8]) -> Option<String> {
+    let raw = doc
+        .trailer
+        .get_deref(b"Info", doc)
+        .and_then(pdf_extract::Object::as_dict)
+        .and_then(|info| info.get_deref(key, doc))
+        .and_then(pdf_extract::Object::as_str)
+        .ok()?;
+    let text = decode_pdf_string(raw);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+/// Decode a PDF text string: UTF-16BE with a byte order mark, else
+/// `PDFDocEncoding`, which is close to Latin-1 for the characters titles use
+fn decode_pdf_string(raw: &[u8]) -> String {
+    match raw {
+        [0xFE, 0xFF, rest @ ..] => {
+            let units: Vec<u16> = rest
+                .chunks_exact(2)
+                .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => raw.iter().map(|&b| char::from(b)).collect(),
+    }
+}
+
+/// A metadata author worth showing: not a placeholder some PDF writers put
+/// there by default ("anonymous", "Administrator")
+fn usable_author(author: &str) -> bool {
+    let placeholders = [
+        "anonymous",
+        "unknown",
+        "author",
+        "user",
+        "admin",
+        "administrator",
+        "owner",
+    ];
+    author.chars().count() > 1
+        && author.chars().count() <= 200
+        && !placeholders.contains(&author.to_lowercase().as_str())
+}
+
+/// A metadata title worth showing: not "Untitled", not a file name left
+/// behind by the program that made the PDF (`report_v3.docx`)
+fn usable_title(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    let file_name = [
+        ".pdf", ".doc", ".docx", ".tex", ".dvi", ".ppt", ".pptx", ".xls", ".xlsx", ".indd", ".odt",
+        ".rtf", ".txt", ".html",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext));
+    title.chars().count() > 3
+        && title.chars().count() <= 200
+        && !file_name
+        && !lower.starts_with("untitled")
+        && !lower.starts_with("microsoft word -")
+}
+
+/// A gap at least this wide (in font sizes) separates columns, not words.
+/// Word spaces are about 0.25 em, and stay under 0.7 em even in justified text.
+const COLUMN_GAP_EM: f64 = 1.0;
+/// Estimated width of one character (in font sizes), to turn page positions
+/// into character columns. Only alignment between rows matters, not accuracy.
+const CHAR_WIDTH_EM: f64 = 0.5;
+
+/// Plain text output that follows pdf-extract's `PlainTextOutput` (same line
+/// breaks and word spaces) but keeps column gaps, see [`extract_layout_text`].
+#[derive(Default)]
+struct LayoutText {
+    text: String,
+    page_height: f64,
+    /// x where the last character ended
+    last_end: f64,
+    last_y: f64,
+    /// true at the first character of a word, where spacing is decided
+    first_char: bool,
+    /// x where the current line's first character starts
+    line_origin: Option<f64>,
+    /// characters written on the current line
+    line_chars: usize,
+}
+
+impl LayoutText {
+    fn new_line(&mut self) {
+        self.text.push('\n');
+        self.line_origin = None;
+        self.line_chars = 0;
+    }
+
+    fn push(&mut self, s: &str) {
+        self.text.push_str(s);
+        self.line_chars += s.chars().count();
+    }
+
+    /// Spaces to write for a gap that starts a new text run at `x`
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    fn gap_spaces(&self, x: f64, font_size: f64) -> usize {
+        let gap = x - self.last_end;
+        match self.line_origin {
+            Some(origin) if gap >= font_size * COLUMN_GAP_EM && font_size > 0.0 => {
+                // Pad to the column of `x`, so cells in the same column line
+                // up across rows; at least two spaces mark a column gap.
+                let column = ((x - origin) / (font_size * CHAR_WIDTH_EM)).round();
+                let column = if column.is_finite() && column > 0.0 {
+                    column.min(10_000.0) as usize
+                } else {
+                    0
+                };
+                column.saturating_sub(self.line_chars).max(2)
+            }
+            _ => 1,
+        }
+    }
+}
+
+impl pdf_extract::OutputDev for LayoutText {
+    fn begin_page(
+        &mut self,
+        _page_num: u32,
+        media_box: &pdf_extract::MediaBox,
+        _art_box: Option<(f64, f64, f64, f64)>,
+    ) -> Result<(), pdf_extract::OutputError> {
+        self.page_height = media_box.ury - media_box.lly;
+        Ok(())
+    }
+
+    fn end_page(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+
+    fn output_character(
+        &mut self,
+        trm: &pdf_extract::Transform,
+        width: f64,
+        _spacing: f64,
+        font_size: f64,
+        char: &str,
+    ) -> Result<(), pdf_extract::OutputError> {
+        // Same geometry as PlainTextOutput: flip y so it grows down the page,
+        // and the font size as transformed by the text matrix.
+        let (x, y) = (trm.m31, self.page_height - trm.m32);
+        let size_x = font_size * (trm.m11 + trm.m21);
+        let size_y = font_size * (trm.m12 + trm.m22);
+        let size = (size_x * size_y).abs().sqrt();
+
+        if self.first_char {
+            let mut broke = false;
+            if (y - self.last_y).abs() > size * 1.5 {
+                self.new_line();
+                broke = true;
+            }
+            // moved left and down: a new line
+            if x < self.last_end && (y - self.last_y).abs() > size * 0.5 {
+                self.new_line();
+                broke = true;
+            }
+            if !broke && x > self.last_end + size * 0.1 {
+                let spaces = self.gap_spaces(x, size);
+                self.push(&" ".repeat(spaces));
+            }
+        }
+        if self.line_origin.is_none() {
+            self.line_origin = Some(x);
+        }
+        self.push(char);
+        self.first_char = false;
+        self.last_y = y;
+        self.last_end = x + width * size;
+        Ok(())
+    }
+
+    fn begin_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        self.first_char = true;
+        Ok(())
+    }
+
+    fn end_word(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
+    }
+
+    fn end_line(&mut self) -> Result<(), pdf_extract::OutputError> {
+        Ok(())
     }
 }
 
@@ -884,6 +1178,7 @@ fn parse_sections(text: &str) -> Vec<Section> {
     let mut current_heading = "Content".to_string();
     let mut current_content = String::new();
     let mut current_level: u8 = 1;
+    let mut first_heading_pending = true;
 
     for line in lines {
         let trimmed = line.trim();
@@ -894,12 +1189,41 @@ fn parse_sections(text: &str) -> Vec<Section> {
             continue;
         }
 
-        // Check if this looks like a heading
-        let heading_match = detect_heading(trimmed, &config);
+        // Check if this looks like a heading. A line with two or more column
+        // gaps is a table row, not a heading ("2025   Total   300").
+        let heading_match = if find_gaps(trimmed, 2).len() >= 2 {
+            None
+        } else {
+            detect_heading(trimmed, &config).map(|mut hm| {
+                hm.text = hm.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                hm
+            })
+        };
 
         let is_heading = heading_match.as_ref().is_some_and(|h| h.confidence >= 0.5);
 
-        if is_heading && current_content.len() >= config.min_content_before_heading {
+        // A heading before any text names the first section instead of the
+        // "Content" placeholder (so "1. Introduction" on the first line is a heading)
+        if is_heading && sections.is_empty() && first_heading_pending && current_content.is_empty()
+        {
+            if let Some(hm) = heading_match {
+                current_heading = hm.text;
+                current_level = hm.level;
+            }
+            first_heading_pending = false;
+            continue;
+        }
+        first_heading_pending = false;
+
+        // A confident heading (numbered, Roman numeral, keyword) starts a new
+        // section after any text; a weak one (ALL CAPS, mostly uppercase) only
+        // after enough text, so short runs of capitals do not split sections.
+        let confident = heading_match.as_ref().is_some_and(|h| h.confidence >= 0.8);
+
+        if is_heading
+            && !current_content.is_empty()
+            && (confident || current_content.len() >= config.min_content_before_heading)
+        {
             // Save current section
             sections.push(Section {
                 level: current_level,
@@ -917,7 +1241,16 @@ fn parse_sections(text: &str) -> Vec<Section> {
             if !current_content.is_empty() && !current_content.ends_with('\n') {
                 current_content.push(' ');
             }
-            current_content.push_str(trimmed);
+            // Column gaps are kept for table detection; in section text one
+            // space is enough (the `tables` field keeps the layout)
+            let mut words = trimmed.split_whitespace();
+            if let Some(first) = words.next() {
+                current_content.push_str(first);
+                for word in words {
+                    current_content.push(' ');
+                    current_content.push_str(word);
+                }
+            }
         }
     }
 
@@ -953,10 +1286,18 @@ fn extract_title(text: &str, path: &Path) -> Option<String> {
 }
 
 fn extract_author(text: &str) -> Option<String> {
-    let author_re = Regex::new(r"(?i)(?:author|by|written by)[:\s]+([^\n]+)").ok()?;
+    // A labelled line ("Author: Jane Doe", "Written by Jane Doe"), or a line
+    // that is only "By" and a list of names ("By Jane Doe, Ana Lima").
+    // "by region, in thousands" inside a sentence is neither. Only the
+    // keywords ignore case: names must start with a capital.
+    let author_re = Regex::new(
+        r"(?m)^[ \t]*(?:(?i:authors?|written by)[ \t]*:?[ \t]+(\p{Lu}[^\n]{0,150})|(?i:by)[ \t]+(\p{Lu}[\p{L}.' -]{1,60}(?:,[ \t]*\p{Lu}[\p{L}.' -]{1,60})*))[ \t]*$",
+    )
+    .ok()?;
     author_re
         .captures(text)
-        .map(|c| c[1].trim().to_string())
+        .and_then(|c| c.get(1).or_else(|| c.get(2)))
+        .map(|m| m.as_str().trim().to_string())
         .filter(|s| s.len() < 200)
 }
 
@@ -1165,6 +1506,263 @@ Bob           35     Chicago
         );
     }
 
+    // ---- PDF layout: tables, headings, metadata (tests/fixtures/report.pdf) ----
+
+    /// The fixture made by `tests/fixtures/make_report_pdf.py`: a first-line
+    /// heading, a table drawn cell by cell with right-aligned numbers and
+    /// spaced-out rows, and a heading drawn as number + title.
+    fn report_fixture() -> PdfPage {
+        let bytes = include_bytes!("../tests/fixtures/report.pdf");
+        extract_pdf_bytes(
+            bytes,
+            "file:///report.pdf".to_string(),
+            Path::new("report.pdf"),
+        )
+    }
+
+    #[test]
+    fn real_pdf_table_with_right_aligned_columns_is_detected() {
+        let page = report_fixture();
+        assert_eq!(page.base.status, PageStatus::Ok);
+        assert_eq!(page.tables.len(), 1, "{:?}", page.tables);
+        let table = &page.tables[0];
+        assert_eq!(
+            table.headers.as_deref(),
+            Some(&["Region", "Q2", "Q3", "Change"].map(String::from)[..])
+        );
+        let rows: Vec<Vec<&str>> = table
+            .rows
+            .iter()
+            .map(|r| r.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ["North", "140", "150", "7%"],
+                ["South", "190", "200", "5%"],
+                ["East", "80", "90", "12%"],
+                ["West", "60", "64", "6%"],
+            ]
+        );
+        assert!(table.markdown.starts_with("|Region|Q2|Q3|Change|\n|---|"));
+    }
+
+    #[test]
+    fn real_pdf_headings_become_sections() {
+        let page = report_fixture();
+        let headings: Vec<(u8, &str)> = page
+            .base
+            .sections
+            .iter()
+            .map(|s| (s.level, s.heading.as_str()))
+            .collect();
+        assert_eq!(
+            headings,
+            [
+                (1, "1. Introduction"),
+                (1, "2. Results"),
+                (2, "2.1 Notes on the data"),
+                (1, "3. Conclusion"),
+            ]
+        );
+        // Column gaps are kept for tables only; section text has single spaces
+        let results = &page.base.sections[1].content;
+        assert!(results.contains("Region Q2 Q3 Change"), "{results}");
+        assert!(!results.contains("  "), "{results}");
+        assert_eq!(
+            page.base.sections[3].content,
+            "Growth was strongest in the East."
+        );
+    }
+
+    #[test]
+    fn real_pdf_metadata_title_is_used_and_placeholders_are_not() {
+        let page = report_fixture();
+        // Info /Title is "Regional report"; the first line is a heading, not a title
+        assert_eq!(page.base.title.as_deref(), Some("Regional report"));
+        // Info /Author is reportlab's "anonymous", and "by region" in a sentence is not an author
+        assert_eq!(page.base.author, None);
+    }
+
+    #[test]
+    fn signed_in_fixture_still_extracts() {
+        let bytes = include_bytes!("../tests/fixtures/signed-in.pdf");
+        let page = extract_pdf_bytes(bytes, "file:///s.pdf".to_string(), Path::new("s.pdf"));
+        assert_eq!(page.base.status, PageStatus::Ok);
+        assert_eq!(page.base.sections.len(), 1);
+        assert_eq!(page.base.sections[0].heading, "1. SUMMARY");
+        assert!(page.base.sections[0].content.contains("signed-in readers"));
+    }
+
+    #[test]
+    fn not_a_pdf_is_an_error_page() {
+        let page = extract_pdf_bytes(
+            b"<html>nope</html>",
+            "file:///x.pdf".into(),
+            Path::new("x.pdf"),
+        );
+        assert_eq!(page.base.status, PageStatus::Dead);
+        assert!(
+            page.base.alerts[0].starts_with("PDF extraction failed"),
+            "{:?}",
+            page.base.alerts
+        );
+    }
+
+    #[test]
+    fn cell_runs_split_on_two_or_more_spaces() {
+        assert_eq!(
+            cell_runs("  Warm Sand    150   7 %  "),
+            ["Warm Sand", "150", "7 %"]
+        );
+        assert_eq!(cell_runs("one cell"), ["one cell"]);
+        assert!(cell_runs("   ").is_empty());
+    }
+
+    #[test]
+    fn blank_lines_between_rows_do_not_end_a_table() {
+        let text = "Region   Q3   Q4\n\nNorth   150   175\n\nSouth   200   210\n";
+        let tables = detect_tables(text);
+        assert_eq!(tables.len(), 1, "{tables:?}");
+        assert_eq!(tables[0].rows.len(), 2);
+        assert!(tables[0].headers.is_some());
+    }
+
+    #[test]
+    fn a_row_with_other_cells_after_a_blank_line_starts_a_new_table() {
+        let text = "Alpha   1   2\nBeta   3   4\n\nGamma   5\nDelta   6\n";
+        let tables = detect_tables(text);
+        assert_eq!(tables.len(), 2, "{tables:?}");
+        assert_eq!(tables[0].rows[0].len(), 3);
+        assert_eq!(tables[1].rows[0].len(), 2);
+    }
+
+    #[test]
+    fn a_heading_line_is_not_a_table_row() {
+        let text = "North   140   150\nSouth   190   200\n\n2.1  Notes on the data\n";
+        let tables = detect_tables(text);
+        assert_eq!(tables.len(), 1);
+        assert!(
+            tables[0]
+                .rows
+                .iter()
+                .flatten()
+                .all(|c| !c.contains("Notes")),
+            "{tables:?}"
+        );
+    }
+
+    #[test]
+    fn rows_styled_alike_have_no_header() {
+        // Colour codes and names: the first row is data like the rest
+        let text = "#1a2332   Teal\n#2d8b8b   Seafoam\n#a8dadc   Cream\n";
+        let tables = detect_tables(text);
+        assert_eq!(tables.len(), 1);
+        assert!(tables[0].headers.is_none(), "{tables:?}");
+        assert_eq!(tables[0].rows.len(), 3);
+        // ALL CAPS over Title Case is a header
+        let caps = detect_tables("NAME   ROLE\nAlice   Engineer\nBruno   Designer\n");
+        assert_eq!(
+            caps[0].headers.as_deref(),
+            Some(&["NAME", "ROLE"].map(String::from)[..])
+        );
+    }
+
+    #[test]
+    fn first_line_heading_names_the_first_section() {
+        let sections = parse_sections("1. Introduction\n\nShort text.\n");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].heading, "1. Introduction");
+        assert_eq!(sections[0].content, "Short text.");
+    }
+
+    #[test]
+    fn confident_headings_split_short_sections_but_weak_ones_do_not() {
+        // Numbered headings split even after a short title line
+        let sections =
+            parse_sections("Quarterly Report\n1. Introduction\nText.\n2. Results\nMore.\n");
+        let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
+        assert_eq!(headings, ["Content", "1. Introduction", "2. Results"]);
+        // An ALL CAPS line after a few words stays in the text
+        let sections = parse_sections("Intro words.\nNOTE WELL\nmore text\n");
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].content.contains("NOTE WELL"));
+    }
+
+    #[test]
+    fn table_rows_are_not_headings_and_heading_gaps_collapse() {
+        let text = "Opening text that is long enough to stand on its own here.\n\
+                    2025   Total   300\n\
+                    2  Results\n\
+                    Body.\n";
+        let sections = parse_sections(text);
+        let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
+        assert_eq!(headings, ["Content", "2 Results"]);
+        assert!(sections[0].content.contains("2025 Total 300"));
+    }
+
+    #[test]
+    fn layout_gap_spaces_line_up_columns() {
+        let mut out = LayoutText {
+            line_origin: Some(72.0),
+            line_chars: 6, // "Region"
+            last_end: 110.0,
+            ..LayoutText::default()
+        };
+        // Next run starts 150 pt right of the line start at font size 10:
+        // column 30 at 5 pt per character
+        assert_eq!(out.gap_spaces(222.0, 10.0), 24);
+        // A normal word space stays one space
+        assert_eq!(out.gap_spaces(113.0, 10.0), 1);
+        // Text already past the column still gets a two-space column gap
+        out.line_chars = 40;
+        assert_eq!(out.gap_spaces(222.0, 10.0), 2);
+        // No line start known (first run of a line): one space
+        out.line_origin = None;
+        assert_eq!(out.gap_spaces(222.0, 10.0), 1);
+    }
+
+    #[test]
+    fn pdf_strings_and_metadata_filters() {
+        assert_eq!(
+            decode_pdf_string(&[0xFE, 0xFF, 0x00, 0x52, 0x00, 0xE9]),
+            "Ré"
+        );
+        assert_eq!(decode_pdf_string(b"Caf\xe9"), "Café");
+        assert!(usable_title("Annual Report 2026"));
+        assert!(!usable_title("report_v3.docx"));
+        assert!(!usable_title("Microsoft Word - plan"));
+        assert!(!usable_title("Untitled document"));
+        assert!(!usable_title("abc"));
+        assert!(usable_author("Jane Doe"));
+        assert!(!usable_author("anonymous"));
+        assert!(!usable_author("Administrator"));
+    }
+
+    #[test]
+    fn author_lines_are_labels_or_names_only() {
+        assert_eq!(
+            extract_author("Author: Jane Doe\nText"),
+            Some("Jane Doe".to_string())
+        );
+        assert_eq!(
+            extract_author("Title\nBy Jane Doe, Ana Lima\n"),
+            Some("Jane Doe, Ana Lima".to_string())
+        );
+        assert_eq!(
+            extract_author("Revenue by region, in thousands of dollars:"),
+            None
+        );
+        assert_eq!(
+            extract_author("by Michael Everson at the “Alphabets” (http://x) site. If"),
+            None
+        );
+        assert_eq!(
+            extract_author("By the end of the quarter, sales grew."),
+            None
+        );
+    }
+
     #[test]
     fn test_has_numeric_value() {
         assert!(has_numeric_value("$10M"));
@@ -1172,8 +1770,15 @@ Bob           35     Chicago
         assert!(has_numeric_value("123"));
         assert!(has_numeric_value("(100)"));
 
+        assert!(has_numeric_value("1,234.5"));
+        assert!(has_numeric_value(".5"));
+        assert!(has_numeric_value("-12%"));
+
         assert!(!has_numeric_value("Name"));
         assert!(!has_numeric_value("Revenue"));
+        assert!(!has_numeric_value("Q3"));
+        assert!(!has_numeric_value("FY2026"));
+        assert!(!has_numeric_value(""));
     }
 
     #[test]
