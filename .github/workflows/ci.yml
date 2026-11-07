@@ -154,7 +154,7 @@ jobs:
         id: coverage
         run: |
           # IO modules excluded — tested in e2e job with Chrome (ADR-003)
-          EXCLUDE='browser\.rs|check_links\.rs|fetch\.rs|init\.rs|login\.rs|main\.rs|mcp\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
+          EXCLUDE='browser\.rs|check_links\.rs|fetch\.rs|init\.rs|login\.rs|main\.rs|mcp\.rs|pdf/|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
           OUTPUT=$(cargo llvm-cov --ignore-filename-regex "$EXCLUDE" 2>&1)
           echo "$OUTPUT"
 

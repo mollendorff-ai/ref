@@ -129,7 +129,7 @@ release-all: release-linux release-linux-arm64
 # IO modules excluded from coverage gate (tested in CI with Chrome)
 # See: ADR-003 for rationale
 # Keep in sync with the coverage job in .github/workflows/ci.yml
-COVERAGE_EXCLUDE := 'browser\.rs|check_links\.rs|fetch\.rs|init\.rs|login\.rs|main\.rs|mcp\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
+COVERAGE_EXCLUDE := 'browser\.rs|check_links\.rs|fetch\.rs|init\.rs|login\.rs|main\.rs|mcp\.rs|pdf/|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
 
 lint:
 	@cargo clippy --all-targets -- -D warnings -W clippy::pedantic

@@ -8,6 +8,7 @@
 
 use regex::Regex;
 use scraper::{Html, Node, Selector};
+use std::sync::LazyLock;
 
 /// Pages with less visible text than this are treated as "walled" when they
 /// also carry wall wording or a password field.
@@ -69,10 +70,6 @@ const NEGATIONS: [&str; 8] = [
 ];
 
 /// Decide whether a rendered page is open, paywalled or behind a login.
-///
-/// # Panics
-///
-/// Panics if the internal structured-data regex fails to compile (it is a constant).
 #[must_use]
 pub fn detect(html: &str) -> Access {
     let doc = Html::parse_document(html);
@@ -98,10 +95,12 @@ pub fn detect(html: &str) -> Access {
 
 /// Schema.org `isAccessibleForFree: false`, the signal publishers give search engines.
 fn not_free_structured_data(html: &str) -> bool {
-    let re = Regex::new(r#"(?i)"?isAccessibleForFree"?\s*(?::|content=)\s*"?false"#)
-        .expect("constant regex");
-    re.is_match(html)
+    NOT_FREE_RE.is_match(html)
 }
+
+static NOT_FREE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)"?isAccessibleForFree"?\s*(?::|content=)\s*"?false"#).expect("constant regex")
+});
 
 fn any_element(doc: &Html, selectors: &[&str]) -> bool {
     selectors

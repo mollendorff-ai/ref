@@ -2,20 +2,35 @@
 
 use regex::Regex;
 use std::collections::HashSet;
+use std::sync::LazyLock;
+
+/// http(s) URLs in Markdown or plain text
+static URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://[^\s\)>\]"'`]+"#).expect("constant regex"));
+
+/// Money amounts, sign before or after the number (see [`extract_amounts`])
+static AMOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+        (?P<pc>CA\$|US\$|C\$|A\$|[$€£]) \s? (?P<pv>\d(?:[\d,.]*\d)?) (?:\s*(?P<pu>billion|million|B|M|K)\b)?
+        |
+        \b(?P<sv>\d(?:[\d,.]*\d)?) (?:\s*(?P<su>billion|million|B|M|K))? \s? (?P<sc>CA\$|US\$|C\$|A\$|[$€£])
+        ",
+    )
+    .expect("constant regex")
+});
+
+/// Percentages: a number, then `%`
+static PERCENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d(?:[\d,.]*\d)?\s*%").expect("constant regex"));
 
 /// Extract unique URLs from text content.
-///
-/// # Panics
-///
-/// Panics if the internal URL regex fails to compile (should never happen).
 #[must_use]
 pub fn extract_urls(content: &str) -> Vec<String> {
-    let re = Regex::new(r#"https?://[^\s\)>\]"'`]+"#).unwrap();
-
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
 
-    for mat in re.find_iter(content) {
+    for mat in URL_RE.find_iter(content) {
         let url = mat.as_str();
         // Clean trailing punctuation
         let url = url.trim_end_matches([',', '.', ')', ']', ';', ':']);
@@ -35,22 +50,10 @@ pub fn extract_urls(content: &str) -> Vec<String> {
 /// the sign before the number (`$33 billion`, `€1.2M`) and the sign after it
 /// (`4,5 M$`, `150 €`, common in French).
 /// A number is needed on the sign's number side, so `M$. Les` gives nothing.
-///
-/// # Panics
-///
-/// Panics if the internal amount regex fails to compile (should never happen).
 #[must_use]
 pub fn extract_amounts(text: &str) -> Vec<AmountMatch> {
-    let re = Regex::new(
-        r"(?x)
-        (?P<pc>CA\$|US\$|C\$|A\$|[$€£]) \s? (?P<pv>\d(?:[\d,.]*\d)?) (?:\s*(?P<pu>billion|million|B|M|K)\b)?
-        |
-        \b(?P<sv>\d(?:[\d,.]*\d)?) (?:\s*(?P<su>billion|million|B|M|K))? \s? (?P<sc>CA\$|US\$|C\$|A\$|[$€£])
-        ",
-    )
-    .unwrap();
-
-    re.captures_iter(text)
+    AMOUNT_RE
+        .captures_iter(text)
         .take(10)
         .map(|cap| AmountMatch {
             value: (cap.name("pv").or_else(|| cap.name("sv")))
@@ -71,15 +74,10 @@ pub fn extract_amounts(text: &str) -> Vec<AmountMatch> {
 /// Extract percentages from text.
 ///
 /// A digit is needed, so a lone `.` or `,` before a `%` is not a percentage.
-///
-/// # Panics
-///
-/// Panics if the internal percentage regex fails to compile (should never happen).
 #[must_use]
 pub fn extract_percentages(text: &str) -> Vec<String> {
-    let re = Regex::new(r"\d(?:[\d,.]*\d)?\s*%").unwrap();
-
-    re.find_iter(text)
+    PERCENT_RE
+        .find_iter(text)
         .take(10)
         .map(|m| m.as_str().to_string())
         .collect()
