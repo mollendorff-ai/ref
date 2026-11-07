@@ -2,20 +2,21 @@
 # Build targets for optimized static binaries
 
 .PHONY: help build install install-release uninstall lint format test coverage clean pre-commit
-.PHONY: build-linux build-linux-arm64 build-windows build-all
-.PHONY: release-linux release-linux-arm64 release-windows release-all
+.PHONY: build-linux build-linux-arm64 build-all
+.PHONY: release-linux release-linux-arm64 release-all
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CROSS-COMPILATION TARGETS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Same Linux targets as .github/workflows/release.yml. macOS and Windows
+# (x86_64-pc-windows-msvc) binaries are built by that workflow on their own
+# runners and cannot be cross-built from Linux with plain cargo.
 TARGET_LINUX       := x86_64-unknown-linux-musl
-TARGET_LINUX_ARM64 := aarch64-unknown-linux-gnu
-TARGET_WINDOWS     := x86_64-pc-windows-gnu
+TARGET_LINUX_ARM64 := aarch64-unknown-linux-musl
 
 BIN_LINUX       := target/$(TARGET_LINUX)/release/ref
 BIN_LINUX_ARM64 := target/$(TARGET_LINUX_ARM64)/release/ref
-BIN_WINDOWS     := target/$(TARGET_WINDOWS)/release/ref.exe
 
 # Output directory for release binaries
 DIST_DIR := dist
@@ -41,20 +42,20 @@ help:
 	@echo ""
 	@echo "Cross-Compilation:"
 	@echo "  make build-linux        - Linux x86_64 (musl static)"
-	@echo "  make build-linux-arm64  - Linux ARM64"
-	@echo "  make build-windows      - Windows x86_64"
+	@echo "  make build-linux-arm64  - Linux ARM64 (musl static)"
 	@echo "  make build-all          - All targets"
 	@echo ""
 	@echo "Release (build + UPX → dist/):"
 	@echo "  make release-linux      - Linux x86_64 + UPX"
 	@echo "  make release-linux-arm64- Linux ARM64"
-	@echo "  make release-windows    - Windows x86_64"
 	@echo "  make release-all        - All release binaries"
 	@echo ""
 	@echo "Code Quality:"
 	@echo "  make lint / format / test / coverage / pre-commit"
 	@echo ""
 	@echo "  make clean              - Remove build artifacts"
+	@echo ""
+	@echo "macOS and Windows binaries come from the Release workflow (GitHub Actions)."
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # NATIVE BUILD
@@ -89,16 +90,11 @@ build-linux:
 	@ls -lh $(BIN_LINUX)
 
 build-linux-arm64:
-	@echo "Building for Linux ARM64..."
+	@echo "Building for Linux ARM64 (musl static)..."
 	@cargo build --release --target $(TARGET_LINUX_ARM64)
 	@ls -lh $(BIN_LINUX_ARM64)
 
-build-windows:
-	@echo "Building for Windows x86_64..."
-	@cargo build --release --target $(TARGET_WINDOWS)
-	@ls -lh $(BIN_WINDOWS)
-
-build-all: build-linux build-linux-arm64 build-windows
+build-all: build-linux build-linux-arm64
 	@echo "All cross-compile targets built."
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -121,12 +117,7 @@ release-linux-arm64: build-linux-arm64 $(DIST_DIR)
 	@echo "Note: UPX not supported for ARM64"
 	@ls -lh $(DIST_DIR)/ref-linux-arm64
 
-release-windows: build-windows $(DIST_DIR)
-	@cp $(BIN_WINDOWS) $(DIST_DIR)/ref-windows-x86_64.exe
-	@echo "Note: UPX skipped for Windows (antivirus false positives)"
-	@ls -lh $(DIST_DIR)/ref-windows-x86_64.exe
-
-release-all: release-linux release-linux-arm64 release-windows
+release-all: release-linux release-linux-arm64
 	@echo ""
 	@echo "Release binaries in $(DIST_DIR)/:"
 	@ls -lh $(DIST_DIR)/
@@ -137,10 +128,11 @@ release-all: release-linux release-linux-arm64 release-windows
 
 # IO modules excluded from coverage gate (tested in CI with Chrome)
 # See: ADR-003 for rationale
-COVERAGE_EXCLUDE := 'browser\.rs|check_links\.rs|fetch\.rs|init\.rs|main\.rs|mcp\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
+# Keep in sync with the coverage job in .github/workflows/ci.yml
+COVERAGE_EXCLUDE := 'browser\.rs|check_links\.rs|fetch\.rs|init\.rs|login\.rs|main\.rs|mcp\.rs|pdf\.rs|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
 
 lint:
-	@cargo clippy -- -D warnings -W clippy::pedantic
+	@cargo clippy --all-targets -- -D warnings -W clippy::pedantic
 
 format:
 	@cargo fmt
