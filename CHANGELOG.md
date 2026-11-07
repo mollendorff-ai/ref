@@ -2,6 +2,18 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.8.4] - 2026-11-06
+
+Release provenance and wording; no code changes.
+
+### Added
+
+- **Build-provenance attestation** for every release file (`actions/attest-build-provenance`). Verify with `gh attestation verify <file> --repo mollendorff-ai/ref`. `checksums.txt` still proves integrity only; the attestation proves which workflow built the file.
+
+### Changed
+
+- ADR author lines and `.asimov/sprint.json` use plain wording ("AI assistant, under the maintainer's direction"); the autonomy instructions are unchanged in meaning.
+
 ## [1.8.3] - 2026-11-06
 
 PDF extraction fixes from the 1.8.1 evaluation.

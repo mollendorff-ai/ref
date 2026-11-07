@@ -156,6 +156,8 @@ jobs:
     needs: build
     permissions:
       contents: write
+      id-token: write       # sign the attestation with the workflow's OIDC identity
+      attestations: write   # store it on the repository
     steps:
       - uses: actions/checkout@v6
 
@@ -171,6 +173,13 @@ jobs:
           cd release
           sha256sum * > checksums.txt
           cat checksums.txt
+
+      # Build provenance: proves these files were produced by this workflow
+      # from this repository. Verify with: gh attestation verify <file> --repo mollendorff-ai/ref
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: 'release/*'
 
       - name: Get version
         id: version
