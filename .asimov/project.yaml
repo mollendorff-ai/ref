@@ -15,7 +15,7 @@ stack:
 
 conventions:
   - "Result<T, E> for errors, no panics"
-  - "No unwrap() in library code (constant regexes excepted)"
+  - "No unwrap() in library code; constant regexes are LazyLock statics with expect(\"constant regex\")"
   - "clippy pedantic, zero warnings"
   - "Colocated tests (#[cfg(test)] mod tests)"
   - "One sentence per line in docs (for git diffs)"

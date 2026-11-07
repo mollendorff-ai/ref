@@ -2,6 +2,33 @@
 
 All notable changes to Möllendorff Ref.
 
+## [1.8.3] - 2026-11-06
+
+PDF extraction fixes from the 1.8.1 evaluation.
+
+### Fixed
+
+- **PDF tables were rarely found.** pdf-extract writes one space for any gap, so tables whose cells are drawn at separate positions (most generated reports, LaTeX `tabular`, reportlab) came out as "Region Q3 Q4" with no columns to find. ref now writes the text itself from pdf-extract's character positions and keeps wide gaps, padded to the column where the next cell starts, so cells line up across rows.
+- Tables with spaced-out rows (a blank line between rows) are no longer cut into one-line pieces; after a blank line, only a row with as many cells continues the table, and a heading line ("2.1  Notes on the data") never becomes a row.
+- Right-aligned columns (numbers) no longer split words ("Regio | n"): when every row has the same number of cells, each row is split on its own gaps.
+- Header rows: labels with a digit ("Q3", "FY2026") no longer count as numbers, and a first row styled like the rest (Title Case over Title Case) is no longer taken as a header.
+- **A heading on the first line** ("1. Introduction") is now a section heading instead of text under "Content".
+- Confident headings (numbered, Roman numerals, keywords) start a section after any text, not only after 50 characters, so a short title line or a short table no longer hides the next heading. Weak guesses (ALL CAPS, mostly uppercase) keep the 50-character rule. A line with two or more column gaps is never a heading.
+- **Author**: "by region, in thousands of dollars" inside a sentence was reported as the author. Only a labelled line ("Author: …", "Written by …") or a line that is just "By" and names counts.
+
+### Added
+
+- PDF title and author come from the PDF's metadata (Info dictionary) when usable; file names left by the producing program ("report_v3.docx"), "Untitled" and placeholder authors ("anonymous") are ignored.
+- `tests/fixtures/report.pdf` (with the script that makes it): a real PDF with a first-line heading, a table drawn cell by cell with right-aligned numbers and spaced-out rows, and a heading drawn as number and title. Unit tests check its sections, table, title and author.
+
+### Changed
+
+- Section text in PDFs uses single spaces; the column layout is kept in the `tables` array.
+- `src/pdf.rs` (about 2,000 lines) is split into `src/pdf/` modules: `layout` (text and metadata from the PDF), `tables`, `headings`, `sections`, `fields` (title, author, date, DOI, links, code) and `mod` (command, download, page). No behaviour change: the output of 31 PDFs, fetch and refresh-data is byte-identical before and after the split.
+- Constant regexes are compiled once (`LazyLock` statics) instead of on every call, in `pdf`, `extract`, `scan` and `access`; the last `unwrap()` outside tests is gone. The unit tests run about 4× faster.
+- CI and Makefile coverage exclusions name the `pdf/` folder instead of `pdf.rs`, so the same code stays outside the 100% gate.
+- The author pattern uses Latin letter ranges (ASCII, Latin-1, Latin Extended-A) instead of Unicode classes, which took about 33 ms to compile on every PDF. With it, 1.8.3 extracts PDFs within 1–3% of 1.8.2's time (release build, median of 15 runs on 35-page documents).
+
 ## [1.8.2] - 2026-11-06
 
 Small fixes from the 1.8.1 evaluation.

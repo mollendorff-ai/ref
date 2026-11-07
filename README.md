@@ -92,7 +92,9 @@ ref pdf document.pdf 2>/dev/null | jq .
 ref pdf https://example.com/report.pdf 2>/dev/null | jq .
 ```
 
-Same JSON structure, plus table detection (whitespace column analysis, header inference, Markdown output) and heading detection (numbered sections, Roman numerals, ALL CAPS, academic and legal formats).
+Same JSON structure, plus table detection (columns found from where text sits on the page, header inference, Markdown output) and heading detection (numbered sections, Roman numerals, ALL CAPS, academic and legal formats).
+The title and author come from the PDF's metadata when it has usable ones, else from the text.
+Detected tables are in a `tables` array; section text keeps their cells on single-spaced lines.
 
 ## Commands
 
@@ -222,7 +224,7 @@ Whether to forbid other tools entirely is your call; check that ref works for th
   In tests, content added 200 ms after load was kept and content added 2.5 s after load was missed.
 - **Web components**: text in open shadow roots is read; closed shadow roots cannot be.
 - **Paywall and login detection** are heuristics and can be wrong either way.
-- **PDFs**: text-based PDFs only (no OCR); table detection relies on column alignment.
+- **PDFs**: text-based PDFs only (no OCR). Tables are found from column alignment, so tables with merged cells, ruled grids without gaps, or text wrapped inside a cell can come out split or missed.
 - **Platforms**: CI tests Linux; macOS and Windows builds are produced but not tested end to end.
 
 ## Install

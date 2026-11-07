@@ -10,6 +10,7 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 #[derive(Args)]
 pub struct ScanArgs {
@@ -210,14 +211,21 @@ pub(crate) async fn expand_files(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Markdown links: `[title](url)`
+static MD_LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)").expect("constant regex"));
+
+/// Bare http(s) URLs
+static BARE_URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://[^\s\)>\]"'`]+"#).expect("constant regex"));
+
 /// Extract URLs from markdown content
 fn extract_markdown_urls(content: &str, source_file: &Path) -> Vec<FoundUrl> {
     let mut found = Vec::new();
     let source = source_file.to_string_lossy().to_string();
 
     // Match markdown links: [title](url)
-    let md_link_re = Regex::new(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)").unwrap();
-    for cap in md_link_re.captures_iter(content) {
+    for cap in MD_LINK_RE.captures_iter(content) {
         let title = cap[1].to_string();
         let url = cap[2].to_string();
         // Clean trailing punctuation from URL
@@ -233,8 +241,7 @@ fn extract_markdown_urls(content: &str, source_file: &Path) -> Vec<FoundUrl> {
     }
 
     // Match bare URLs (not already in markdown links)
-    let bare_url_re = Regex::new(r#"https?://[^\s\)>\]"'`]+"#).unwrap();
-    for mat in bare_url_re.find_iter(content) {
+    for mat in BARE_URL_RE.find_iter(content) {
         let url = mat.as_str();
         let url = url
             .trim_end_matches([',', '.', ')', ']', ';', ':'])
