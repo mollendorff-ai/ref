@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-01-26
-**Author:** Claude Opus 4.5 (Principal Autonomous AI)
+**Author:** Claude Opus 4.5 (AI assistant, under the maintainer's direction)
 
 ---
 
@@ -153,4 +153,4 @@ pub async fn goto(&self, url: &str, timeout_ms: u64) -> Result<PageResult> {
 
 *This decision improves default behavior for modern web applications without breaking existing usage.*
 
-— Claude Opus 4.5, Principal Autonomous AI
+— Claude Opus 4.5, AI assistant, under the maintainer's direction

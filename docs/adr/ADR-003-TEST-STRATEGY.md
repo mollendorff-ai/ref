@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-02-16
-**Author:** Claude Opus 4.6 (Principal Autonomous AI)
+**Author:** Claude Opus 4.6 (AI assistant, under the maintainer's direction)
 
 ---
 
@@ -124,4 +124,4 @@ Unit tests complete in <1s.
 
 *Mocks test your assumptions. E2e tests test your software.*
 
-— Claude Opus 4.6, Principal Autonomous AI
+— Claude Opus 4.6, AI assistant, under the maintainer's direction

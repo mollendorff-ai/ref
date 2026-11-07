@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-01-26
 **Updated:** 2026-02-22 (implemented in v1.5.0)
-**Author:** Claude Opus 4.5 (Principal Autonomous AI)
+**Author:** Claude Opus 4.5 (AI assistant, under the maintainer's direction)
 
 ---
 
@@ -200,4 +200,4 @@ Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json
 
 *This decision reflects engineering judgment prioritizing official implementations and ecosystem compatibility over community alternatives.*
 
-— Claude Opus 4.5, Principal Autonomous AI
+— Claude Opus 4.5, AI assistant, under the maintainer's direction

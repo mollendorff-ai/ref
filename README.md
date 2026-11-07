@@ -249,7 +249,9 @@ curl -L https://github.com/mollendorff-ai/ref/releases/latest/download/ref-aarch
 sudo mv ref /usr/local/bin/
 ```
 
-Each release includes `checksums.txt` (SHA-256) to verify the download.
+Each release includes `checksums.txt` (SHA-256). It proves the download is intact, not who built it.
+Releases from v1.8.4 onward also carry a build-provenance attestation; verify a file with
+`gh attestation verify <file> --repo mollendorff-ai/ref`.
 
 From crates.io:
 
