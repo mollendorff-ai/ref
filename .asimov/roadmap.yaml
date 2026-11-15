@@ -27,6 +27,14 @@ backlog:
     deliverables:
       - "Stale reference detection (not cited anywhere)"
       - "Reference deduplication"
+  - summary: "Set the user agent (--user-agent)"
+    goal: "REF_USER_AGENT"
+    why: "Found by Sentinel (github.com/mollendorff-ai/sentinel, ADR-012), Forge's AI-pipeline demo, on 2026-11-15 with Ref 1.8.4. SEC EDGAR refuses a request that does not declare a name and a contact email (HTTP 403, 'Your Request Originates from an Undeclared Automated Tool'), so Ref cannot fetch any SEC filing. Ref's user agent is Chrome's own plus mollendorff-ref/<version> (src/browser.rs, honest_user_agent), with no way to change it; the filing was downloaded with curl instead"
+    deliverables:
+      - "A --user-agent option on fetch (and the same setting for check-links), used for the page and for a PDF download"
+      - "A test against a local server that refuses requests without the declared user agent"
+      - "README: say that SEC EDGAR needs a name and an email in it"
+    acceptance: "ref fetch https://www.sec.gov/... --user-agent 'Name email' returns the filing, and without the option the 403 message says the site wants a declared user agent"
   - "Proxy support (--proxy)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"
