@@ -461,6 +461,7 @@ fn declared_user_agent_gets_through_and_403_says_why() {
 }
 
 #[test]
+#[ignore = "e2e: runs the built binary, kept out of the coverage run (ADR-003)"]
 fn empty_user_agent_is_refused() {
     let out = cargo_bin_cmd!("ref")
         .args(["fetch", "--user-agent", "  ", "https://example.com"])
