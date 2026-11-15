@@ -2,13 +2,19 @@
 
 All notable changes to Möllendorff Ref.
 
-## [Unreleased]
+## [1.9.0] - 2026-11-15
+
+Set the user agent, for sites such as SEC EDGAR.
 
 ### Added
 
 - **`--user-agent`** on `ref fetch` and `ref check-links`: sends exactly the text you give instead of Chrome's own user agent with ref's name added, for pages and for PDF downloads. SEC EDGAR needs a name and an email in it and answers HTTP 403 otherwise. An empty or multi-line value is refused.
 - A 403 from `ref fetch` now adds an alert that the site may want a declared user agent, unless `--user-agent` was already given.
 - The MCP server does not take the option yet.
+
+### Changed
+
+- CI: the coverage cache is keyed on the Rust version, so the 100% gate holds on Rust 1.100 (#45).
 
 ## [1.8.4] - 2026-11-06
 
