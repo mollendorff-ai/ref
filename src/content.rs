@@ -90,13 +90,13 @@ struct Builder {
 
 impl Builder {
     fn visit(&mut self, node: NodeRef<'_, Node>, buf: &mut String, in_article: bool) {
+        // ElementRef::wrap succeeds exactly for element nodes
+        if let Some(el) = ElementRef::wrap(node) {
+            self.visit_element(el, buf, in_article);
+            return;
+        }
         match node.value() {
             Node::Text(text) => buf.push_str(text),
-            Node::Element(_) => {
-                if let Some(el) = ElementRef::wrap(node) {
-                    self.visit_element(el, buf, in_article);
-                }
-            }
             _ => {
                 for child in node.children() {
                     self.visit(child, buf, in_article);
