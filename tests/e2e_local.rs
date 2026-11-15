@@ -56,6 +56,31 @@ fn handle(mut stream: TcpStream) {
         let _ = stream.write_all(body.as_bytes());
         return;
     }
+    if path == "/needs-declared-agent" {
+        // Like SEC EDGAR: refuses a user agent that does not carry an email
+        let declared = headers
+            .lines()
+            .find_map(|l| l.strip_prefix("user-agent:"))
+            .is_some_and(|ua| ua.contains("jane@example.com"));
+        let (status, body) = if declared {
+            (
+                "200 OK",
+                "<html><head><title>Filing</title></head><body><p>The declared reader gets the filing.</p></body></html>",
+            )
+        } else {
+            (
+                "403 Forbidden",
+                "<html><head><title>Undeclared</title></head><body><p>Undeclared automated tool.</p></body></html>",
+            )
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body.as_bytes());
+        return;
+    }
     if path == "/signed-in.pdf" {
         // Only for readers who send the session cookie, like a members-only PDF
         let pdf: &[u8] = include_bytes!("fixtures/signed-in.pdf");
@@ -406,6 +431,43 @@ fn hidden_overlay_is_not_a_paywall() {
     let base = serve();
     let (_, page) = fetch(&[&format!("{base}/hidden-overlay")]);
     assert_eq!(page["status"], "ok", "{page}");
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn declared_user_agent_gets_through_and_403_says_why() {
+    let base = serve();
+    let url = format!("{base}/needs-declared-agent");
+
+    let (code, page) = fetch(&["--user-agent", "Jane Doe jane@example.com", &url]);
+    assert_eq!(page["status"], "ok", "{page}");
+    assert!(all_content(&page).contains("declared reader"), "{page}");
+    assert_eq!(code, 0);
+
+    let (code, refused) = fetch(&[&url]);
+    assert_eq!(refused["status"], "dead", "{refused}");
+    assert_eq!(code, 1);
+    let alerts = refused["alerts"].to_string();
+    assert!(alerts.contains("HTTP 403"), "{refused}");
+    assert!(alerts.contains("--user-agent"), "{refused}");
+
+    // A wrong custom agent is still refused, and the hint is not repeated
+    let (_, wrong) = fetch(&["--user-agent", "nobody", &url]);
+    assert_eq!(wrong["status"], "dead", "{wrong}");
+    assert!(
+        !wrong["alerts"].to_string().contains("try --user-agent"),
+        "{wrong}"
+    );
+}
+
+#[test]
+fn empty_user_agent_is_refused() {
+    let out = cargo_bin_cmd!("ref")
+        .args(["fetch", "--user-agent", "  ", "https://example.com"])
+        .output()
+        .expect("run ref");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("user agent is empty"));
 }
 
 #[test]

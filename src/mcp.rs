@@ -259,6 +259,7 @@ impl RefMcpServer {
             concurrency: parallelism(params.concurrency, 5, "concurrency")?,
             timeout_ms: params.timeout.unwrap_or(15000),
             retries: params.retries.unwrap_or(1),
+            user_agent: None,
         };
 
         let report = check_links(&params.urls, &config)

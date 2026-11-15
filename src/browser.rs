@@ -108,6 +108,7 @@ pub struct BrowserPool {
     profile: Profile,
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
+    custom_user_agent: bool,
 }
 
 impl BrowserPool {
@@ -191,7 +192,25 @@ impl BrowserPool {
             profile: chosen,
             cookies: Vec::new(),
             cookie_jar: Vec::new(),
+            custom_user_agent: false,
         })
+    }
+
+    /// Use this user agent, exactly as given, for every page and every download
+    /// from now on. It replaces Chrome's own label with ref's name added.
+    ///
+    /// # Errors
+    /// Returns an error if the text is empty or contains control characters.
+    pub fn set_user_agent(&mut self, user_agent: &str) -> Result<()> {
+        self.user_agent = validate_user_agent(user_agent)?;
+        self.custom_user_agent = true;
+        Ok(())
+    }
+
+    /// `true` when the user agent was set with [`set_user_agent`](Self::set_user_agent).
+    #[must_use]
+    pub const fn has_custom_user_agent(&self) -> bool {
+        self.custom_user_agent
     }
 
     /// Send these cookies with every page opened from now on.
@@ -513,6 +532,22 @@ fn uid_is_root(status: &str) -> bool {
         .find_map(|l| l.strip_prefix("Uid:"))
         .and_then(|rest| rest.split_whitespace().nth(1))
         == Some("0")
+}
+
+/// Check a user agent given by the user: not empty, one line, no control characters
+/// (it goes into a request header). Surrounding spaces are trimmed.
+///
+/// # Errors
+/// Returns an error saying what is wrong with it.
+pub fn validate_user_agent(user_agent: &str) -> Result<String> {
+    let ua = user_agent.trim();
+    if ua.is_empty() {
+        anyhow::bail!("The user agent is empty. Give a name and an email, e.g. \"Jane Doe jane@example.com\".");
+    }
+    if ua.chars().any(char::is_control) {
+        anyhow::bail!("The user agent must be one line without control characters.");
+    }
+    Ok(ua.to_string())
 }
 
 /// Chrome's own user agent, without the "Headless" marker hidden and with
@@ -849,6 +884,16 @@ mod tests {
         assert!(uid_is_root("Name:\tref\nUid:\t1000\t0\t0\t0\n"));
         assert!(!uid_is_root("Uid:\t1000\t1000\t1000\t1000\n"));
         assert!(!uid_is_root("Name:\tref\n"));
+    }
+
+    #[test]
+    fn test_validate_user_agent() {
+        assert_eq!(
+            validate_user_agent("  Jane Doe jane@example.com ").unwrap(),
+            "Jane Doe jane@example.com"
+        );
+        assert!(validate_user_agent("   ").is_err());
+        assert!(validate_user_agent("a\r\nX-Evil: 1").is_err());
     }
 
     #[test]
