@@ -38,6 +38,11 @@ pub struct CheckLinksArgs {
     /// Number of retries on failure
     #[arg(long, default_value = "1")]
     retries: u8,
+
+    /// Send this exact user agent instead of Chrome's own with ref's name added
+    /// (some sites want a name and an email: --user-agent "Jane Doe jane@example.com")
+    #[arg(long, value_name = "TEXT")]
+    user_agent: Option<String>,
 }
 
 /// Configuration for check-links
@@ -45,6 +50,7 @@ pub struct CheckLinksConfig {
     pub concurrency: usize,
     pub timeout_ms: u64,
     pub retries: u8,
+    pub user_agent: Option<String>,
 }
 
 /// Result for a single link check (compact)
@@ -90,6 +96,7 @@ pub async fn run_check_links(args: CheckLinksArgs) -> Result<bool> {
         concurrency: args.concurrency as usize,
         timeout_ms: args.timeout,
         retries: args.retries,
+        user_agent: args.user_agent.clone(),
     };
 
     let report = check_links(&urls, &config).await?;
@@ -139,7 +146,11 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
 ///
 /// Returns error if Chrome fails to launch or URLs can't be fetched.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
-    let pool = Arc::new(BrowserPool::new(config.concurrency).await?);
+    let mut pool = BrowserPool::new(config.concurrency).await?;
+    if let Some(ua) = &config.user_agent {
+        pool.set_user_agent(ua)?;
+    }
+    let pool = Arc::new(pool);
     let timeout = config.timeout_ms;
     let retries = config.retries;
 
@@ -268,6 +279,7 @@ mod tests {
             concurrency: 5,
             timeout_ms: 15000,
             retries: 1,
+            user_agent: None,
         };
         assert_eq!(config.concurrency, 5);
         assert_eq!(config.timeout_ms, 15000);

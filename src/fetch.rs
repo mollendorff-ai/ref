@@ -35,6 +35,12 @@ pub struct FetchArgs {
     #[arg(long)]
     pub raw: bool,
 
+    /// Send this exact user agent instead of Chrome's own with ref's name added.
+    /// Some sites want a declared name and email, e.g. SEC EDGAR:
+    /// --user-agent "Jane Doe jane@example.com"
+    #[arg(long, value_name = "TEXT")]
+    pub user_agent: Option<String>,
+
     /// Cookie file for authenticated fetches (Netscape format)
     #[arg(long)]
     pub cookies: Option<String>,
@@ -165,6 +171,9 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
     );
 
     let mut pool = BrowserPool::new(parallel).await?;
+    if let Some(ua) = &args.user_agent {
+        pool.set_user_agent(ua)?;
+    }
     if let Some(path) = &args.cookies {
         let text = tokio::fs::read_to_string(path)
             .await
@@ -317,8 +326,15 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOpti
 
     let mut parsed = parse_page(&html, url, options);
     apply_http_status(&mut parsed, nav.status);
+    if nav.status == Some(403) && !pool.has_custom_user_agent() {
+        parsed.alerts.insert(1, USER_AGENT_HINT.to_string());
+    }
     parsed
 }
+
+/// Added after "HTTP 403" when ref used its own user agent
+const USER_AGENT_HINT: &str = "The site refused the request. Some sites (SEC EDGAR, for one) \
+     want a declared user agent with a name and an email: try --user-agent \"Name email\"";
 
 /// Record the HTTP status and mark 4xx and 5xx responses as dead.
 fn apply_http_status(page: &mut Page, http: Option<u16>) {

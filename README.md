@@ -79,6 +79,14 @@ ref fetch --max-chars 0 --max-sections 0 https://example.com/long-article   # no
 
 Other alerts say when nothing readable was found, when `--selector` matched nothing (ref then returns the main content), and when a URL turned out to be a PDF (ref then extracts it as `ref pdf` would).
 
+Set the user agent with `--user-agent` (on `fetch` and `check-links`). By default ref sends Chrome's own user agent plus `mollendorff-ref/<version>`; the option replaces it with exactly the text you give, for pages and PDF downloads. Some sites refuse anyone who does not declare who is asking: **SEC EDGAR needs a name and an email** in it, and answers HTTP 403 otherwise:
+
+```bash
+ref fetch --user-agent "Jane Doe jane@example.com" https://www.sec.gov/Archives/edgar/data/... 2>/dev/null | jq .
+```
+
+Without the option, a 403 adds an alert saying the site may want a declared user agent. The MCP server does not take this option yet.
+
 Extract one element with `--selector`:
 
 ```bash
