@@ -19,7 +19,29 @@ shipped:
     date: "2026-03-07"
     summary: "PDF from URL and --selector for fetch"
 
-upcoming: []
+upcoming:
+  - summary: "Content detection on GitHub pages"
+    goal: "GITHUB_CONTENT"
+    source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
+    deliverables:
+      - "No false paywall: a public repo page (13,046 readable chars) comes back as status paywall, likely from GitHub's 'You must be signed in to...' button wording"
+      - "Main content: the README (article.markdown-body) should win over repository navigation, About, Stars, Forks and other sidebar sections, which come first and repeat after it"
+  - summary: "Evaluation fixes (Ref Evaluation, 2026-11-16, grade A-)"
+    goal: "EVAL_FIXES"
+    deliverables:
+      - "Create the saved-profile folder readable by the owner only (0700); today src/browser.rs creates it with default permissions"
+      - "README: say that ref fetch opens localhost and private addresses"
+      - "README: one line on sites' terms of service for signed-in browsing"
+      - "One description everywhere: README and Cargo.toml say 'compact JSON', the GitHub About says 'token-optimized JSON', mollendorff.ai says 'clean JSON', .asimov/project.yaml has its own"
+  - summary: "--user-agent in the MCP server"
+    goal: "MCP_USER_AGENT"
+    deliverables:
+      - "user_agent parameter on ref_fetch and ref_check_links (src/mcp.rs passes None today)"
+      - "Try --user-agent against sec.gov (www.sec.gov is allowed in the cloud environment)"
+  - summary: "macOS check (manual, on Luis's Mac)"
+    goal: "MACOS_CHECK"
+    deliverables:
+      - "ref update, ref login, sign in to sites, quit Chrome with Cmd-Q, then check that a signed-in page fetches"
 
 backlog:
   - summary: "Reference management"
