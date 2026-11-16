@@ -19,3 +19,11 @@ conventions:
   - "clippy pedantic, zero warnings"
   - "Colocated tests (#[cfg(test)] mod tests)"
   - "One sentence per line in docs (for git diffs)"
+
+# Non-negotiable. The same rules, with the commands that check them, are in CLAUDE.md and docs/adr/ADR-004-STRICT-QUALITY-RULES.md.
+coding_standards:
+  - "100% line coverage of all code, nothing skipped: no --ignore-filename-regex, no #[ignore], no #[coverage(off)]; hard-to-test code is made testable, never excluded"
+  - "Pedantic linting and formatting, nothing skipped: cargo fmt --check and cargo clippy --all-targets -- -D warnings -W clippy::pedantic; no new #[allow(clippy::...)]"
+  - "All tests inline in #[cfg(test)] mod tests in the file they test; no tests/*.rs files (test data may live in tests/fixtures/)"
+  - "No source file over 1,500 lines, tests included; split it into a module folder along its real seams first"
+  - "Tests that need Chrome run in plain cargo test; Chrome is a requirement of the tool and of its tests"

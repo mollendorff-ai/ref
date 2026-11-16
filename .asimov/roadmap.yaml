@@ -20,6 +20,16 @@ shipped:
     summary: "PDF from URL and --selector for fetch"
 
 upcoming:
+  - summary: "Meet the strict quality rules (ADR-004, CLAUDE.md)"
+    goal: "STRICT_RULES"
+    source: "Measured on 2026-11-16 over all code, every test run: 78.03% line coverage (5,125 lines, 1,126 not covered)"
+    deliverables:
+      - "Rules written down: CLAUDE.md, .asimov/project.yaml coding_standards, ADR-004 (supersedes ADR-003)"
+      - "main becomes a thin wrapper over cli::run(args) -> ExitCode; tests/cli_tests.rs moves inline and calls it in-process"
+      - "tests/e2e_local.rs moves inline into fetch, browser and pdf; no #[ignore], Chrome tests run in plain cargo test"
+      - "Cover update, check_links, verify_refs, refresh_data (injected base URL, local server), init and scan (temporary folders), mcp (in-process), login (headless seam)"
+      - "Remove the coverage exclusions from the Makefile and CI; gate is cargo llvm-cov --fail-under-lines 100 over everything; README badge renamed from Logic coverage"
+      - "Split any file that passes 1,500 lines once its tests are inline (browser.rs and fetch.rs are closest)"
   - summary: "Content detection on GitHub pages"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
