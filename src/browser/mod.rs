@@ -9,10 +9,12 @@
 use crate::cookies::Cookie;
 use crate::profile::{self, Profile, ProfileChoice};
 use anyhow::{Context, Result};
+use chromiumoxide::cdp::browser_protocol::browser::GetVersionReturns;
 use chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, SetCacheDisabledParams, SetCookiesParams, SetUserAgentOverrideParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::SetLifecycleEventsEnabledParams;
+use chromiumoxide::error::CdpError;
 use chromiumoxide::{Browser, Page};
 use futures::StreamExt;
 use std::path::{Path, PathBuf};
@@ -298,16 +300,19 @@ impl BrowserPool {
             let browser = chrome.browser.read().await;
             tokio::time::timeout(request_timeout, browser.version()).await
         };
-        // Not answering, or gone before answering: no pool
-        let Ok(Ok(version)) = version else {
-            // Dropping the browser kills this Chrome (chromiumoxide kills on
-            // drop); its fresh profile goes with it
-            drop(chrome);
-            start_failed(&chosen).await;
-            anyhow::bail!(
-                "Chrome started but did not answer (profile {})",
-                profile_dir.display()
-            );
+        // Not answering, or answering with an error (gone before answering): no pool
+        let version = match first_answer(version, request_timeout) {
+            Ok(version) => version,
+            Err(reason) => {
+                // Dropping the browser kills this Chrome (chromiumoxide kills on
+                // drop); its fresh profile goes with it
+                drop(chrome);
+                start_failed(&chosen).await;
+                anyhow::bail!(
+                    "Chrome started but {reason} (profile {})",
+                    profile_dir.display()
+                );
+            }
         };
         let chrome_ua = version.user_agent;
 
@@ -520,6 +525,22 @@ impl StartOptions {
 
 /// Clean up after a Chrome that did not start: a fresh profile is removed,
 /// a saved one is the user's and stays
+/// Chrome's first answer at start (rule 6): its version, or why there is none
+/// (no answer within `budget`, or an error, as from a Chrome that went away)
+fn first_answer(
+    answer: std::result::Result<
+        std::result::Result<GetVersionReturns, CdpError>,
+        tokio::time::error::Elapsed,
+    >,
+    budget: Duration,
+) -> std::result::Result<GetVersionReturns, String> {
+    match answer {
+        Ok(Ok(version)) => Ok(version),
+        Ok(Err(e)) => Err(format!("answered with an error: {e}")),
+        Err(_) => Err(format!("did not answer within {} ms", budget.as_millis())),
+    }
+}
+
 async fn start_failed(chosen: &Profile) {
     if let Profile::Fresh(dir) = chosen {
         remove_profile(dir).await;
@@ -790,6 +811,26 @@ pub(crate) mod tests {
         let err = tokio::time::timeout(Duration::from_secs(20), both).await;
         let err = err.expect("stop and the opening tab waited for each other");
         assert!(err.expect("opening a tab failed").is::<ChromeFailed>());
+    }
+
+    #[tokio::test]
+    async fn chromes_first_answer_is_its_version_or_the_reason_there_is_none() {
+        let version = GetVersionReturns {
+            protocol_version: "1.3".into(),
+            product: "Chrome/1".into(),
+            revision: "r".into(),
+            user_agent: "Mozilla/5.0 HeadlessChrome/1".into(),
+            js_version: "1".into(),
+        };
+        let budget = Duration::from_secs(30);
+        let answered = first_answer(Ok(Ok(version)), budget).unwrap();
+        assert_eq!(answered.user_agent, "Mozilla/5.0 HeadlessChrome/1");
+        let gone = first_answer(Ok(Err(CdpError::NoResponse)), budget).unwrap_err();
+        let expected = "answered with an error: Received no response from the chromium instance.";
+        assert_eq!(gone, expected);
+        let silent = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>()).await;
+        let late = first_answer(Err(silent.unwrap_err()), budget).unwrap_err();
+        assert_eq!(late, "did not answer within 30000 ms");
     }
 
     #[tokio::test]

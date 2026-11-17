@@ -72,7 +72,7 @@ upcoming:
       - "One Chrome method for requests on the browser itself (read lock, attempt, drop the lock, then judge, with the failed-pool check), so the lock order cannot be got wrong at a new call site"
       - "Done 2026-11-17. A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
       - "verify-refs: a test for a tab that dies between opening and navigation, and an error message that says it was the tab"
-      - "\"Chrome started but did not answer\" also covers a Chrome that answered with an error, and the reason is not shown (BrowserPool::start in src/browser/mod.rs); show it"
+      - "Done 2026-11-17. \"Chrome started but did not answer\" also covered a Chrome that answered with an error, without the reason: browser::first_answer now says \"answered with an error: <reason>\" or \"did not answer within <n> ms\""
   - summary: "Small findings from the last review (not bugs of this branch)"
     goal: "REVIEW_LEFTOVERS"
     source: "Review of ec2e81e on 2026-11-17"

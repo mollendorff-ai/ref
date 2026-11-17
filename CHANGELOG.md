@@ -50,6 +50,7 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- A Chrome that starts but answers its first request with an error (it went away) is reported as "Chrome started but answered with an error: <reason>", not as "did not answer"; a Chrome that stays silent says how long ref waited.
 - The saved-profile folder, and `.ref` above it, are created readable by their owner only (mode 0700) on macOS and Linux, not with the default permissions.
   A folder that already exists keeps its permissions.
 - **Signed-in PDFs with the saved profile**: `ref fetch` (and `ref_fetch`) of a PDF behind a sign-in came back as `dead` (HTTP 403): Chrome had the session, but ref downloaded the file without it, sending only a `--cookies` file.
