@@ -32,20 +32,28 @@ const LOGIN_SWITCHES: [&str; 4] = [
     "--use-mock-keychain",
 ];
 
-/// The folder to sign in with: the `--profile` folder, else the default saved profile.
+/// The folder to sign in with: the `--profile` folder, else the folder in
+/// `REF_CHROME_PROFILE`, else the default saved profile. `fresh` in the
+/// variable is ignored (it is meant for the commands that fetch).
 ///
 /// # Errors
-/// Refuses `fresh`, whose sign-ins would be deleted with it, and fails
-/// without a home folder when no folder is given.
-fn login_dir(choice: Option<&ProfileChoice>, home: Option<&Path>) -> Result<PathBuf> {
-    match choice {
-        Some(ProfileChoice::Folder(dir)) => Ok(dir.clone()),
-        Some(ProfileChoice::Fresh) => bail!(
+/// Refuses `--profile fresh`, whose sign-ins would be deleted with it, and
+/// fails without a home folder when no folder is given.
+fn login_dir(
+    flag: Option<&ProfileChoice>,
+    from_env: Option<&ProfileChoice>,
+    home: Option<&Path>,
+) -> Result<PathBuf> {
+    match (flag, from_env) {
+        (Some(ProfileChoice::Fresh), _) => bail!(
             "ref login needs a folder: a `fresh` profile is deleted afterwards, so the \
-             sign-ins would be lost. Leave out --profile (and REF_CHROME_PROFILE) to use \
-             ~/.ref/chrome-profile, or give a folder."
+             sign-ins would be lost. Leave out --profile to use ~/.ref/chrome-profile, \
+             or give a folder."
         ),
-        None => profile::default_saved_dir(home)
+        (Some(ProfileChoice::Folder(dir)), _) | (None, Some(ProfileChoice::Folder(dir))) => {
+            Ok(dir.clone())
+        }
+        (None, _) => profile::default_saved_dir(home)
             .context("No home folder found; pass --profile <folder>"),
     }
 }
@@ -57,10 +65,8 @@ fn login_dir(choice: Option<&ProfileChoice>, home: Option<&Path>) -> Result<Path
 /// use or is Chrome's everyday profile, a URL is not http(s), or Chrome cannot start.
 pub fn run_login(args: &LoginArgs, out: &mut impl std::io::Write) -> Result<()> {
     let home = profile::home_dir();
-    let dir = login_dir(
-        profile::resolve(args.profile.as_ref())?.as_ref(),
-        home.as_deref(),
-    )?;
+    let from_env = profile::resolve(None)?;
+    let dir = login_dir(args.profile.as_ref(), from_env.as_ref(), home.as_deref())?;
 
     for url in &args.urls {
         if let Err(e) = crate::guard::check_web_url(url) {
@@ -103,14 +109,26 @@ mod tests {
 
     #[test]
     fn login_signs_in_to_a_folder_never_a_fresh_profile() {
-        let folder = PathBuf::from("/work/p");
-        let given = login_dir(Some(&ProfileChoice::Folder(folder.clone())), None).unwrap();
-        assert_eq!(given, folder);
-        let default = login_dir(None, Some(Path::new("/home/me"))).unwrap();
-        assert_eq!(default, PathBuf::from("/home/me/.ref/chrome-profile"));
-        let fresh = login_dir(Some(&ProfileChoice::Fresh), None).unwrap_err();
+        let folder = ProfileChoice::Folder(PathBuf::from("/work/p"));
+        let other = ProfileChoice::Folder(PathBuf::from("/from/env"));
+        let home = Some(Path::new("/home/me"));
+        let default = PathBuf::from("/home/me/.ref/chrome-profile");
+
+        // The option wins over the variable; the variable wins over the default
+        let given = login_dir(Some(&folder), Some(&other), home).unwrap();
+        assert_eq!(given, PathBuf::from("/work/p"));
+        let from_env = login_dir(None, Some(&other), home).unwrap();
+        assert_eq!(from_env, PathBuf::from("/from/env"));
+        assert_eq!(login_dir(None, None, home).unwrap(), default);
+
+        // `fresh` in the variable is for the fetching commands: login ignores it
+        let ignored = login_dir(None, Some(&ProfileChoice::Fresh), home).unwrap();
+        assert_eq!(ignored, default);
+        // Asked for by name, it is refused
+        let fresh = login_dir(Some(&ProfileChoice::Fresh), Some(&other), home).unwrap_err();
         assert!(fresh.to_string().contains("needs a folder"), "{fresh}");
-        let homeless = login_dir(None, None).unwrap_err();
+
+        let homeless = login_dir(None, None, None).unwrap_err();
         assert!(
             homeless.to_string().contains("No home folder"),
             "{homeless}"

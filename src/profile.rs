@@ -156,17 +156,33 @@ const CHROME_DEFAULT_DIRS: [&str; 6] = [
 ];
 
 /// True when `dir` is (or is inside) one of Chrome's default user data folders,
-/// also when reached through a symbolic link
+/// also when reached through a symbolic link, and when `dir` does not exist yet
 #[must_use]
 pub fn is_chrome_default_dir(dir: &Path, home: Option<&Path>) -> bool {
     let Some(home) = home else {
         return false;
     };
-    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let (dir, home) = (real(dir), real(home));
+    let dir = real_path(dir);
     CHROME_DEFAULT_DIRS
         .iter()
-        .any(|rel| dir.starts_with(real(&home.join(rel))))
+        .any(|rel| dir.starts_with(real_path(&home.join(rel))))
+}
+
+/// `path` with symbolic links resolved in the part of it that exists; the
+/// rest (folders not made yet) is kept as written
+fn real_path(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(real) = existing.canonicalize() {
+            return missing.iter().rev().fold(real, |p, name| p.join(name));
+        }
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+            return path.to_path_buf();
+        };
+        missing.push(name);
+        existing = parent;
+    }
 }
 
 /// The process id in Chrome's `SingletonLock` link target (`<hostname>-<pid>`)
@@ -341,6 +357,27 @@ mod tests {
             &home.path().join("elsewhere"),
             Some(home.path())
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_folder_under_a_symlinked_home_is_recognised() {
+        let disk = tempfile::tempdir().unwrap();
+        let real_home = disk.path().join("data/home/me");
+        std::fs::create_dir_all(real_home.join(".config/google-chrome")).unwrap();
+        let home = disk.path().join("home-link");
+        std::os::unix::fs::symlink(&real_home, &home).unwrap();
+
+        // Not made yet, so it cannot be resolved as a whole
+        let new_profile = home.join(".config/google-chrome/NewProfile/Deeper");
+        assert!(is_chrome_default_dir(&new_profile, Some(&home)));
+        assert!(!is_chrome_default_dir(&home.join("other/new"), Some(&home)));
+    }
+
+    #[test]
+    fn a_path_with_no_existing_part_is_kept_as_written() {
+        let nowhere = Path::new("no-such-folder-for-ref-tests/inner");
+        assert_eq!(real_path(nowhere), nowhere);
     }
 
     #[test]

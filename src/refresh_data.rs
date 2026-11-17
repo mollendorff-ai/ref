@@ -60,7 +60,7 @@ pub struct ExtractedData {
 }
 
 /// Report containing all extractions (compact)
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct RefreshReport {
     pub ok: usize,
     pub failed: usize,

@@ -82,7 +82,7 @@ impl LinkResult {
 }
 
 /// Full report (compact)
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct LinkReport {
     pub ok: usize,
     pub failed: usize,

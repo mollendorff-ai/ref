@@ -286,11 +286,7 @@ impl RefMcpServer {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let concurrency = parallelism(params.concurrency, 5, "concurrency")?;
         let report = if params.urls.is_empty() {
-            check_links::LinkReport {
-                ok: 0,
-                failed: 0,
-                results: Vec::new(),
-            }
+            check_links::LinkReport::default()
         } else {
             let pool = self.browser().await?;
             check_links_with(
@@ -403,11 +399,7 @@ impl RefMcpServer {
         };
 
         let report = if urls.is_empty() {
-            crate::refresh_data::RefreshReport {
-                ok: 0,
-                failed: 0,
-                results: Vec::new(),
-            }
+            crate::refresh_data::RefreshReport::default()
         } else {
             let pool = self.browser().await?;
             refresh_data_with(&pool, &urls, timeout_ms).await
