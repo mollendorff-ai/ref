@@ -94,6 +94,9 @@ impl BrowserPage {
     /// Returns [`ChromeFailed`] when Chrome failed, or an error if the event
     /// subscription fails.
     pub async fn goto(&self, url: &str, timeout_ms: u64) -> Result<PageResult> {
+        // The budget of an earlier navigation is spent: forget it, so reads
+        // after this one (also a failed one) get a budget of their own
+        *self.reads_until() = None;
         // Subscribe to lifecycle and response events BEFORE navigation
         let until = tokio::time::Instant::now() + self.chrome.request_timeout;
         let mut lifecycle = self

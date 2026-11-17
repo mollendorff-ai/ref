@@ -73,19 +73,23 @@ pub fn remove_open_profiles() {
         }
         // Their Chrome was killed when ref was interrupted
         for dir in dirs.iter() {
-            remove_dir_retrying(dir, true);
+            remove_dir_retrying(dir);
         }
         dirs.retain(|d| d.exists());
     }
 }
 
-/// Remove a profile folder. After a kill, Chrome's helper processes can still
-/// write to it for a moment while they exit, so remove, wait and remove again;
-/// otherwise once is enough.
-pub(super) fn remove_dir_retrying(dir: &Path, killed: bool) {
-    for _ in 0..if killed { 3 } else { 1 } {
+/// Remove a profile folder. Chrome's helper processes can still write to it for
+/// a moment after a kill or a crash while they exit, so remove, and while the
+/// folder is still there wait and remove again (at most 3 times, 300 ms apart).
+/// A folder that is gone costs no waiting.
+pub(super) fn remove_dir_retrying(dir: &Path) {
+    for attempt in 0..3 {
         let _ = std::fs::remove_dir_all(dir);
-        if killed {
+        if !dir.exists() {
+            return;
+        }
+        if attempt < 2 {
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
     }
@@ -262,8 +266,8 @@ pub(super) fn sweep_orphans() {
             continue;
         }
         let dir = entry.path();
-        let killed = kill_chrome_using(&dir);
-        remove_dir_retrying(&dir, killed);
+        kill_chrome_using(&dir);
+        remove_dir_retrying(&dir);
     }
 }
 
@@ -443,6 +447,36 @@ mod tests {
         assert!(!ua.contains("Headless"));
         assert!(ua.contains("mollendorff-ref/"));
         assert!(honest_user_agent("").starts_with("Mozilla/5.0 (compatible) mollendorff-ref/"));
+    }
+
+    #[test]
+    fn removing_a_profile_folder_waits_only_while_it_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(profile.join("inner")).unwrap();
+        let started = std::time::Instant::now();
+        remove_dir_retrying(&profile);
+        assert!(!profile.exists());
+        // Gone at once: no waiting
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        let again = std::time::Instant::now();
+        remove_dir_retrying(&profile);
+        assert!(again.elapsed() < std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_removed_is_tried_three_times() {
+        // A plain file is not a folder, so removing it as one always fails
+        let dir = tempfile::tempdir().unwrap();
+        let stuck = dir.path().join("stuck");
+        std::fs::write(&stuck, "x").unwrap();
+        let started = std::time::Instant::now();
+        remove_dir_retrying(&stuck);
+        let took = started.elapsed();
+        assert!(stuck.exists());
+        // Three tries, two waits of 300 ms between them
+        assert!(took >= std::time::Duration::from_millis(600), "{took:?}");
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
     }
 
     #[test]

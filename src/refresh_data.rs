@@ -81,7 +81,7 @@ pub async fn run_refresh_data(
 
     if urls.is_empty() {
         eprintln!("No URLs found.");
-        std::process::exit(1);
+        return Ok(false);
     }
 
     eprintln!("Extracting data from {} URLs...", urls.len());
@@ -114,10 +114,10 @@ async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
         return Ok(extract_urls(&content));
     }
 
-    eprintln!("Usage:");
-    eprintln!("  ref refresh-data --url <URL>  Extract from single URL");
-    eprintln!("  ref refresh-data <file.md>    Extract from all URLs in file");
-    std::process::exit(2);
+    anyhow::bail!(
+        "Usage:\n  ref refresh-data --url <URL>  Extract from single URL\n  \
+         ref refresh-data <file.md>    Extract from all URLs in file"
+    )
 }
 
 /// Extract data from multiple URLs in a browser of their own, one at a time

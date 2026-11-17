@@ -100,7 +100,7 @@ pub async fn run_check_links(args: CheckLinksArgs, out: &mut impl std::io::Write
 
     if urls.is_empty() {
         eprintln!("No URLs found.");
-        std::process::exit(1);
+        return Ok(false);
     }
 
     eprintln!(
@@ -151,11 +151,11 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
         return Ok(extract_urls(&content));
     }
 
-    eprintln!("Usage:");
-    eprintln!("  ref check-links <file.md>    Check URLs in markdown file");
-    eprintln!("  ref check-links --url <URL>  Check single URL");
-    eprintln!("  ref check-links --stdin      Read URLs from stdin");
-    std::process::exit(2);
+    anyhow::bail!(
+        "Usage:\n  ref check-links <file.md>    Check URLs in markdown file\n  \
+         ref check-links --url <URL>  Check single URL\n  \
+         ref check-links --stdin      Read URLs from stdin"
+    )
 }
 
 /// Check multiple links in a browser of their own and generate a report.

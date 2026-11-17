@@ -6,6 +6,7 @@
 pub mod access;
 pub mod browser;
 pub mod check_links;
+pub mod cli;
 pub mod content;
 pub mod cookies;
 pub mod extract;
