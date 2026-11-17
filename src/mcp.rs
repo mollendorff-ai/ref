@@ -26,7 +26,9 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -203,11 +205,14 @@ fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
 
 /// A browser tool's error: for a Chrome failure, also that the next call
 /// starts a new Chrome (ADR-005 rule 3)
-fn browser_err(e: &anyhow::Error) -> ErrorData {
-    if e.is::<crate::browser::ChromeFailed>() {
-        ErrorData::internal_error(format!("{e:#}; the next call starts a new Chrome"), None)
+fn browser_err(e: anyhow::Error) -> ErrorData {
+    let chrome_failed = e.is::<crate::browser::ChromeFailed>();
+    let err = to_mcp_err(e);
+    if chrome_failed {
+        let message = format!("{}; the next call starts a new Chrome", err.message);
+        ErrorData::internal_error(message, None)
     } else {
-        to_mcp_err(e)
+        err
     }
 }
 
@@ -219,9 +224,15 @@ async fn stop_browser(slot: &Mutex<Option<Arc<BrowserPool>>>) {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // used as map_err callback
-fn json_err(e: serde_json::Error) -> ErrorData {
-    ErrorData::internal_error(format!("JSON serialization failed: {e}"), None)
+/// A tool's JSON as its result
+fn json_result(json: serde_json::Result<String>) -> std::result::Result<CallToolResult, ErrorData> {
+    match json {
+        Ok(json) => Ok(CallToolResult::success(vec![ContentBlock::text(json)])),
+        Err(e) => Err(ErrorData::internal_error(
+            format!("JSON serialization failed: {e}"),
+            None,
+        )),
+    }
 }
 
 #[tool_router]
@@ -256,16 +267,13 @@ impl RefMcpServer {
             .buffered(parallel)
             .try_collect()
             .await
-            .map_err(|e| browser_err(&e))?;
+            .map_err(browser_err)?;
 
-        let json = if pages.len() == 1 {
+        json_result(if pages.len() == 1 {
             serde_json::to_string(&pages[0])
         } else {
             serde_json::to_string(&pages)
-        }
-        .map_err(json_err)?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        })
     }
 
     /// Extract text, tables, and headings from PDF files or URLs.
@@ -286,14 +294,11 @@ impl RefMcpServer {
             results.push(page);
         }
 
-        let json = if results.len() == 1 {
+        json_result(if results.len() == 1 {
             serde_json::to_string(&results[0])
         } else {
             serde_json::to_string(&results)
-        }
-        .map_err(json_err)?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        })
     }
 
     /// Validate URL health using headless Chrome (returns status codes and redirect info).
@@ -315,11 +320,9 @@ impl RefMcpServer {
                 params.retries.unwrap_or(1),
             )
             .await
-            .map_err(|e| browser_err(&e))?
+            .map_err(browser_err)?
         };
-        let json = serde_json::to_string(&report).map_err(json_err)?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        json_result(serde_json::to_string(&report))
     }
 
     /// Scan markdown files for URLs and build/update references.yaml.
@@ -357,9 +360,7 @@ impl RefMcpServer {
         };
 
         let output = scan::scan_files(args).await.map_err(to_mcp_err)?;
-        let json = serde_json::to_string(&output).map_err(json_err)?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        json_result(serde_json::to_string(&output))
     }
 
     /// Verify references.yaml entries by fetching each URL and updating status.
@@ -382,11 +383,9 @@ impl RefMcpServer {
             let timeout = params.timeout.unwrap_or(30000);
             plan.run(&pool, parallel, timeout, params.dry_run.unwrap_or(false))
                 .await
-                .map_err(|e| browser_err(&e))?
+                .map_err(browser_err)?
         };
-        let json = serde_json::to_string(&output).map_err(json_err)?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        json_result(serde_json::to_string(&output))
     }
 
     /// Extract live data (amounts, percentages, statistics) from URLs.
@@ -423,11 +422,9 @@ impl RefMcpServer {
             let pool = self.browser().await?;
             refresh_data_with(&pool, &urls, timeout_ms)
                 .await
-                .map_err(|e| browser_err(&e))?
+                .map_err(browser_err)?
         };
-        let json = serde_json::to_string(&report).map_err(json_err)?;
-
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        json_result(serde_json::to_string(&report))
     }
 }
 
@@ -456,16 +453,33 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
 ///
 /// Returns an error if the transport fails to initialize or the server exits abnormally.
 pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> Result<()> {
-    // All log output to stderr (stdout reserved for JSON-RPC)
-    tracing_subscriber::fmt()
+    // All log output to stderr (stdout reserved for JSON-RPC). A second
+    // server in the same process (in tests) keeps the first one's logger.
+    let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("info".parse().unwrap_or_default()),
         )
         .with_ansi(false)
-        .init();
+        .try_init();
+    serve_mcp(
+        root,
+        profile,
+        Box::pin(tokio::io::stdin()),
+        Box::pin(tokio::io::stdout()),
+    )
+    .await
+}
 
+/// Serve MCP on `input` and `output` (stdio, or a pipe in tests) until the
+/// input ends, then stop the shared Chrome.
+async fn serve_mcp(
+    root: Option<PathBuf>,
+    profile: Option<ProfileChoice>,
+    input: Pin<Box<dyn AsyncRead + Send>>,
+    output: Pin<Box<dyn AsyncWrite + Send>>,
+) -> Result<()> {
     info!("Starting ref MCP server v{}", env!("CARGO_PKG_VERSION"));
 
     let root = match root {
@@ -479,7 +493,7 @@ pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> R
 
     let server = RefMcpServer::new(root, profile);
     let browser = Arc::clone(&server.pool);
-    let service = server.serve(rmcp::transport::io::stdio()).await?;
+    let service = server.serve((input, output)).await?;
     let outcome = service.waiting().await;
     stop_browser(&browser).await;
     outcome?;
@@ -780,9 +794,9 @@ mod tests {
 
     #[test]
     fn only_a_chrome_failure_promises_a_new_chrome() {
-        let page = browser_err(&anyhow::anyhow!("Failed to write references.yaml"));
+        let page = browser_err(anyhow::anyhow!("Failed to write references.yaml"));
         assert_eq!(page.message, "Failed to write references.yaml");
-        let chrome = browser_err(&anyhow::Error::new(crate::browser::ChromeFailed(
+        let chrome = browser_err(anyhow::Error::new(crate::browser::ChromeFailed(
             "gone".into(),
         )));
         assert_eq!(
@@ -899,6 +913,12 @@ mod tests {
             server.pool.lock().await.as_ref().unwrap().profile,
             crate::profile::Profile::Saved(saved.clone())
         );
+        // Several pages come back as a list, in the order given
+        let two = vec!["http://127.0.0.1:9/a".into(), "http://127.0.0.1:9/b".into()];
+        let fetched = server.ref_fetch(Parameters(fetch_params(two, None)));
+        let fetched = text(fetched.await.unwrap());
+        assert_eq!(fetched[0]["url"], "http://127.0.0.1:9/a", "{fetched}");
+        assert_eq!(fetched[1]["url"], "http://127.0.0.1:9/b", "{fetched}");
 
         let checked = server
             .ref_check_links(Parameters(CheckLinksParams {
@@ -954,16 +974,202 @@ mod tests {
         );
         let call_result = result.unwrap();
 
-        // Verify the result contains JSON with error status
-        let content = &call_result.content[0];
-        let text = match content {
-            ContentBlock::Text(t) => &t.text,
-            _ => panic!("Expected text content"),
-        };
-        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        // The result is JSON with an error status
         assert_eq!(
-            parsed["status"], "dead",
+            text(&call_result)["status"],
+            "dead",
             "Missing file should produce dead status"
         );
+    }
+
+    #[test]
+    fn a_result_that_cannot_be_json_is_an_error() {
+        let ok = json_result(Ok("[]".into())).unwrap();
+        assert_eq!(text(&ok), serde_json::json!([]));
+        // Maps with keys that are not strings have no JSON form
+        let keys = std::collections::HashMap::from([((1, 2), 3)]);
+        let err = json_result(serde_json::to_string(&keys)).unwrap_err();
+        assert!(
+            err.message.starts_with("JSON serialization failed"),
+            "{}",
+            err.message
+        );
+    }
+
+    fn fetch_params(urls: Vec<String>, parallel: Option<usize>) -> FetchParams {
+        FetchParams {
+            urls,
+            parallel,
+            timeout: Some(5000),
+            raw: None,
+            selector: None,
+            max_chars: None,
+            max_sections: None,
+        }
+    }
+
+    fn refresh_params(url: Option<&str>, file: Option<&str>) -> RefreshDataParams {
+        RefreshDataParams {
+            url: url.map(Into::into),
+            file: file.map(Into::into),
+            timeout: Some(5000),
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_parameters_are_refused_before_chrome_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Starting Chrome on a file fails, so a call that started it would say so
+        let not_a_folder = root.join("not-a-folder");
+        std::fs::write(&not_a_folder, "").unwrap();
+        let server = RefMcpServer::new(root, Some(ProfileChoice::Folder(not_a_folder)));
+        let url = || vec!["http://127.0.0.1:9/".to_string()];
+
+        for parallel in [0, MAX_PARALLEL + 1] {
+            let params = fetch_params(url(), Some(parallel));
+            let err = server.ref_fetch(Parameters(params)).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+            let expected = format!("`parallel` must be between 1 and 20 (got {parallel})");
+            assert_eq!(err.message, expected);
+        }
+
+        let neither = refresh_params(None, None);
+        let err = server
+            .ref_refresh_data(Parameters(neither))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        let missing = refresh_params(None, Some("missing.md"));
+        let err = server
+            .ref_refresh_data(Parameters(missing))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.starts_with("Failed to read missing.md"),
+            "{}",
+            err.message
+        );
+
+        // A URL is something to do: Chrome is started, and here fails
+        let one = refresh_params(Some("http://127.0.0.1:9/"), None);
+        let err = server.ref_refresh_data(Parameters(one)).await.unwrap_err();
+        assert!(
+            err.message.starts_with("Browser pool init failed"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn file_tools_are_off_when_the_workspace_is_the_filesystem_root() {
+        let server = RefMcpServer::new(PathBuf::from("/"), None);
+        let pdf = PdfParams {
+            files: vec!["a.pdf".into()],
+        };
+        let err = server.ref_pdf(Parameters(pdf)).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(
+            err.message.starts_with("File access is disabled"),
+            "{}",
+            err.message
+        );
+        let refresh = refresh_params(None, Some("notes.md"));
+        let err = server
+            .ref_refresh_data(Parameters(refresh))
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.starts_with("File access is disabled"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_writes_references_yaml_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.md"), "See https://example.com/a for more.").unwrap();
+        let server = RefMcpServer::new(root.clone(), None);
+        let params = ScanParams {
+            files: vec!["*.md".into()],
+            output: None,
+            merge: None,
+        };
+        let scanned = server.ref_scan(Parameters(params)).await.unwrap();
+        assert_eq!(text(&scanned)["new_urls"], 1, "{}", text(&scanned));
+        let written = std::fs::read_to_string(root.join("references.yaml")).unwrap();
+        assert!(written.contains("https://example.com/a"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn pdf_reads_several_files_and_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = RefMcpServer::new(dir.path().canonicalize().unwrap(), None);
+        let site = crate::test_server::serve();
+        let params = PdfParams {
+            files: vec![format!("{site}/report.pdf"), "missing.pdf".into()],
+        };
+        let read = text(&server.ref_pdf(Parameters(params)).await.unwrap());
+        assert_eq!(read[0]["status"], "ok", "{read}");
+        assert_eq!(read[1]["status"], "dead", "{read}");
+    }
+
+    /// Send one JSON-RPC message
+    async fn send(to: &mut (impl tokio::io::AsyncWrite + Unpin), message: &serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+        to.write_all(format!("{message}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    /// Read one JSON-RPC message
+    async fn receive(from: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> serde_json::Value {
+        use tokio::io::AsyncBufReadExt;
+        let mut line = String::new();
+        from.read_line(&mut line).await.unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_server_answers_on_its_input_and_stops_chrome_when_it_ends() {
+        // Needs Chrome (ADR-004): a whole session, as a client on stdio has it
+        let (client, end) = tokio::io::duplex(1 << 20);
+        let (input, output) = tokio::io::split(end);
+        let served = tokio::spawn(serve_mcp(
+            None,
+            Some(ProfileChoice::Fresh),
+            Box::pin(input),
+            Box::pin(output),
+        ));
+        let (from_server, mut to_server) = tokio::io::split(client);
+        let mut from_server = tokio::io::BufReader::new(from_server);
+
+        let hello = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "0"}}});
+        send(&mut to_server, &hello).await;
+        let answer = receive(&mut from_server).await;
+        assert_eq!(answer["result"]["serverInfo"]["name"], "ref", "{answer}");
+        let ready = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        send(&mut to_server, &ready).await;
+
+        // A call that starts Chrome
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "ref_check_links",
+                       "arguments": {"urls": ["http://127.0.0.1:9/"], "timeout": 5000, "retries": 0}}});
+        send(&mut to_server, &call).await;
+        let answer = receive(&mut from_server).await;
+        let report = answer["result"]["content"][0]["text"].as_str().unwrap();
+        let report: serde_json::Value = serde_json::from_str(report).unwrap();
+        assert_eq!(report["failed"], 1, "{report}");
+
+        // The input ends: the server stops its Chrome and returns
+        tokio::io::AsyncWriteExt::shutdown(&mut to_server)
+            .await
+            .unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_mins(1), served).await;
+        ended.unwrap().unwrap().unwrap();
     }
 }

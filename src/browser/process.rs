@@ -42,13 +42,12 @@ pub(crate) fn detect_chrome_path() -> Option<PathBuf> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     let candidates: [&str; 0] = [];
 
-    for path in candidates {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
+    first_existing(&candidates)
+}
+
+/// The first of `paths` that exists
+fn first_existing(paths: &[&str]) -> Option<PathBuf> {
+    paths.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
 /// Fresh profile folders not removed yet, each with a token its pool holds,
@@ -70,9 +69,16 @@ pub(super) fn track_profile(dir: &Path, owner: &std::sync::Arc<()>) {
     dirs.push((dir.to_path_buf(), std::sync::Arc::downgrade(owner)));
 }
 
-/// Stop tracking `dir`: it was removed
+/// Stop tracking `dir` once it is gone; while it is still on disk it stays
+/// on the list for the final clean-up
 pub(super) fn untrack_profile(dir: &Path) {
-    tracked().retain(|(d, _)| d != dir);
+    tracked().retain(|(d, _)| d != dir || d.exists());
+}
+
+/// Whether `dir` is on the list for the final clean-up
+#[cfg(test)]
+pub(super) fn is_tracked(dir: &Path) -> bool {
+    tracked().iter().any(|(d, _)| d == dir)
 }
 
 /// Remove the fresh profiles of pools that are gone without removing them:
@@ -186,7 +192,8 @@ pub(super) async fn launch(
     }
     let config = builder
         .build()
-        .map_err(|e| anyhow::anyhow!("Browser config error: {e}"))?;
+        .map_err(anyhow::Error::msg)
+        .context("Browser config error")?;
 
     Browser::launch(config)
         .await
@@ -264,10 +271,13 @@ pub(super) fn process_alive(_pid: u32) -> bool {
 /// A profile is stale when the ref process named in it no longer exists.
 #[cfg(target_os = "linux")]
 pub(super) fn sweep_orphans() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    sweep_orphans_in(&std::env::temp_dir());
+}
+
+/// [`sweep_orphans`] for the profile folders in `folder`
+#[cfg(target_os = "linux")]
+fn sweep_orphans_in(folder: &Path) {
+    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(pid) = profile_owner(&name) else {
             continue;
@@ -284,30 +294,22 @@ pub(super) fn sweep_orphans() {
 #[cfg(not(target_os = "linux"))]
 pub(super) fn sweep_orphans() {}
 
-/// Kill every process whose command line uses `profile` as its user-data-dir;
-/// true when any was found
+/// Kill every process whose command line uses `profile` as its user-data-dir
 #[cfg(target_os = "linux")]
-fn kill_chrome_using(profile: &Path) -> bool {
+fn kill_chrome_using(profile: &Path) {
     let needle = format!("--user-data-dir={}", profile.display());
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    let mut killed = false;
-    for proc_entry in procs.flatten() {
-        let pid = proc_entry.file_name().to_string_lossy().into_owned();
-        if !pid.bytes().all(|b| b.is_ascii_digit()) {
+    for proc_entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(pid) = proc_entry.file_name().to_string_lossy().parse() else {
             continue;
-        }
+        };
         let cmdline = std::fs::read(proc_entry.path().join("cmdline")).unwrap_or_default();
-        let uses_profile = cmdline
+        if cmdline
             .split(|b| *b == 0)
-            .any(|arg| arg == needle.as_bytes());
-        if let (true, Ok(pid)) = (uses_profile, pid.parse()) {
+            .any(|arg| arg == needle.as_bytes())
+        {
             kill_process(pid);
-            killed = true;
         }
     }
-    killed
 }
 
 /// The ref process id in a profile folder name `ref-chrome-<pid>-<nanos>`
@@ -403,14 +405,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_chrome_path() {
-        // This test verifies the function runs without panic
-        // Actual detection depends on system Chrome installation
-        let result = detect_chrome_path();
-        // On CI without Chrome, this may be None - that's fine
-        if let Some(path) = result {
-            assert!(path.exists());
+    fn chrome_is_the_first_known_path_that_exists() {
+        // Chrome is a requirement of ref, so of its tests (ADR-004)
+        assert!(detect_chrome_path().unwrap().exists());
+        assert_eq!(
+            first_existing(&["/no/chrome", "/"]),
+            Some(PathBuf::from("/"))
+        );
+        assert_eq!(first_existing(&["/no/chrome"]), None);
+    }
+
+    #[test]
+    fn a_profile_open_in_another_chrome_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // Chrome's lock names its host and process: this process is alive
+        let lock = format!("host-{}", std::process::id());
+        std::os::unix::fs::symlink(&lock, dir.path().join("SingletonLock")).unwrap();
+        let err = prepare_saved_profile(dir.path(), None)
+            .unwrap_err()
+            .to_string();
+        let open = format!("is open in another Chrome (process {})", std::process::id());
+        assert!(err.contains(&open), "{err}");
+    }
+
+    #[test]
+    fn the_sweep_ends_the_chrome_and_profile_of_a_dead_ref_only() {
+        let temp = tempfile::tempdir().unwrap();
+        // A process id that is free now: a ref killed before its clean-up
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        gone.wait().unwrap();
+        let dead = temp.path().join(format!("ref-chrome-{}-1", gone.id()));
+        let own = temp
+            .path()
+            .join(format!("ref-chrome-{}-2", std::process::id()));
+        let live = temp.path().join("ref-chrome-1-3");
+        let other = temp.path().join("not-a-profile");
+        for dir in [&dead, &own, &live, &other] {
+            std::fs::create_dir(dir).unwrap();
         }
+        // Its Chrome, still running on the profile
+        let mut chrome = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60; true")
+            .arg(format!("--user-data-dir={}", dead.display()))
+            .spawn()
+            .unwrap();
+
+        sweep_orphans_in(temp.path());
+        assert!(!dead.exists(), "the dead ref's profile was kept");
+        let ended = chrome.wait().unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&ended),
+            Some(9)
+        );
+        for kept in [&own, &live, &other] {
+            assert!(kept.exists(), "{} was removed", kept.display());
+        }
+        // A folder that cannot be read is nothing to sweep
+        sweep_orphans_in(&temp.path().join("missing"));
     }
 
     #[test]
@@ -505,8 +557,13 @@ mod tests {
             !gone.exists(),
             "the profile of a pool that is gone was kept"
         );
+        assert!(!is_tracked(&gone));
+        // A folder still on disk stays tracked
         untrack_profile(&live);
-        assert!(!tracked().iter().any(|(d, _)| d == &live || d == &gone));
+        assert!(is_tracked(&live));
+        std::fs::remove_dir(&live).unwrap();
+        untrack_profile(&live);
+        assert!(!is_tracked(&live));
     }
 
     #[test]

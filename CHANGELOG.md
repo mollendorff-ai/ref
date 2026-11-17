@@ -28,6 +28,8 @@ All notable changes to Möllendorff Ref.
   - `ref mcp` stops its Chrome the same way when the server ends because its input closes, so a saved profile keeps the sign-ins of the session's last seconds.
     A server ended by a signal (Ctrl-C, SIGTERM) still kills its Chrome at once.
   - A Chrome that starts but does not answer leaves no temporary profile behind, and the error names the profile.
+  - So does a Chrome that cannot start at all, also after ref retries without the sandbox: the error begins "Chrome did not start (profile ...)".
+    A Chrome that exits before its first answer is an error, not a browser with an empty user agent.
 - `ref check-links` and `ref refresh-data` no longer end the program from inside (`process::exit`): a file without URLs still exits with code 1, and missing arguments still exit with code 2, now with the usage text after `Error:`.
 - The command line lives in the library (`ref::cli`), and `main` only calls it, so every exit code is tested in-process.
 - `ref fetch`, `ref verify-refs` and `ref check-links` share one cross-host redirect check (`www.` does not count); `ref verify-refs` also treats a page whose text cannot be read as having neither a paywall nor a login.
@@ -37,6 +39,8 @@ All notable changes to Möllendorff Ref.
 - All tests are inline and none is skipped: the tests that need Chrome run in plain `cargo test` (ADR-004), and CI's separate job for them is gone.
 - The clean-up at exit removes only the temporary profiles of browsers that are gone, never one still in use.
 - `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
+- `ref update` removes its download folder however the update ends; before, a failed download, checksum entry, extraction or install left it in the temporary folder.
+- 100% line coverage of all code (ADR-004): CI's coverage gate and `make coverage` no longer leave any file out, and the README badge is a plain coverage badge.
 - `ref login --profile fresh` is refused, since a fresh profile's sign-ins would be deleted; before, it signed in to a folder named `fresh`.
   `REF_CHROME_PROFILE=fresh` is still ignored by `ref login`, which then uses the default folder.
 - An empty `REF_CHROME_PROFILE` still counts as not set.

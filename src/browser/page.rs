@@ -46,13 +46,13 @@ pub struct BrowserPage {
 impl Drop for BrowserPage {
     fn drop(&mut self) {
         let (page, permit) = (self.page.clone(), self.permit.take());
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            // Bounded: a hung Chrome would otherwise keep this tab's slot forever
-            handle.spawn(async move {
-                let _ = tokio::time::timeout(CLOSE_ACK_LIMIT, page.close()).await;
-                drop(permit);
-            });
-        }
+        // Bounded: a hung Chrome would otherwise keep this tab's slot forever
+        let close = async move {
+            let _ = tokio::time::timeout(CLOSE_ACK_LIMIT, page.close()).await;
+            drop(permit);
+        };
+        // Outside a runtime the tab cannot be closed; its slot is freed
+        let _ = tokio::runtime::Handle::try_current().map(|handle| handle.spawn(close));
     }
 }
 
@@ -180,22 +180,11 @@ impl BrowserPage {
         &self,
         lifecycle: &mut chromiumoxide::listeners::EventStream<EventLifecycleEvent>,
     ) {
-        let wait_result =
-            tokio::time::timeout(Duration::from_millis(NETWORK_IDLE_TIMEOUT_MS), async {
-                while let Some(event) = lifecycle.next().await {
-                    // networkIdle = no network connections for 500ms
-                    // networkAlmostIdle = ≤2 connections for 500ms
-                    if event.name == "networkIdle" {
-                        return WaitResult::NetworkIdle;
-                    }
-                }
-                WaitResult::StreamEnded
-            })
-            .await;
-
-        // All outcomes are acceptable: networkIdle (ideal), stream ended, or timeout
-        // Sites with persistent connections (analytics, websockets) may never reach networkIdle
-        let _ = wait_result;
+        // networkIdle: no network connections for 500 ms. Every end is fine:
+        // idle (ideal), the events ending, or the limit (sites with analytics,
+        // websockets or polling may never be idle)
+        let idle = lifecycle.any(|event| std::future::ready(event.name == "networkIdle"));
+        let _ = tokio::time::timeout(Duration::from_millis(NETWORK_IDLE_TIMEOUT_MS), idle).await;
     }
 
     /// Get page content (for data extraction)
@@ -232,12 +221,6 @@ impl BrowserPage {
             .ask(self.read_deadline(), "reading the address", self.page.url());
         Ok(page_failure(address.await)?.ok().flatten())
     }
-}
-
-/// Internal result type for network idle wait
-enum WaitResult {
-    NetworkIdle,
-    StreamEnded,
 }
 
 /// A `Document` response seen during navigation
@@ -310,10 +293,31 @@ mod tests {
         assert!(failed.status.is_none() && failed.mime.is_none() && failed.title.is_none());
     }
 
+    #[tokio::test]
+    async fn a_site_that_never_answers_is_a_navigation_timeout() {
+        // Needs Chrome (ADR-004). Connections wait in the listener's queue,
+        // never read: the request gets no answer.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let pool = crate::browser::BrowserPool::new(1, crate::browser::tests::FRESH)
+            .await
+            .unwrap();
+        let page = pool.new_page().await.unwrap();
+        let started = std::time::Instant::now();
+        let result = page.goto(&url, 1_000).await.unwrap();
+        assert_eq!(result.error.as_deref(), Some("Navigation timeout"));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // The site was slow, not Chrome
+        assert!(pool.is_alive().await);
+        drop((page, listener));
+        pool.stop().await;
+    }
+
     #[test]
     fn test_describe_error() {
         assert!(describe_error("net::ERR_NAME_NOT_RESOLVED").starts_with("DNS_FAILED: "));
         assert!(describe_error("ERR_CONNECTION_REFUSED").starts_with("CONNECTION_REFUSED: "));
+        assert!(describe_error("net::ERR_TIMED_OUT").starts_with("TIMEOUT: "));
         assert!(describe_error("net::ERR_CERT_DATE_INVALID").starts_with("SSL_ERROR: "));
         assert!(describe_error("random error").starts_with("NETWORK_ERROR: "));
         assert!(describe_error("random error").ends_with("random error"));
@@ -355,14 +359,5 @@ mod tests {
         let ms = NETWORK_IDLE_TIMEOUT_MS;
         assert!(ms >= 5000, "Timeout too short for SPAs");
         assert!(ms <= 30000, "Timeout too long, will slow down all fetches");
-    }
-
-    #[test]
-    fn test_wait_result_variants() {
-        // Ensure WaitResult enum is constructible for all variants
-        let idle = WaitResult::NetworkIdle;
-        let ended = WaitResult::StreamEnded;
-        assert!(matches!(idle, WaitResult::NetworkIdle));
-        assert!(matches!(ended, WaitResult::StreamEnded));
     }
 }

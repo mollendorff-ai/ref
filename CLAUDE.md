@@ -10,6 +10,7 @@ These hold for every change, with no exceptions and no waivers.
 1. **100% line coverage of all code, nothing skipped.**
    No `--ignore-filename-regex`, no `#[ignore]`, no `#[coverage(off)]`, no `cfg` tricks that hide code from the count.
    Code that is hard to test is changed so it can be tested (inject the URL, the folder, the clock); it is not excluded.
+   The gate counts every copy the compiler makes of a generic function or closure on its own, so keep branches out of generic code and closures that some calls never run.
 2. **Pedantic linting and formatting, nothing skipped.**
    `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings -W clippy::pedantic` must pass.
    No new `#[allow(clippy::...)]`; fix the code instead.
@@ -34,12 +35,6 @@ find src -name '*.rs' -exec wc -l {} + | awk '$2 != "total" && $1 > 1500 {print;
 
 All four must pass.
 If one fails, fix the cause; never weaken the check.
-
-## Status
-
-The repo does not meet rule 1 yet: 97.5% coverage over all code on 2026-11-17 (rules 2, 3 and 4 are met).
-CI's coverage gate still leaves some files out until then.
-The work to get there is the first item in `.asimov/roadmap.yaml` (`STRICT_RULES`); remove this section when it is done.
 
 ## Proposing work
 

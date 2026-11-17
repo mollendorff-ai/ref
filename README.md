@@ -3,7 +3,7 @@
 [![CI](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml/badge.svg)](https://github.com/mollendorff-ai/ref/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/mollendorff-ref.svg)](https://crates.io/crates/mollendorff-ref)
 [![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-tests.json)](https://github.com/mollendorff-ai/ref/actions)
-[![Logic coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-coverage.json)](https://github.com/mollendorff-ai/ref/actions)
+[![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/lctavares/d9c9e10e8e272d266ce29ae71e9d42e9/raw/ref-coverage.json)](https://github.com/mollendorff-ai/ref/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Renders web pages and PDFs into compact JSON for LLM agents.

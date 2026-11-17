@@ -10,12 +10,12 @@ use crate::cookies::Cookie;
 use crate::profile::{self, Profile, ProfileChoice};
 use anyhow::{Context, Result};
 use chromiumoxide::cdp::browser_protocol::network::{
-    CookieParam, SetCacheDisabledParams, SetCookiesParams,
+    CookieParam, SetCacheDisabledParams, SetCookiesParams, SetUserAgentOverrideParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::SetLifecycleEventsEnabledParams;
 use chromiumoxide::{Browser, Page};
 use futures::StreamExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -126,12 +126,34 @@ impl Chrome {
         what: &str,
         request: impl std::future::Future<Output = std::result::Result<T, E>>,
     ) -> Result<T> {
+        // Generic: every line runs for every answer type, so that each copy
+        // the compiler makes is covered whole; the branches are in
+        // `refuse_if_failed` and `failure_behind`
+        self.refuse_if_failed(what)?;
+        let answer = Self::attempt(until, what, request).await;
+        let failure = self.failure_behind(answer.as_ref().err(), what).await;
+        failure.map_or(answer, Err)
+    }
+
+    /// A failed pool asks nothing (rule 3)
+    fn refuse_if_failed(&self, what: &str) -> Result<()> {
         if self.has_failed() {
-            return Err(Self::failure(what));
+            Err(Self::failure(what))
+        } else {
+            Ok(())
         }
-        match Self::attempt(until, what, request).await {
-            Ok(answer) => Ok(answer),
-            Err(error) => Err(self.judge(error, what).await),
+    }
+
+    /// For a failed request (`error`), Chrome's failure when Chrome no longer
+    /// answers; `None` when the request did not fail or the failure is the page's
+    async fn failure_behind(
+        &self,
+        error: Option<&anyhow::Error>,
+        what: &str,
+    ) -> Option<anyhow::Error> {
+        match error {
+            Some(_) if !self.alive().await => Some(Self::failure(what)),
+            _ => None,
         }
     }
 
@@ -204,25 +226,28 @@ impl BrowserPool {
     /// # Errors
     /// Returns an error if Chrome/Chromium is not found or fails to launch.
     pub async fn new(concurrency: usize, profile: Option<&ProfileChoice>) -> Result<Self> {
-        Self::with_request_timeout(concurrency, profile, CHROME_REQUEST_TIMEOUT).await
+        Self::start(concurrency, profile, StartOptions::found()).await
     }
 
-    /// [`new`](Self::new) with another limit for the request budgets (tests use
-    /// a short one to see what happens when Chrome hangs)
-    pub(crate) async fn with_request_timeout(
+    /// [`new`](Self::new) with the Chrome, sandbox and request budget given
+    /// (tests use them to see start-up fail, or what happens when Chrome hangs)
+    pub(crate) async fn start(
         concurrency: usize,
         profile: Option<&ProfileChoice>,
-        request_timeout: Duration,
+        options: StartOptions,
     ) -> Result<Self> {
-        let chrome_path = detect_chrome_path().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Chrome/Chromium not found. Searched paths:\n  \
-                 Linux: /usr/bin/google-chrome-stable, /usr/bin/google-chrome, /usr/bin/chromium-browser, /usr/bin/chromium\n  \
-                 macOS: /Applications/Google Chrome.app/...\n  \
-                 Windows: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\n\
-                 Please install Chrome or Chromium."
-            )
-        })?;
+        let StartOptions {
+            chrome: chrome_path,
+            sandbox,
+            request_timeout,
+        } = options;
+        let chrome_path = chrome_path.context(
+            "Chrome/Chromium not found. Searched paths:\n  \
+             Linux: /usr/bin/google-chrome-stable, /usr/bin/google-chrome, /usr/bin/chromium-browser, /usr/bin/chromium\n  \
+             macOS: /Applications/Google Chrome.app/...\n  \
+             Windows: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\n\
+             Please install Chrome or Chromium.",
+        )?;
 
         sweep_orphans();
         let home = profile::home_dir();
@@ -238,26 +263,25 @@ impl BrowserPool {
             Profile::Fresh(dir) => track_profile(dir, &owner),
         }
         let profile_dir = chosen.path().to_path_buf();
-        let sandbox = want_sandbox(
-            std::env::var(NO_SANDBOX_ENV).ok().as_deref(),
-            running_as_root(),
-        );
 
-        let (mut browser, handler) = match launch(&chrome_path, &profile_dir, sandbox).await {
-            Ok(b) => b,
+        let launched = match launch(&chrome_path, &profile_dir, sandbox).await {
             Err(e) if sandbox => {
                 eprintln!(
                     "Warning: Chrome did not start with its sandbox ({e:#}); retrying without it. \
                      Set {NO_SANDBOX_ENV}=1 to skip this attempt."
                 );
-                launch(&chrome_path, &profile_dir, false).await?
+                launch(&chrome_path, &profile_dir, false).await
             }
+            first => first,
+        };
+        let (mut browser, handler) = match launched {
+            Ok(b) => b,
             Err(e) => {
-                if !chosen.is_saved() {
-                    let _ = std::fs::remove_dir_all(&profile_dir);
-                    untrack_profile(&profile_dir);
-                }
-                return Err(e);
+                start_failed(&chosen).await;
+                return Err(e.context(format!(
+                    "Chrome did not start (profile {})",
+                    profile_dir.display()
+                )));
             }
         };
         let pid = browser.get_mut_child().and_then(|c| c.as_mut_inner().id());
@@ -275,19 +299,18 @@ impl BrowserPool {
             let browser = chrome.browser.read().await;
             tokio::time::timeout(request_timeout, browser.version()).await
         };
-        let Ok(version) = version else {
+        // Not answering, or gone before answering: no pool
+        let Ok(Ok(version)) = version else {
             // Dropping the browser kills this Chrome (chromiumoxide kills on
             // drop); its fresh profile goes with it
             drop(chrome);
-            if let Profile::Fresh(dir) = &chosen {
-                remove_profile(dir).await;
-            }
+            start_failed(&chosen).await;
             anyhow::bail!(
                 "Chrome started but did not answer (profile {})",
                 profile_dir.display()
             );
         };
-        let chrome_ua = version.map(|v| v.user_agent).unwrap_or_default();
+        let chrome_ua = version.user_agent;
 
         // With a saved profile, sites see the same browser you signed in with
         // (sessions and "I am human" passes are often tied to the user agent)
@@ -393,33 +416,25 @@ impl BrowserPool {
     }
 
     async fn set_up(&self, page: &Page, until: tokio::time::Instant) -> Result<()> {
+        // Each step on one line: a `?` alone on its line counts as a line
+        // missed whenever that step happens not to fail
         let chrome = &self.chrome;
-        let agent = chromiumoxide::cdp::browser_protocol::network::SetUserAgentOverrideParams::new(
-            &self.user_agent,
-        );
-        chrome
-            .ask(until, "setting the user agent", page.execute(agent))
-            .await?;
+        let agent = page.execute(SetUserAgentOverrideParams::new(&self.user_agent));
+        chrome.ask(until, "setting the user agent", agent).await?;
 
         if !self.cookies.is_empty() {
             // Raw CDP call: chromiumoxide's helper refuses to run on about:blank
-            let cookies = SetCookiesParams::new(self.cookies.clone());
-            chrome
-                .ask(until, "setting cookies", page.execute(cookies))
-                .await
-                .context("Failed to set cookies")?;
+            let cookies = page.execute(SetCookiesParams::new(self.cookies.clone()));
+            let set = chrome.ask(until, "setting cookies", cookies).await;
+            set.context("Failed to set cookies")?;
         }
 
-        let no_cache = SetCacheDisabledParams::new(true);
-        chrome
-            .ask(until, "turning off the cache", page.execute(no_cache))
-            .await?;
+        let no_cache = page.execute(SetCacheDisabledParams::new(true));
+        chrome.ask(until, "turning off the cache", no_cache).await?;
 
         // Enable lifecycle events for networkIdle detection
-        let lifecycle = SetLifecycleEventsEnabledParams::new(true);
-        chrome
-            .ask(until, "enabling page events", page.execute(lifecycle))
-            .await?;
+        let lifecycle = page.execute(SetLifecycleEventsEnabledParams::new(true));
+        chrome.ask(until, "enabling page events", lifecycle).await?;
         Ok(())
     }
 
@@ -483,15 +498,46 @@ async fn close_gracefully(browser: &mut Browser) -> bool {
             .is_ok()
 }
 
+/// How a pool starts Chrome
+pub(crate) struct StartOptions {
+    /// Chrome's program, `None` when none was found
+    pub(crate) chrome: Option<PathBuf>,
+    /// Try Chrome's sandbox first (then once without it, if Chrome fails)
+    pub(crate) sandbox: bool,
+    /// The request budget of rule 6
+    pub(crate) request_timeout: Duration,
+}
+
+impl StartOptions {
+    /// The Chrome found on this system; the sandbox unless ref runs as root
+    /// or [`NO_SANDBOX_ENV`] is set
+    pub(crate) fn found() -> Self {
+        Self {
+            chrome: detect_chrome_path(),
+            sandbox: want_sandbox(
+                std::env::var(NO_SANDBOX_ENV).ok().as_deref(),
+                running_as_root(),
+            ),
+            request_timeout: CHROME_REQUEST_TIMEOUT,
+        }
+    }
+}
+
+/// Clean up after a Chrome that did not start: a fresh profile is removed,
+/// a saved one is the user's and stays
+async fn start_failed(chosen: &Profile) {
+    if let Profile::Fresh(dir) = chosen {
+        remove_profile(dir).await;
+    }
+}
+
 /// Remove a fresh profile folder, waiting and retrying after a kill (see
 /// [`remove_dir_retrying`]); it stays on the list for the final clean-up until
 /// it is gone.
 async fn remove_profile(dir: &Path) {
     let owned = dir.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || remove_dir_retrying(&owned)).await;
-    if !dir.exists() {
-        untrack_profile(dir);
-    }
+    untrack_profile(dir);
 }
 
 /// Read Chrome's messages until the connection fails (messages it cannot
@@ -532,6 +578,14 @@ pub struct DownloadHeaders {
 pub(crate) mod tests {
     use super::process::process_alive;
     use super::*;
+
+    /// Chrome as found, with request budgets of `budget`
+    fn with_budget(budget: Duration) -> StartOptions {
+        StartOptions {
+            request_timeout: budget,
+            ..StartOptions::found()
+        }
+    }
     use std::io::{BufRead, BufReader, Write};
 
     pub(crate) const FRESH: Option<&ProfileChoice> = Some(&ProfileChoice::Fresh);
@@ -567,15 +621,12 @@ pub(crate) mod tests {
 
     /// Wait (checking every 50 ms, for at most 10 s) until `done` says so
     pub(crate) async fn wait_for<F: std::future::Future<Output = bool>>(done: impl Fn() -> F) {
-        let waited = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                if done().await {
-                    break;
-                }
-            }
+        let checks = futures::stream::repeat(()).then(|()| async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            done().await
         });
-        assert!(waited.await.is_ok(), "gave up waiting");
+        let waited = tokio::time::timeout(Duration::from_secs(10), checks.any(std::future::ready));
+        assert!(waited.await.unwrap_or(false), "gave up waiting");
     }
 
     /// Serve a page that sends `signal` to `pool`'s Chrome when Chrome asks
@@ -643,11 +694,11 @@ pub(crate) mod tests {
             seen.push(page.content().await.unwrap());
         }
         pool.close().await;
-        assert!(seen[0].contains("visit 0"), "{}", seen[0]);
+        let (first, second) = (&seen[0], &seen[1]);
+        assert!(first.contains("visit 0"), "{first}");
         assert!(
-            !seen[1].contains("visit 0"),
-            "served from the cache: {}",
-            seen[1]
+            !second.contains("visit 0"),
+            "served from the cache: {second}"
         );
     }
 
@@ -729,7 +780,7 @@ pub(crate) mod tests {
         // wait for each other forever.
         let budget = Duration::from_secs(2);
         let pool = Arc::new(
-            BrowserPool::with_request_timeout(1, FRESH, budget)
+            BrowserPool::start(1, FRESH, with_budget(budget))
                 .await
                 .unwrap(),
         );
@@ -749,7 +800,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn rule_6_a_chrome_that_does_not_answer_at_start_leaves_no_profile() {
         // Needs Chrome (ADR-004). A zero budget: the first answer cannot come in time.
-        let err = BrowserPool::with_request_timeout(1, FRESH, Duration::ZERO).await;
+        let err = BrowserPool::start(1, FRESH, with_budget(Duration::ZERO)).await;
         let err = err.err().expect("start failed").to_string();
         assert!(
             err.starts_with("Chrome started but did not answer"),
@@ -761,7 +812,63 @@ pub(crate) mod tests {
         // A saved profile is the user's: it stays
         let home = tempfile::tempdir().unwrap();
         let saved = ProfileChoice::Folder(home.path().join("saved"));
-        let err = BrowserPool::with_request_timeout(1, Some(&saved), Duration::ZERO).await;
+        let err = BrowserPool::start(1, Some(&saved), with_budget(Duration::ZERO)).await;
+        assert!(err.is_err());
+        assert!(
+            home.path().join("saved").is_dir(),
+            "the saved profile was removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_chrome_no_pool_starts() {
+        let none = StartOptions {
+            chrome: None,
+            ..StartOptions::found()
+        };
+        let err = BrowserPool::start(1, FRESH, none).await.err().unwrap();
+        assert!(
+            err.to_string().starts_with("Chrome/Chromium not found"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chrome_that_does_not_start_is_tried_without_its_sandbox_and_leaves_no_profile() {
+        // `false` stands in for a Chrome that exits at once
+        let failing = |sandbox| StartOptions {
+            chrome: Some(PathBuf::from("/usr/bin/false")),
+            sandbox,
+            request_timeout: CHROME_REQUEST_TIMEOUT,
+        };
+        for sandbox in [true, false] {
+            let err = BrowserPool::start(1, FRESH, failing(sandbox)).await;
+            let err = err.err().expect("a pool started");
+            let message = err.to_string();
+            assert!(
+                message.starts_with("Chrome did not start (profile "),
+                "{message}"
+            );
+            assert!(
+                format!("{err:#}").contains("Failed to launch Chrome"),
+                "{err:#}"
+            );
+            let dir = message
+                .split("(profile ")
+                .nth(1)
+                .unwrap()
+                .trim_end_matches(')');
+            assert!(!Path::new(dir).exists(), "{dir} was left behind");
+            assert!(
+                !process::is_tracked(Path::new(dir)),
+                "{dir} is still tracked"
+            );
+        }
+
+        // A saved profile is the user's: it stays
+        let home = tempfile::tempdir().unwrap();
+        let saved = ProfileChoice::Folder(home.path().join("saved"));
+        let err = BrowserPool::start(1, Some(&saved), failing(false)).await;
         assert!(err.is_err());
         assert!(
             home.path().join("saved").is_dir(),
@@ -773,7 +880,7 @@ pub(crate) mod tests {
     async fn rule_6_a_failed_navigation_also_starts_a_read_budget() {
         // Needs Chrome (ADR-004)
         let budget = Duration::from_secs(2);
-        let pool = BrowserPool::with_request_timeout(1, FRESH, budget)
+        let pool = BrowserPool::start(1, FRESH, with_budget(budget))
             .await
             .unwrap();
         let page = pool.new_page().await.unwrap();
@@ -802,7 +909,7 @@ pub(crate) mod tests {
         // Needs Chrome (ADR-004). Before, a second navigation on the same tab
         // read against the first one's budget, long spent.
         let budget = Duration::from_secs(2);
-        let pool = BrowserPool::with_request_timeout(1, FRESH, budget)
+        let pool = BrowserPool::start(1, FRESH, with_budget(budget))
             .await
             .unwrap();
         let page = pool.new_page().await.unwrap();
@@ -991,7 +1098,7 @@ pub(crate) mod tests {
     async fn rule_6_reads_of_a_hung_page_share_one_budget() {
         // Needs Chrome (ADR-004). Before, each read had a limit of its own.
         let budget = Duration::from_secs(2);
-        let pool = BrowserPool::with_request_timeout(1, FRESH, budget)
+        let pool = BrowserPool::start(1, FRESH, with_budget(budget))
             .await
             .unwrap();
         let page = pool.new_page().await.unwrap();

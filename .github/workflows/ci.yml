@@ -132,21 +132,19 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-cov-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run coverage (pure-logic modules, 100% gate)
+      - name: Run coverage (all code, 100% gate)
         id: coverage
         run: |
-          # IO modules excluded until STRICT_RULES removes this (ADR-004)
-          EXCLUDE='browser/|login\.rs|main\.rs|mcp\.rs|update\.rs'
-          OUTPUT=$(cargo llvm-cov --ignore-filename-regex "$EXCLUDE" 2>&1)
+          # Every line of every file (ADR-004): no exclusions
+          STATUS=0
+          OUTPUT=$(cargo llvm-cov --fail-under-lines 100 2>&1) || STATUS=$?
           echo "$OUTPUT"
 
           # Extract line coverage percentage
           COVERAGE=$(echo "$OUTPUT" | grep '^TOTAL' | awk '{print $10}' | tr -d '%')
           echo "percentage=$COVERAGE" >> "$GITHUB_OUTPUT"
           echo "Coverage: ${COVERAGE}%"
-
-          # Enforce 100% gate on pure-logic modules
-          cargo llvm-cov --fail-under-lines 100 --ignore-filename-regex "$EXCLUDE"
+          exit $STATUS
 
       - name: Count tests
         id: tests
@@ -183,7 +181,7 @@ jobs:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.BADGE_GIST_ID }}
           filename: ref-coverage.json
-          label: logic coverage
+          label: coverage
           message: "${{ needs.coverage.outputs.percentage }}%"
           valColorRange: ${{ needs.coverage.outputs.percentage }}
           minColorRange: 50

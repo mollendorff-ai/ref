@@ -20,7 +20,7 @@ shipped:
     summary: "PDF from URL and --selector for fetch"
 
 upcoming:
-  - summary: "Meet the strict quality rules (ADR-004, CLAUDE.md)"
+  - summary: "Meet the strict quality rules (ADR-004, CLAUDE.md) (done 2026-11-17: 100% line coverage of all code, 9,173 lines)"
     goal: "STRICT_RULES"
     source: "Measured on 2026-11-16 over all code, every test run: 78.03% line coverage (5,125 lines, 1,126 not covered)"
     deliverables:
@@ -30,11 +30,12 @@ upcoming:
       - "Done 2026-11-17. main becomes a thin wrapper over cli::execute(args, out, err, stop) -> ExitCode; tests/cli_tests.rs is gone, its 12 tests are 14 inline tests in src/cli.rs; check_links and refresh_data no longer call process::exit"
       - "Done 2026-11-17. tests/e2e_local.rs moved inline (fetch, check_links, scan; the test web server is src/test_server.rs); no #[ignore] anywhere; CI's e2e job removed, the test job runs the Chrome tests; the bin target has test = false (main.rs only calls cli::main); the CI gate's exclusion follows the browser/ split"
       - "Done 2026-11-17: fetch, verify_refs, refresh_data, pdf/ (100%); the CI gate now excludes only browser/, login, main, mcp, update"
-      - "Done 2026-11-17: init, scan, check_links (100%; --stdin input injected into cli::execute). Left: update, verify_refs, refresh_data (injected base URL, local server), fetch, pdf, mcp (in-process, run_mcp), login (headless seam), and the rest of browser/"
+      - "Done 2026-11-17: init, scan, check_links (100%; --stdin input injected into cli::execute)"
+      - "Done 2026-11-17: update (a fake GitHub, the binary and scratch folder injected), login (the Chrome program injected; true and false stand in for it), mcp (a whole session on an in-memory pipe, through the body of run_mcp), browser/ (start-up options injected: Chrome program, sandbox, request budget; the orphan sweep takes its folder)"
       - "Done 2026-11-17: the cross-host redirect check is one function, fetch::redirect_target"
-      - "Remove the coverage exclusions from the Makefile and CI; gate is cargo llvm-cov --fail-under-lines 100 over everything; README badge renamed from Logic coverage"
-      - "Split any file that passes 1,500 lines once its tests are inline (browser.rs and fetch.rs are closest)"
-      - "Real tests for the clean-up after killed runs (sweep_orphans, kill_chrome_using: plant a profile folder named for a dead ref process) and for navigation timeouts; on 2026-11-17 they were covered only by leftovers of earlier runs"
+      - "Done 2026-11-17. Remove the coverage exclusions from the Makefile and CI; gate is cargo llvm-cov --fail-under-lines 100 over everything; README badge renamed from Logic coverage"
+      - "Split any file that passes 1,500 lines (on 2026-11-17 the largest are fetch.rs, 1,353, and browser/mod.rs, 1,206)"
+      - "Done 2026-11-17. Real tests for the clean-up after killed runs (sweep_orphans, kill_chrome_using: plant a profile folder named for a dead ref process) and for navigation timeouts; before, they were covered only by leftovers of earlier runs"
       - "Done 2026-11-17: browser.rs split into browser/mod.rs (pool and lifecycle), page.rs (tabs) and process.rs (starting Chrome, processes, profile folders)"
   - summary: "MCP tools lock each other out of a saved profile (done 2026-11-17, Unreleased)"
     goal: "MCP_SHARED_PROFILE"
@@ -67,9 +68,9 @@ upcoming:
     deliverables:
       - "ref mcp ended by a signal (Ctrl-C, SIGTERM) stops its Chrome gracefully, within a limit, instead of killing it; today only a closed input does (main.rs drops the command on a signal)"
       - "After the server ends, a tool call still running must not start a new Chrome (a 'server ended' state in the pool slot)"
-      - "One guard for start-up failures: every way BrowserPool::new fails (the retry without the sandbox too) ends its Chrome and removes a fresh profile; a Chrome that dies right after launch is an error, not a pool with an empty user agent"
+      - "Done 2026-11-17. One guard for start-up failures: every way BrowserPool::new fails (the retry without the sandbox too) ends its Chrome and removes a fresh profile; a Chrome that dies right after launch is an error, not a pool with an empty user agent"
       - "One Chrome method for requests on the browser itself (read lock, attempt, drop the lock, then judge, with the failed-pool check), so the lock order cannot be got wrong at a new call site"
-      - "A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
+      - "Done 2026-11-17. A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
       - "verify-refs: a test for a tab that dies between opening and navigation, and an error message that says it was the tab"
   - summary: "Content detection on GitHub pages"
     goal: "GITHUB_CONTENT"

@@ -9,6 +9,7 @@ use crate::browser::{detect_chrome_path, prepare_saved_profile, running_as_root,
 use crate::profile::{self, ProfileChoice};
 use anyhow::{bail, Context, Result};
 use clap::Args;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,12 +59,32 @@ fn login_dir(
     }
 }
 
+/// Chrome's command line for signing in to `dir`, opening `urls`.
+fn login_args(dir: &Path, urls: &[String], sandbox: bool) -> Vec<OsString> {
+    let mut args = vec![OsString::from(format!("--user-data-dir={}", dir.display()))];
+    args.extend(LOGIN_SWITCHES.map(OsString::from));
+    args.extend(urls.iter().map(OsString::from));
+    if !sandbox {
+        args.push("--no-sandbox".into());
+    }
+    args
+}
+
 /// Run the login command: blocks until that Chrome is closed.
 ///
 /// # Errors
 /// Returns an error when no profile folder can be chosen, the profile is in
 /// use or is Chrome's everyday profile, a URL is not http(s), or Chrome cannot start.
 pub fn run_login(args: &LoginArgs, out: &mut dyn std::io::Write) -> Result<()> {
+    run_login_with(args, detect_chrome_path(), out)
+}
+
+/// [`run_login`] with the Chrome to start (`None` when none was found)
+fn run_login_with(
+    args: &LoginArgs,
+    chrome: Option<PathBuf>,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
     let home = profile::home_dir();
     let from_env = profile::resolve(None)?;
     let dir = login_dir(args.profile.as_ref(), from_env.as_ref(), home.as_deref())?;
@@ -74,26 +95,22 @@ pub fn run_login(args: &LoginArgs, out: &mut dyn std::io::Write) -> Result<()> {
         }
     }
     prepare_saved_profile(&dir, home.as_deref())?;
-    let chrome = detect_chrome_path().context("Chrome/Chromium not found")?;
-
-    let mut cmd = Command::new(chrome);
-    cmd.arg(format!("--user-data-dir={}", dir.display()))
-        .args(LOGIN_SWITCHES)
-        .args(&args.urls);
-    if !want_sandbox(
+    let chrome = chrome.context("Chrome/Chromium not found")?;
+    let sandbox = want_sandbox(
         std::env::var(crate::browser::NO_SANDBOX_ENV)
             .ok()
             .as_deref(),
         running_as_root(),
-    ) {
-        cmd.arg("--no-sandbox");
-    }
+    );
 
     eprintln!("Chrome is opening with ref's saved profile:");
     eprintln!("  {}", dir.display());
     eprintln!("Sign in to your sites and pass any checks, then quit Chrome completely.");
     eprintln!("ref will reuse these sessions from now on.");
-    let status = cmd.status().context("Failed to start Chrome")?;
+    let status = Command::new(chrome)
+        .args(login_args(&dir, &args.urls, sandbox))
+        .status()
+        .context("Failed to start Chrome")?;
 
     let output = serde_json::json!({
         "profile": dir.display().to_string(),
@@ -133,5 +150,71 @@ mod tests {
             homeless.to_string().contains("No home folder"),
             "{homeless}"
         );
+    }
+
+    #[test]
+    fn chrome_opens_the_folder_and_the_pages() {
+        let urls = vec!["https://a.example/".to_string()];
+        let sandboxed = login_args(Path::new("/p"), &urls, true);
+        let expected = [
+            "--user-data-dir=/p",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "https://a.example/",
+        ];
+        assert_eq!(sandboxed, expected);
+        let unsandboxed = login_args(Path::new("/p"), &urls, false);
+        assert_eq!(unsandboxed[..6], expected);
+        assert_eq!(unsandboxed[6], "--no-sandbox");
+    }
+
+    /// Sign in to a new folder with `chrome` standing in for Chrome
+    fn login_with(urls: &[&str], chrome: Option<&str>) -> (tempfile::TempDir, Result<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let args = LoginArgs {
+            urls: urls.iter().map(ToString::to_string).collect(),
+            profile: Some(ProfileChoice::Folder(dir.path().join("profile"))),
+        };
+        let mut out = Vec::new();
+        let done = run_login_with(&args, chrome.map(PathBuf::from), &mut out);
+        (dir, done.map(|()| String::from_utf8(out).unwrap()))
+    }
+
+    #[test]
+    fn closing_chrome_saves_the_profile() {
+        let (dir, out) = login_with(&["https://a.example/"], Some("/usr/bin/true"));
+        let out: serde_json::Value = serde_json::from_str(&out.unwrap()).unwrap();
+        let profile = dir.path().join("profile");
+        assert_eq!(out["profile"], profile.display().to_string());
+        assert_eq!(out["status"], "saved");
+        assert!(profile.is_dir());
+    }
+
+    #[test]
+    fn a_chrome_that_fails_is_reported() {
+        let (_dir, out) = login_with(&[], Some("/usr/bin/false"));
+        let out: serde_json::Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert_eq!(out["status"], "chrome_exited_with_error");
+    }
+
+    #[test]
+    fn login_needs_a_chrome_it_can_start() {
+        let (_dir, missing) = login_with(&[], None);
+        assert_eq!(
+            missing.unwrap_err().to_string(),
+            "Chrome/Chromium not found"
+        );
+        let (_dir, broken) = login_with(&[], Some("/nonexistent/chrome"));
+        assert_eq!(broken.unwrap_err().to_string(), "Failed to start Chrome");
+    }
+
+    #[test]
+    fn a_page_that_is_not_on_the_web_is_refused_before_anything_starts() {
+        let (dir, out) = login_with(&["file:///etc/passwd"], Some("/usr/bin/true"));
+        let err = out.unwrap_err().to_string();
+        assert!(err.starts_with("file:///etc/passwd: "), "{err}");
+        assert!(!dir.path().join("profile").exists());
     }
 }
