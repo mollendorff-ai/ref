@@ -25,7 +25,8 @@ All notable changes to Möllendorff Ref.
   - Every request to Chrome has a limit, also while Chrome is frozen: 30 seconds to open and set up a tab, and 30 seconds for everything read from a page after navigation.
   - A crashed Chrome is noticed and collected at once, so it never seems to hold the profile's lock.
   - A tab whose set-up fails is closed before the error is returned, and a run that stops early cancels its remaining checks.
-  - `ref mcp` stops its Chrome the same way when the server ends, so a saved profile keeps the sign-ins of the session's last seconds.
+  - `ref mcp` stops its Chrome the same way when the server ends because its input closes, so a saved profile keeps the sign-ins of the session's last seconds.
+    A server ended by a signal (Ctrl-C, SIGTERM) still kills its Chrome at once.
   - A Chrome that starts but does not answer leaves no temporary profile behind, and the error names the profile.
 - `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
 - `ref login --profile fresh` is refused, since a fresh profile's sign-ins would be deleted; before, it signed in to a folder named `fresh`.
