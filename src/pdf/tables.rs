@@ -451,6 +451,20 @@ mod tests {
     }
 
     #[test]
+    fn rows_whose_gaps_never_line_up_are_no_table() {
+        // Different numbers of cells, and no column position in common
+        assert_eq!(
+            detect_tables("ab  cdefghijkl\nabcdefghijkl  mn  op\n").len(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_empty_line_has_no_cells() {
+        assert_eq!(extract_cells("", &[3]), Vec::<String>::new());
+    }
+
+    #[test]
     fn rows_with_empty_cells_are_split_on_the_columns_they_share() {
         let text =
             "Region    Q2    Q3\nNorth    140   150\nSouth          200\nEast     80    90\n";

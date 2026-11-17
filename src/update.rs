@@ -715,6 +715,12 @@ mod tests {
         assert_eq!(run.binary(), "old");
         run.only_the_binary_is_left();
 
+        // With nothing installed yet there is no backup to put back either
+        let nothing = run.dir.path().join("nothing");
+        assert!(install_binary(&missing, &nothing).is_err());
+        assert!(!nothing.exists());
+        run.only_the_binary_is_left();
+
         // A first install has nothing to back up
         let fresh = run.dir.path().join("fresh");
         install_binary(&run.exe, &fresh).unwrap();

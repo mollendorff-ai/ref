@@ -792,7 +792,8 @@ mod tests {
             "{:?}",
             page.alerts
         );
-        assert!(!page.sections.is_empty());
+        // The fallback returned the page's one paragraph
+        assert_eq!(page.sections.len(), 1);
     }
 
     #[test]
@@ -1075,6 +1076,40 @@ mod tests {
             !wrong["alerts"].to_string().contains("try --user-agent"),
             "{wrong}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pdf_that_cannot_be_read_stays_dead_and_says_why() {
+        // Needs Chrome (ADR-004): Chrome calls it a PDF, the download is not one
+        let base = serve();
+        let (code, page) = fetch(&[&format!("{base}/text.pdf")]).await;
+        assert_eq!(page["status"], "dead", "{page}");
+        assert!(page["http"].is_null(), "{page}");
+        let alerts = page["alerts"].to_string();
+        assert!(alerts.contains("PDF detected"), "{alerts}");
+        assert!(alerts.contains("PDF extraction failed"), "{alerts}");
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn the_truncation_alert_names_only_the_limits_that_are_on() {
+        let on = truncation_alert(&FetchOptions::default());
+        assert!(on.contains("characters per section"), "{on}");
+        assert!(
+            on.contains(&format!("{DEFAULT_MAX_SECTIONS} sections")),
+            "{on}"
+        );
+        let off = truncation_alert(&FetchOptions {
+            max_chars: 0,
+            max_sections: 0,
+            ..FetchOptions::default()
+        });
+        assert!(!off.contains("characters per section"), "{off}");
+        assert!(
+            !off.contains(&format!("{DEFAULT_MAX_SECTIONS} sections")),
+            "{off}"
+        );
+        assert!(off.contains("code blocks"), "{off}");
     }
 
     #[tokio::test]
