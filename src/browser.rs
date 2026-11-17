@@ -3,11 +3,12 @@
 //! v1.2.0: Added `networkIdle` wait for SPA support (ADR-002)
 
 use crate::cookies::Cookie;
-use crate::profile::{self, Profile};
+use crate::profile::{self, Profile, ProfileChoice};
 use anyhow::{Context, Result};
 use chromiumoxide::browser::BrowserConfigBuilder;
 use chromiumoxide::cdp::browser_protocol::network::{
-    CookieParam, EventResponseReceived, ResourceType, SetCookiesParams, TimeSinceEpoch,
+    CookieParam, EventResponseReceived, ResourceType, SetCacheDisabledParams, SetCookiesParams,
+    TimeSinceEpoch,
 };
 use chromiumoxide::cdp::browser_protocol::page::{
     EventLifecycleEvent, SetLifecycleEventsEnabledParams,
@@ -96,6 +97,18 @@ pub fn remove_open_profiles() {
     }
 }
 
+/// How long ref waits for Chrome to answer one request. A Chrome that crashed
+/// or was killed never answers, so without a limit the call would wait forever.
+const CHROME_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `work`, or an error saying Chrome did not answer in time
+async fn answered<T>(what: &str, work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    let limit = CHROME_ANSWER_TIMEOUT.as_secs();
+    tokio::time::timeout(CHROME_ANSWER_TIMEOUT, work)
+        .await
+        .map_err(|_| anyhow::anyhow!("Chrome did not answer within {limit} s ({what})"))?
+}
+
 /// Set to `1` or `true` to start Chrome without its sandbox
 /// (needed in some containers; ref also falls back automatically).
 pub const NO_SANDBOX_ENV: &str = "REF_CHROME_NO_SANDBOX";
@@ -114,8 +127,8 @@ pub struct BrowserPool {
 impl BrowserPool {
     /// Create a new browser pool with concurrency limit
     ///
-    /// `profile` is the `--profile` value: a saved profile folder, `fresh`, or
-    /// `None` for the default (see [`profile::choose`]).
+    /// `profile` is the `--profile` value, or `None` for the default
+    /// (see [`profile::choose`]).
     /// A fresh profile is a folder of its own, removed on [`close`](Self::close),
     /// so two ref processes never share or lock one profile.
     /// Chrome's sandbox is on unless ref runs as root, [`NO_SANDBOX_ENV`] is set,
@@ -123,7 +136,7 @@ impl BrowserPool {
     ///
     /// # Errors
     /// Returns an error if Chrome/Chromium is not found or fails to launch.
-    pub async fn new(concurrency: usize, profile: Option<&str>) -> Result<Self> {
+    pub async fn new(concurrency: usize, profile: Option<&ProfileChoice>) -> Result<Self> {
         let chrome_path = detect_chrome_path().ok_or_else(|| {
             anyhow::anyhow!(
                 "Chrome/Chromium not found. Searched paths:\n  \
@@ -229,12 +242,30 @@ impl BrowserPool {
         }
     }
 
-    /// Get a new page with resource blocking
+    /// True while Chrome still answers: a browser that crashed or was killed
+    /// does not, and a long-lived caller (the MCP server) then starts a new one.
+    pub async fn is_alive(&self) -> bool {
+        tokio::time::timeout(Duration::from_secs(3), self.browser.version())
+            .await
+            .is_ok_and(|v| v.is_ok())
+    }
+
+    /// Get a new page with resource blocking and Chrome's cache turned off, so
+    /// every navigation asks the site again (a long-lived browser would
+    /// otherwise answer from its cache).
     ///
     /// # Errors
     /// Returns an error if page creation or configuration fails.
     pub async fn new_page(&self) -> Result<BrowserPage> {
         let permit = self.semaphore.clone().acquire_owned().await?;
+        let page = answered("opening a page", self.open_page()).await?;
+        Ok(BrowserPage {
+            page,
+            permit: Some(permit),
+        })
+    }
+
+    async fn open_page(&self) -> Result<Page> {
         let page = self.browser.new_page("about:blank").await?;
 
         // Set user agent
@@ -252,14 +283,26 @@ impl BrowserPool {
                 .context("Failed to set cookies")?;
         }
 
+        page.execute(SetCacheDisabledParams::new(true))
+            .await
+            .context("Failed to turn off the cache")?;
+
         // Enable lifecycle events for networkIdle detection
         page.execute(SetLifecycleEventsEnabledParams::new(true))
             .await?;
+        Ok(page)
+    }
 
-        Ok(BrowserPage {
-            page,
-            permit: Some(permit),
-        })
+    /// Close a pool shared through `Arc` once its last user is done: when other
+    /// clones are still held, it is left to them (it closes when dropped).
+    ///
+    /// # Errors
+    /// Returns an error if the browser fails to close cleanly.
+    pub async fn close_shared(pool: Arc<Self>) -> Result<()> {
+        match Arc::into_inner(pool) {
+            Some(pool) => pool.close().await,
+            None => Ok(()),
+        }
     }
 
     /// Close the browser and remove its profile folder
@@ -407,7 +450,7 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
 }
 
 /// The live process holding Chrome's `SingletonLock` in `dir`, if any
-fn profile_in_use(dir: &Path) -> Option<u32> {
+pub(crate) fn profile_in_use(dir: &Path) -> Option<u32> {
     let target = std::fs::read_link(dir.join("SingletonLock")).ok()?;
     let pid = profile::lock_owner_pid(&target.to_string_lossy())?;
     process_alive(pid).then_some(pid)
@@ -641,16 +684,20 @@ impl BrowserPage {
     /// Returns an error if the lifecycle event subscription fails.
     pub async fn goto(&self, url: &str, timeout_ms: u64) -> Result<PageResult> {
         // Subscribe to lifecycle and response events BEFORE navigation
-        let mut lifecycle = self
-            .page
-            .event_listener::<EventLifecycleEvent>()
-            .await
-            .context("Failed to subscribe to lifecycle events")?;
-        let mut responses = self
-            .page
-            .event_listener::<EventResponseReceived>()
-            .await
-            .context("Failed to subscribe to network responses")?;
+        let (mut lifecycle, mut responses) = answered("subscribing to page events", async {
+            let lifecycle = self
+                .page
+                .event_listener::<EventLifecycleEvent>()
+                .await
+                .context("Failed to subscribe to lifecycle events")?;
+            let responses = self
+                .page
+                .event_listener::<EventResponseReceived>()
+                .await
+                .context("Failed to subscribe to network responses")?;
+            Ok((lifecycle, responses))
+        })
+        .await?;
 
         // Start navigation with overall timeout
         let nav_result =
@@ -740,16 +787,20 @@ impl BrowserPage {
     pub async fn content(&self) -> Result<String> {
         // Best effort: a page without web components, or with scripts blocked,
         // is read as it is
-        let _ = self.page.evaluate(FLATTEN_SHADOW_ROOTS).await;
-        self.page
-            .content()
-            .await
-            .context("Failed to get page content")
+        answered("reading the page", async {
+            let _ = self.page.evaluate(FLATTEN_SHADOW_ROOTS).await;
+            self.page
+                .content()
+                .await
+                .context("Failed to get page content")
+        })
+        .await
     }
 
     /// Get current URL (after redirects)
     pub async fn current_url(&self) -> Option<String> {
-        self.page.url().await.ok().flatten()
+        let url = tokio::time::timeout(CHROME_ANSWER_TIMEOUT, self.page.url());
+        url.await.ok()?.ok().flatten()
     }
 }
 
@@ -808,6 +859,94 @@ fn describe_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    pub(crate) const FRESH: Option<&ProfileChoice> = Some(&ProfileChoice::Fresh);
+
+    impl BrowserPool {
+        /// Kill this pool's Chrome outright, as a crash would, and wait until it is gone
+        pub(crate) async fn kill_chrome(&self) {
+            let pid = profile_in_use(self.profile.path()).expect("Chrome holds its profile");
+            let killed = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status()
+                .expect("run kill");
+            assert!(killed.success());
+            // A dead Chrome stops answering at once; is_alive waits up to 3 s
+            while self.is_alive().await {}
+        }
+    }
+
+    /// Serve one page that tells the browser to cache it for an hour, with a
+    /// number that goes up on every request
+    fn serve_cacheable_counter() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (n, stream) in listener.incoming().flatten().enumerate() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let body = format!("<html><body><p>visit {n}</p></body></html>");
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: max-age=3600\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let mut stream = stream;
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        format!("http://{addr}/page")
+    }
+
+    #[tokio::test]
+    async fn pages_ask_the_site_again_instead_of_the_cache() {
+        // Needs Chrome (ADR-004)
+        let url = serve_cacheable_counter();
+        let pool = BrowserPool::new(1, FRESH).await.unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let page = pool.new_page().await.unwrap();
+            page.goto(&url, 10_000).await.unwrap();
+            seen.push(page.content().await.unwrap());
+        }
+        pool.close().await.unwrap();
+        // Chrome may also ask for /favicon.ico, which counts as a visit too
+        assert!(seen[0].contains("visit 0"), "{}", seen[0]);
+        assert!(
+            !seen[1].contains("visit 0"),
+            "served from the cache: {}",
+            seen[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shared_pool_closes_with_its_last_user() {
+        // Needs Chrome (ADR-004)
+        let pool = Arc::new(BrowserPool::new(1, FRESH).await.unwrap());
+        let other = Arc::clone(&pool);
+        BrowserPool::close_shared(pool).await.unwrap();
+        assert!(other.is_alive().await, "closed while still in use");
+        let dir = other.profile.path().to_path_buf();
+        BrowserPool::close_shared(other).await.unwrap();
+        assert!(
+            !dir.exists(),
+            "the last user's close removes the fresh profile"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_killed_chrome_is_no_longer_alive() {
+        // Needs Chrome (ADR-004)
+        let pool = BrowserPool::new(1, FRESH).await.unwrap();
+        assert!(pool.is_alive().await);
+        pool.kill_chrome().await;
+        assert!(!pool.is_alive().await);
+    }
 
     #[tokio::test]
     async fn profile_value_chooses_the_chrome_profile() {
@@ -815,14 +954,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let saved = dir.path().join("saved");
 
-        let pool = BrowserPool::new(1, Some(saved.to_str().unwrap()))
+        let pool = BrowserPool::new(1, Some(&ProfileChoice::Folder(saved.clone())))
             .await
             .unwrap();
         assert_eq!(pool.profile, Profile::Saved(saved.clone()));
         pool.close().await.unwrap();
         assert!(saved.is_dir(), "a saved profile is kept after close");
 
-        let pool = BrowserPool::new(1, Some("fresh")).await.unwrap();
+        let pool = BrowserPool::new(1, FRESH).await.unwrap();
         assert!(!pool.profile.is_saved(), "{:?}", pool.profile);
         let temp = pool.profile.path().to_path_buf();
         assert_ne!(temp, saved);

@@ -96,9 +96,12 @@ async fn run(cli: Cli) -> ExitCode {
             Commands::RefreshData(args) => run_refresh_data(args, &mut out).await,
             Commands::VerifyRefs(args) => run_verify_refs(args, &mut out).await,
             Commands::Update(args) => run_update(args, &mut out).await.map(|()| true),
-            Commands::Mcp(args) => mollendorff_ref::mcp::run_mcp(args.root, args.profile.profile)
-                .await
-                .map(|()| true),
+            Commands::Mcp(args) => match args.profile.choice() {
+                Ok(profile) => mollendorff_ref::mcp::run_mcp(args.root, profile)
+                    .await
+                    .map(|()| true),
+                Err(e) => Err(e),
+            },
         }
     };
 

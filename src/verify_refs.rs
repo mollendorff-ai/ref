@@ -17,7 +17,7 @@ use clap::Args;
 use futures::StreamExt;
 use serde::Serialize;
 use std::path::PathBuf;
-use tokio::sync::Mutex;
+use std::sync::Arc;
 use url::Url;
 
 #[derive(Args)]
@@ -70,127 +70,158 @@ pub struct VerifyOutput {
 ///
 /// # Errors
 ///
-/// Returns error if the references file can't be read, parsed, or written back.
+/// Returns error if the references file can't be read, parsed, or written
+/// back, or Chrome fails (then the file is left as it was).
 /// Returns `Ok(false)` when any reference is dead.
 pub async fn run_verify_refs(args: VerifyRefsArgs, out: &mut impl std::io::Write) -> Result<bool> {
-    let output = verify_refs_core(args, None).await?;
+    let output = verify_refs_core(&args).await?;
     writeln!(out, "{}", serde_json::to_string(&output)?)?;
     Ok(output.summary.dead == 0)
 }
 
-/// Core verification logic: read references, verify each URL, update file.
+/// Verify in a browser of its own, started only when there is something to verify.
 ///
 /// # Errors
 ///
-/// Returns error if the references file can't be read, parsed, or written back.
-///
-/// Runs in `shared` when given (the MCP server's browser), else in a browser of
-/// its own, started only when there is something to verify.
-pub(crate) async fn verify_refs_core(
-    args: VerifyRefsArgs,
-    shared: Option<&BrowserPool>,
-) -> Result<VerifyOutput> {
-    let content = tokio::fs::read_to_string(&args.file)
-        .await
-        .with_context(|| format!("Failed to read {}", args.file.display()))?;
-
-    let refs_file: ReferencesFile =
-        serde_yaml::from_str(&content).context("Failed to parse references.yaml")?;
-
-    let total = refs_file.references.len();
-    eprintln!("Loaded {} references from {}", total, args.file.display());
-
-    let indices_to_verify: Vec<usize> = refs_file
-        .references
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| {
-            if let Some(cats) = &args.category {
-                r.categories.iter().any(|c| cats.contains(c))
-            } else {
-                true
-            }
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    let to_verify = indices_to_verify.len();
-    let skipped = total - to_verify;
-
-    if to_verify == 0 {
-        eprintln!("No references to verify (all filtered out)");
-        return Ok(VerifyOutput {
-            summary: compute_summary(total, skipped, &[]),
-            file: args.file.display().to_string(),
-            timestamp: Utc::now().to_rfc3339(),
-        });
+/// Returns error if the references file can't be read, parsed, or written
+/// back, or Chrome fails (then the file is left as it was).
+pub(crate) async fn verify_refs_core(args: &VerifyRefsArgs) -> Result<VerifyOutput> {
+    let plan = Plan::load(&args.file, args.category.as_deref()).await?;
+    if plan.is_empty() {
+        return Ok(plan.nothing_to_verify());
     }
-
-    eprintln!(
-        "Verifying {} references ({} parallel)...",
-        to_verify, args.parallel
-    );
-
-    let refs_file = Mutex::new(refs_file);
-    let statuses = if let Some(pool) = shared {
-        verify_all(pool, &refs_file, &indices_to_verify, &args).await
-    } else {
-        let pool = BrowserPool::new(args.parallel, args.profile.profile.as_deref()).await?;
-        let statuses = verify_all(&pool, &refs_file, &indices_to_verify, &args).await;
-        pool.close().await?;
-        statuses
-    };
-
-    let summary = compute_summary(total, skipped, &statuses);
-
-    {
-        let mut file = refs_file.lock().await;
-        file.meta.last_verified = Some(Utc::now().to_rfc3339());
-        file.meta.total_links = file.references.len();
-    }
-
-    if args.dry_run {
-        eprintln!("Dry run - file not modified");
-    } else {
-        let file = refs_file.lock().await;
-        let yaml = serde_yaml::to_string(&*file)?;
-        crate::guard::write_atomic(&args.file, yaml.as_bytes())
-            .with_context(|| format!("Failed to write {}", args.file.display()))?;
-        eprintln!("Updated {}", args.file.display());
-    }
-
-    Ok(VerifyOutput {
-        summary,
-        file: args.file.display().to_string(),
-        timestamp: Utc::now().to_rfc3339(),
-    })
+    let profile = args.profile.choice()?;
+    let pool = Arc::new(BrowserPool::new(args.parallel, profile.as_ref()).await?);
+    let output = plan
+        .run(&pool, args.parallel, args.timeout, args.dry_run)
+        .await;
+    BrowserPool::close_shared(pool).await?;
+    output
 }
 
-/// Verify the chosen references, at most `args.parallel` at once, and record
-/// each result in the file
-async fn verify_all(
-    pool: &BrowserPool,
-    refs_file: &Mutex<ReferencesFile>,
-    indices: &[usize],
-    args: &VerifyRefsArgs,
-) -> Vec<Status> {
-    // Owned items: a stream over borrowed ones is not `Send` (needed by the MCP server)
-    let timeout = args.timeout;
-    futures::stream::iter(indices.to_vec())
-        .map(|idx| async move {
-            let url = refs_file.lock().await.references[idx].url.clone();
-            eprintln!("  -> {}", truncate(&url, 60));
-            let result = verify_url(pool, &url, timeout).await;
+/// The references file and the entries chosen to verify
+pub(crate) struct Plan {
+    file: PathBuf,
+    refs: ReferencesFile,
+    chosen: Vec<usize>,
+}
 
-            let mut file = refs_file.lock().await;
-            file.references[idx].status = result.status;
-            file.references[idx].verified = Some(Utc::now().to_rfc3339());
-            file.references[idx].notes = result.notes;
-            result.status
+impl Plan {
+    /// Read and parse the file and choose the entries (all, or those in `categories`)
+    ///
+    /// # Errors
+    /// Returns error if the file can't be read or parsed.
+    pub(crate) async fn load(
+        file: &std::path::Path,
+        categories: Option<&[String]>,
+    ) -> Result<Self> {
+        let content = tokio::fs::read_to_string(file)
+            .await
+            .with_context(|| format!("Failed to read {}", file.display()))?;
+        let refs: ReferencesFile =
+            serde_yaml::from_str(&content).context("Failed to parse references.yaml")?;
+        eprintln!(
+            "Loaded {} references from {}",
+            refs.references.len(),
+            file.display()
+        );
+
+        let chosen = refs
+            .references
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                categories.is_none_or(|cats| r.categories.iter().any(|c| cats.contains(c)))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        Ok(Self {
+            file: file.to_path_buf(),
+            refs,
+            chosen,
         })
-        .buffered(args.parallel.max(1))
-        .collect()
-        .await
+    }
+
+    /// True when no entry is chosen, so no browser is needed
+    pub(crate) fn is_empty(&self) -> bool {
+        self.chosen.is_empty()
+    }
+
+    fn output(&self, statuses: &[Status]) -> VerifyOutput {
+        let total = self.refs.references.len();
+        VerifyOutput {
+            summary: compute_summary(total, total - self.chosen.len(), statuses),
+            file: self.file.display().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// The summary when nothing is chosen; the file is not touched
+    pub(crate) fn nothing_to_verify(&self) -> VerifyOutput {
+        eprintln!("No references to verify (all filtered out)");
+        self.output(&[])
+    }
+
+    /// Verify the chosen entries in `pool`, at most `parallel` at once, each on
+    /// a task of its own, then write the file (unless `dry_run`).
+    ///
+    /// # Errors
+    /// When Chrome fails or a check panics, returns the error with its URL and
+    /// leaves the file as it was; also when the file can't be written.
+    pub(crate) async fn run(
+        self,
+        pool: &Arc<BrowserPool>,
+        parallel: usize,
+        timeout: u64,
+        dry_run: bool,
+    ) -> Result<VerifyOutput> {
+        eprintln!(
+            "Verifying {} references ({parallel} parallel)...",
+            self.chosen.len()
+        );
+        let checks: Vec<_> = futures::stream::iter(self.chosen.clone())
+            .map(|idx| {
+                let (pool, url) = (Arc::clone(pool), self.refs.references[idx].url.clone());
+                async move {
+                    eprintln!("  -> {}", truncate(&url, 60));
+                    let checked = crate::task::isolated({
+                        let url = url.clone();
+                        async move { verify_url(&pool, &url, timeout).await }
+                    })
+                    .await;
+                    (idx, url, checked)
+                }
+            })
+            .buffered(parallel.max(1))
+            .collect()
+            .await;
+
+        let mut refs = self.refs.clone();
+        let mut statuses = Vec::with_capacity(checks.len());
+        for (idx, url, checked) in checks {
+            let checked = checked.unwrap_or_else(|e| Err(format!("Internal error in ref: {e}")));
+            let result = checked.map_err(|e| {
+                anyhow::anyhow!("{url}: {e}. {} was not changed.", self.file.display())
+            })?;
+            let entry = &mut refs.references[idx];
+            entry.status = result.status;
+            entry.verified = Some(Utc::now().to_rfc3339());
+            entry.notes = result.notes;
+            statuses.push(result.status);
+        }
+        refs.meta.last_verified = Some(Utc::now().to_rfc3339());
+        refs.meta.total_links = refs.references.len();
+
+        if dry_run {
+            eprintln!("Dry run - file not modified");
+        } else {
+            let yaml = serde_yaml::to_string(&refs)?;
+            crate::guard::write_atomic(&self.file, yaml.as_bytes())
+                .with_context(|| format!("Failed to write {}", self.file.display()))?;
+            eprintln!("Updated {}", self.file.display());
+        }
+        Ok(self.output(&statuses))
+    }
 }
 
 /// Compute a summary from the list of verification statuses.
@@ -226,38 +257,39 @@ struct VerifyResult {
     notes: Option<String>,
 }
 
-async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult {
+/// Verify one URL. `Err` means Chrome itself failed (no page, no navigation),
+/// which says nothing about the URL, so nothing may be recorded for it.
+async fn verify_url(
+    pool: &BrowserPool,
+    url: &str,
+    timeout: u64,
+) -> std::result::Result<VerifyResult, String> {
     if let Err(e) = crate::guard::check_web_url(url) {
-        return VerifyResult {
+        return Ok(VerifyResult {
             status: Status::Dead,
             notes: Some(e),
-        };
+        });
     }
-    let page = match pool.new_page().await {
-        Ok(p) => p,
-        Err(e) => {
-            return VerifyResult {
-                status: Status::Dead,
-                notes: Some(format!("Browser error: {e}")),
-            }
-        }
-    };
+    let page = pool
+        .new_page()
+        .await
+        .map_err(|e| format!("Chrome failed: {e:#}"))?;
+    let nav = page
+        .goto(url, timeout)
+        .await
+        .map_err(|e| format!("Chrome failed: {e:#}"))?;
+    Ok(judge(&page, url, nav).await)
+}
 
-    // Parse original URL to get host
-    let original_host = match Url::parse(url) {
-        Ok(u) => u.host_str().map(std::string::ToString::to_string),
-        Err(_) => None,
-    };
-
-    let nav = match page.goto(url, timeout).await {
-        Ok(n) => n,
-        Err(e) => {
-            return VerifyResult {
-                status: Status::Dead,
-                notes: Some(format!("Navigation error: {e}")),
-            }
-        }
-    };
+/// The status of a page Chrome loaded
+async fn judge(
+    page: &crate::browser::BrowserPage,
+    url: &str,
+    nav: crate::browser::PageResult,
+) -> VerifyResult {
+    let original_host = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(std::string::ToString::to_string));
 
     // Check for navigation errors (DNS, connection, etc.)
     if nav.error.is_some() {
@@ -324,25 +356,14 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[tokio::test]
     async fn verify_starts_its_own_browser_when_none_is_shared() {
         // Needs Chrome (ADR-004)
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("references.yaml");
-        std::fs::write(&file, "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 1\nreferences:\n- id: closed-port\n  url: http://127.0.0.1:9/\n  title: Nothing listens here\n  categories: [test]\n  cited_in: []\n  status: pending\n").unwrap();
-        let args = VerifyRefsArgs {
-            file: file.clone(),
-            parallel: 2,
-            category: None,
-            timeout: 5000,
-            dry_run: false,
-            profile: crate::profile::ProfileArgs {
-                profile: Some("fresh".into()),
-            },
-        };
+        let (_dir, file) = one_reference();
+        let args = args_for(&file, None);
         let mut out = Vec::new();
         let all_ok = run_verify_refs(args, &mut out).await.unwrap();
         assert!(!all_ok, "a dead reference makes the run fail");
@@ -351,6 +372,98 @@ mod tests {
         assert_eq!(output["summary"]["dead"], 1);
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(written.contains("status: dead"), "{written}");
+    }
+
+    /// Write a references file with one entry, at a closed port
+    pub(crate) fn write_one_reference(file: &std::path::Path) {
+        write_reference(file, "http://127.0.0.1:9/");
+    }
+
+    /// Write a references file with one entry, at `url`
+    fn write_reference(file: &std::path::Path, url: &str) {
+        let yaml = format!(
+            "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 1\n\
+             references:\n- id: one\n  url: {url}\n  title: One\n  categories: [test]\n  \
+             cited_in: []\n  status: pending\n"
+        );
+        std::fs::write(file, yaml).unwrap();
+    }
+
+    fn args_for(file: &std::path::Path, category: Option<Vec<String>>) -> VerifyRefsArgs {
+        VerifyRefsArgs {
+            file: file.to_path_buf(),
+            parallel: 2,
+            category,
+            timeout: 5000,
+            dry_run: false,
+            profile: crate::profile::ProfileArgs {
+                profile: Some(crate::profile::ProfileChoice::Fresh),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn the_command_needs_no_browser_when_nothing_is_chosen() {
+        let (_dir, file) = one_reference();
+        let output = verify_refs_core(&args_for(&file, Some(vec!["other".into()])))
+            .await
+            .unwrap();
+        assert_eq!(output.summary.skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn a_reference_that_is_not_a_web_page_is_dead() {
+        // Needs Chrome (ADR-004)
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("references.yaml");
+        write_reference(&file, "file:///etc/hostname");
+        let output = verify_refs_core(&args_for(&file, None)).await.unwrap();
+        assert_eq!(output.summary.dead, 1);
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("Only http and https"), "{written}");
+    }
+
+    fn one_reference() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("references.yaml");
+        write_one_reference(&file);
+        (dir, file)
+    }
+
+    #[tokio::test]
+    async fn a_chrome_failure_changes_nothing_in_the_file() {
+        // Needs Chrome (ADR-004). Before, every entry was written as dead.
+        let (_dir, file) = one_reference();
+        let before = std::fs::read_to_string(&file).unwrap();
+        let pool = Arc::new(
+            BrowserPool::new(1, Some(&crate::profile::ProfileChoice::Fresh))
+                .await
+                .unwrap(),
+        );
+        pool.kill_chrome().await;
+
+        let plan = Plan::load(&file, None).await.unwrap();
+        let err = plan
+            .run(&pool, 1, 5000, false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("http://127.0.0.1:9/: Chrome failed"), "{err}");
+        assert!(err.contains("was not changed"), "{err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn nothing_chosen_needs_no_browser() {
+        let (_dir, file) = one_reference();
+        let plan = Plan::load(&file, Some(&["other".to_string()]))
+            .await
+            .unwrap();
+        assert!(plan.is_empty());
+        let output = plan.nothing_to_verify();
+        assert_eq!(output.summary.total, 1);
+        assert_eq!(output.summary.skipped, 1);
+        assert_eq!(output.summary.verified, 0);
     }
 
     #[test]

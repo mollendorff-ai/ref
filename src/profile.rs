@@ -20,9 +20,65 @@ pub const PROFILE_ENV: &str = "REF_CHROME_PROFILE";
 pub struct ProfileArgs {
     /// Chrome profile: a folder (a saved profile, kept between runs) or `fresh`
     /// (an empty temporary one, deleted afterwards)
-    /// [default: ~/.ref/chrome-profile once `ref login` has created it, else fresh]
-    #[arg(long, env = PROFILE_ENV, value_name = "FOLDER|fresh")]
-    pub profile: Option<String>,
+    /// [default: `REF_CHROME_PROFILE` when set, else ~/.ref/chrome-profile once
+    /// `ref login` has created it, else fresh]
+    #[arg(long, value_name = "FOLDER|fresh", value_parser = parse_profile)]
+    pub profile: Option<ProfileChoice>,
+}
+
+impl ProfileArgs {
+    /// The `--profile` value, else `REF_CHROME_PROFILE` (see [`resolve`])
+    ///
+    /// # Errors
+    /// Returns an error when the variable holds a value that cannot be used.
+    pub fn choice(&self) -> anyhow::Result<Option<ProfileChoice>> {
+        resolve(self.profile.as_ref())
+    }
+}
+
+/// The profile chosen on the command line: `flag` when given, else
+/// `REF_CHROME_PROFILE` when it is set and not empty (an empty value counts as
+/// not set, so `REF_CHROME_PROFILE= ref fetch ...` uses the default).
+///
+/// # Errors
+/// Returns an error when the variable holds a value that cannot be used.
+pub fn resolve(flag: Option<&ProfileChoice>) -> anyhow::Result<Option<ProfileChoice>> {
+    if let Some(choice) = flag {
+        return Ok(Some(choice.clone()));
+    }
+    match std::env::var(PROFILE_ENV) {
+        Ok(value) if !value.trim().is_empty() => parse_profile(&value)
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("{PROFILE_ENV}: {e}")),
+        _ => Ok(None),
+    }
+}
+
+/// A `--profile` value
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileChoice {
+    /// An empty temporary profile, deleted when the run ends
+    Fresh,
+    /// A saved profile folder, as an absolute path
+    Folder(PathBuf),
+}
+
+/// Parse a `--profile` value: `fresh` (any case), or a folder, made absolute
+/// against the current folder so the everyday-profile check sees where it is.
+///
+/// # Errors
+/// Returns an error for an empty value, or when the current folder is unknown.
+pub fn parse_profile(value: &str) -> Result<ProfileChoice, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("the profile is empty: give a folder or `fresh`".to_string());
+    }
+    if value.eq_ignore_ascii_case("fresh") {
+        return Ok(ProfileChoice::Fresh);
+    }
+    std::path::absolute(value)
+        .map(ProfileChoice::Folder)
+        .map_err(|e| format!("{value}: {e}"))
 }
 
 /// The profile a run uses
@@ -71,13 +127,13 @@ pub fn home_dir() -> Option<PathBuf> {
 /// `fresh` makes a new temporary folder name when a fresh profile is chosen.
 #[must_use]
 pub fn choose(
-    value: Option<&str>,
+    value: Option<&ProfileChoice>,
     default_saved: Option<&Path>,
     fresh: impl FnOnce() -> PathBuf,
 ) -> Profile {
-    match value.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(v) if v.eq_ignore_ascii_case("fresh") => Profile::Fresh(fresh()),
-        Some(dir) => Profile::Saved(PathBuf::from(dir)),
+    match value {
+        Some(ProfileChoice::Fresh) => Profile::Fresh(fresh()),
+        Some(ProfileChoice::Folder(dir)) => Profile::Saved(dir.clone()),
         None => match default_saved {
             Some(dir) if dir.is_dir() => Profile::Saved(dir.to_path_buf()),
             _ => Profile::Fresh(fresh()),
@@ -99,15 +155,18 @@ const CHROME_DEFAULT_DIRS: [&str; 6] = [
     "AppData/Local/Chromium/User Data",
 ];
 
-/// True when `dir` is (or is inside) one of Chrome's default user data folders
+/// True when `dir` is (or is inside) one of Chrome's default user data folders,
+/// also when reached through a symbolic link
 #[must_use]
 pub fn is_chrome_default_dir(dir: &Path, home: Option<&Path>) -> bool {
     let Some(home) = home else {
         return false;
     };
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let (dir, home) = (real(dir), real(home));
     CHROME_DEFAULT_DIRS
         .iter()
-        .any(|rel| dir.starts_with(home.join(rel)))
+        .any(|rel| dir.starts_with(real(&home.join(rel))))
 }
 
 /// The process id in Chrome's `SingletonLock` link target (`<hostname>-<pid>`)
@@ -119,7 +178,7 @@ pub fn lock_owner_pid(lock_target: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
 
     #[derive(Parser)]
     struct WithProfile {
@@ -130,21 +189,75 @@ mod tests {
     #[test]
     fn profile_option_takes_a_folder_or_fresh() {
         let folder = WithProfile::try_parse_from(["ref", "--profile", "/work/p"]).unwrap();
-        assert_eq!(folder.profile.profile.as_deref(), Some("/work/p"));
-        let fresh = WithProfile::try_parse_from(["ref", "--profile", "fresh"]).unwrap();
-        assert_eq!(fresh.profile.profile.as_deref(), Some("fresh"));
+        assert_eq!(
+            folder.profile.profile,
+            Some(ProfileChoice::Folder(PathBuf::from("/work/p")))
+        );
+        let fresh = WithProfile::try_parse_from(["ref", "--profile", " Fresh "]).unwrap();
+        assert_eq!(fresh.profile.profile, Some(ProfileChoice::Fresh));
+        let empty = WithProfile::try_parse_from(["ref", "--profile", " "]);
+        assert!(empty
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("profile is empty"));
     }
 
     #[test]
-    fn profile_option_falls_back_to_the_environment_variable() {
-        // Checked on the definition: setting the variable here would race other tests
-        let command = WithProfile::command();
-        let arg = command
-            .get_arguments()
-            .find(|a| a.get_id() == "profile")
-            .unwrap();
-        assert_eq!(arg.get_env(), Some(std::ffi::OsStr::new(PROFILE_ENV)));
-        assert_eq!(arg.get_long(), Some("profile"));
+    fn relative_profile_folders_are_made_absolute() {
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(
+            parse_profile("work/p"),
+            Ok(ProfileChoice::Folder(here.join("work/p")))
+        );
+    }
+
+    /// Set in the child process `profile_option_beats_the_environment_variable` starts
+    const CHILD: &str = "REF_TEST_PROFILE_CHILD";
+
+    #[test]
+    fn profile_option_beats_the_environment_variable() {
+        // Runs again as a child process with the variable set: setting it in
+        // this process would race the other tests
+        let given = ProfileChoice::Fresh;
+        match std::env::var(CHILD).as_deref() {
+            Ok("folder") => {
+                let folder = ProfileChoice::Folder(PathBuf::from("/from/env"));
+                assert_eq!(resolve(None).unwrap(), Some(folder));
+                assert_eq!(resolve(Some(&given)).unwrap(), Some(ProfileChoice::Fresh));
+            }
+            Ok("relative") => {
+                let here = std::env::current_dir().unwrap();
+                let folder = ProfileChoice::Folder(here.join("work/p"));
+                assert_eq!(resolve(None).unwrap(), Some(folder));
+            }
+            Ok(_) => {
+                // An empty variable counts as not set
+                assert_eq!(resolve(None).unwrap(), None);
+                assert_eq!(ProfileArgs::default().choice().unwrap(), None);
+            }
+            Err(_) => {
+                for (mode, value) in [
+                    ("folder", "/from/env"),
+                    ("relative", "work/p"),
+                    ("empty", " "),
+                ] {
+                    let status = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "profile::tests::profile_option_beats_the_environment_variable",
+                        ])
+                        .env(CHILD, mode)
+                        .env(PROFILE_ENV, value)
+                        .status()
+                        .unwrap();
+                    assert!(
+                        status.success(),
+                        "child run with {PROFILE_ENV}={value:?} failed"
+                    );
+                }
+            }
+        }
     }
 
     fn fresh() -> PathBuf {
@@ -152,17 +265,18 @@ mod tests {
     }
 
     #[test]
-    fn env_fresh_wins() {
+    fn fresh_wins_over_an_existing_saved_profile() {
         let saved = tempfile::tempdir().unwrap();
-        let p = choose(Some(" FRESH "), Some(saved.path()), fresh);
+        let p = choose(Some(&ProfileChoice::Fresh), Some(saved.path()), fresh);
         assert_eq!(p, Profile::Fresh(fresh()));
         assert!(!p.is_saved());
         assert_eq!(p.path(), Path::new("/tmp/ref-chrome-1-2"));
     }
 
     #[test]
-    fn env_folder_is_a_saved_profile() {
-        let p = choose(Some("/work/ref-profile"), None, fresh);
+    fn a_folder_is_a_saved_profile() {
+        let folder = ProfileChoice::Folder(PathBuf::from("/work/ref-profile"));
+        let p = choose(Some(&folder), None, fresh);
         assert_eq!(p, Profile::Saved(PathBuf::from("/work/ref-profile")));
         assert!(p.is_saved());
         assert_eq!(p.path(), Path::new("/work/ref-profile"));
@@ -174,10 +288,7 @@ mod tests {
         let dir = default_saved_dir(Some(home.path())).unwrap();
         assert_eq!(choose(None, Some(&dir), fresh), Profile::Fresh(fresh()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(
-            choose(Some(""), Some(&dir), fresh),
-            Profile::Saved(dir.clone())
-        );
+        assert_eq!(choose(None, Some(&dir), fresh), Profile::Saved(dir.clone()));
         assert_eq!(choose(None, None, fresh), Profile::Fresh(fresh()));
     }
 
@@ -214,6 +325,21 @@ mod tests {
         assert!(!is_chrome_default_dir(
             &home.join(".config/google-chrome"),
             None
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chrome_default_dir_behind_a_symlink_is_recognised() {
+        let home = tempfile::tempdir().unwrap();
+        let everyday = home.path().join(".config/google-chrome");
+        std::fs::create_dir_all(&everyday).unwrap();
+        let link = home.path().join("innocent-looking");
+        std::os::unix::fs::symlink(&everyday, &link).unwrap();
+        assert!(is_chrome_default_dir(&link, Some(home.path())));
+        assert!(!is_chrome_default_dir(
+            &home.path().join("elsewhere"),
+            Some(home.path())
         ));
     }
 

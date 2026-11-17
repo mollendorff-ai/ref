@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use scraper::Html;
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::fs;
 
 #[derive(Args)]
@@ -36,8 +37,8 @@ pub struct RefreshDataArgs {
 /// Configuration for refresh-data
 pub struct RefreshConfig {
     pub timeout_ms: u64,
-    /// `--profile` value: a saved profile folder, `fresh`, or `None` for the default
-    pub profile: Option<String>,
+    /// `--profile` value, or `None` for the default
+    pub profile: Option<crate::profile::ProfileChoice>,
 }
 
 /// Extracted data from a URL (compact)
@@ -87,7 +88,7 @@ pub async fn run_refresh_data(
 
     let config = RefreshConfig {
         timeout_ms: args.timeout,
-        profile: args.profile.profile.clone(),
+        profile: args.profile.choice()?,
     };
 
     let report = refresh_data(&urls, &config).await?;
@@ -125,16 +126,17 @@ async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
 /// # Errors
 /// Returns an error if the browser pool cannot be created or closed.
 pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<RefreshReport> {
-    let pool = BrowserPool::new(1, config.profile.as_deref()).await?;
+    let pool = Arc::new(BrowserPool::new(1, config.profile.as_ref()).await?);
     let report = refresh_data_with(&pool, urls, config.timeout_ms).await;
-    pool.close().await?;
+    BrowserPool::close_shared(pool).await?;
     Ok(report)
 }
 
 /// Extract data from multiple URLs in a browser the caller already has, such
-/// as the MCP server's shared one, one at a time with a one-second pause
+/// as the MCP server's shared one, one at a time with a one-second pause, each
+/// on a task of its own so a panic on one URL becomes that URL's failure
 pub async fn refresh_data_with(
-    pool: &BrowserPool,
+    pool: &Arc<BrowserPool>,
     urls: &[String],
     timeout_ms: u64,
 ) -> RefreshReport {
@@ -145,11 +147,17 @@ pub async fn refresh_data_with(
         if i > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        let result = match pool.new_page().await {
-            Ok(page) => extract_from_page(&page, url, timeout_ms).await,
-            Err(e) => failure(url, None, format!("Browser error: {e}")),
-        };
-        results.push(result);
+        let (pool, owned) = (Arc::clone(pool), url.clone());
+        let result = crate::task::isolated(async move {
+            match pool.new_page().await {
+                Ok(page) => extract_from_page(&page, &owned, timeout_ms).await,
+                Err(e) => failure(&owned, None, format!("Browser error: {e}")),
+            }
+        })
+        .await;
+        results.push(
+            result.unwrap_or_else(|e| failure(url, None, format!("Internal error in ref: {e}"))),
+        );
     }
 
     let ok = results.iter().filter(|r| r.success).count();
@@ -223,11 +231,42 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn the_command_writes_its_report() {
+        // Needs Chrome (ADR-004)
+        let args = RefreshDataArgs {
+            url: Some("http://127.0.0.1:9/".into()),
+            file: None,
+            timeout: 5000,
+            profile: crate::profile::ProfileArgs {
+                profile: Some(crate::profile::ProfileChoice::Fresh),
+            },
+        };
+        let mut out = Vec::new();
+        assert!(!run_refresh_data(args, &mut out).await.unwrap());
+        let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(report["failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_dead_chrome_is_reported_per_url() {
+        // Needs Chrome (ADR-004)
+        let pool = Arc::new(
+            BrowserPool::new(1, Some(&crate::profile::ProfileChoice::Fresh))
+                .await
+                .unwrap(),
+        );
+        pool.kill_chrome().await;
+        let report = refresh_data_with(&pool, &["http://127.0.0.1:9/".to_string()], 5000).await;
+        let error = report.results[0].error.as_deref().unwrap_or_default();
+        assert!(error.starts_with("Browser error"), "{error}");
+    }
+
+    #[tokio::test]
     async fn refresh_starts_its_own_browser() {
         // Needs Chrome (ADR-004)
         let config = RefreshConfig {
             timeout_ms: 5000,
-            profile: Some("fresh".into()),
+            profile: Some(crate::profile::ProfileChoice::Fresh),
         };
         let urls = ["http://127.0.0.1:9/".to_string()];
         let report = refresh_data(&urls, &config).await.unwrap();

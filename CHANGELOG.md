@@ -10,13 +10,22 @@ All notable changes to Möllendorff Ref.
 
 ### Changed
 
-- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does). The `run_*` command functions write their JSON to a writer they are given. New `check_links_with` and `refresh_data_with` run in a browser the caller already has.
-- `ref check-links` and `ref verify-refs` run their pages from one task, at most `--concurrency` / `--parallel` at once, instead of one task per URL; results keep the input order as before.
+- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does). The `run_*` command functions write their JSON to a writer they are given. New `check_links_with` and `refresh_data_with` run in a browser the caller already has (`Arc<BrowserPool>`, with plain values), and `BrowserPool::close_shared` closes a shared pool once its last user is done.
+- `ref check-links`, `ref verify-refs` and `ref refresh-data` check each URL on a task of its own, at most `--concurrency` / `--parallel` at once; a panic on one URL becomes that URL's error ("Internal error in ref") instead of ending the run.
+- Pages run with Chrome's cache off, so a saved profile or the MCP server's long-lived browser never answers from an old copy.
+- A request to Chrome that gets no answer within 10 seconds fails instead of waiting forever (a crashed or killed Chrome never answers).
+- `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
+- `ref login --profile fresh` (or `REF_CHROME_PROFILE=fresh`) is refused, since a fresh profile's sign-ins would be deleted; before, it signed in to a folder named `fresh`.
+- An empty `REF_CHROME_PROFILE` still counts as not set.
 
 ### Fixed
 
 - **MCP with a saved profile**: `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` failed once `ref_fetch` had run, because each started a second Chrome on the profile the server's browser already held. They now share the server's browser.
 - The "profile is open in another Chrome" error names the possible holders (`ref login`, a running `ref mcp`, another ref command) instead of only `ref login`.
+- **MCP after a Chrome crash**: the shared browser is started again when it stops answering, instead of failing every later call.
+- **`verify-refs` with a failing Chrome** wrote every reference as `dead`. Now it stops with an error naming the URL and leaves `references.yaml` as it was.
+- MCP calls with nothing to do (no URLs, nothing chosen, a missing file) answer without starting Chrome, so the real error is reported.
+- MCP `concurrency` / `parallel` values of 17 to 20 were quietly capped at 16 tabs; the shared browser now has 20.
 
 ## [1.9.0] - 2026-11-15
 

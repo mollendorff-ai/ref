@@ -6,13 +6,14 @@
 //! See: ADR-001 for rationale, docs/mcp-integration.md for setup.
 
 use crate::browser::BrowserPool;
-use crate::check_links::{check_links_with, CheckLinksConfig};
+use crate::check_links::{self, check_links_with};
 use crate::fetch;
 use crate::guard;
 use crate::pdf;
+use crate::profile::ProfileChoice;
 use crate::refresh_data::refresh_data_with;
 use crate::scan::{self, ScanArgs};
-use crate::verify_refs::{self, VerifyRefsArgs};
+use crate::verify_refs::Plan;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -26,7 +27,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 use tracing::info;
 
 // ============================================================================
@@ -108,39 +109,55 @@ pub struct RefreshDataParams {
 // MCP Server
 // ============================================================================
 
-/// Tabs the shared MCP browser may hold open at once, across all calls.
-/// Each call is further limited by its own `parallel` / `concurrency` value.
-const MCP_POOL_TABS: usize = 16;
-
 /// Largest `parallel` / `concurrency` value a call may ask for
 const MAX_PARALLEL: usize = 20;
 
+/// Tabs the shared MCP browser may hold open at once, across all calls, so
+/// one call can use the largest `parallel` / `concurrency` value it may ask
+/// for; calls running at the same time share these tabs.
+const MCP_POOL_TABS: usize = MAX_PARALLEL;
+
 #[derive(Clone)]
 pub struct RefMcpServer {
-    pool: Arc<OnceCell<BrowserPool>>,
+    /// The browser every tool shares, started on first use and again when it stops answering
+    pool: Arc<Mutex<Option<Arc<BrowserPool>>>>,
     root: PathBuf,
     /// `--profile` value every browser of this server runs with
-    profile: Option<String>,
+    profile: Option<ProfileChoice>,
     tool_router: ToolRouter<RefMcpServer>,
 }
 
 impl RefMcpServer {
-    fn new(root: PathBuf, profile: Option<String>) -> Self {
+    fn new(root: PathBuf, profile: Option<ProfileChoice>) -> Self {
         Self {
-            pool: Arc::new(OnceCell::new()),
+            pool: Arc::new(Mutex::new(None)),
             root,
             profile,
             tool_router: Self::tool_router(),
         }
     }
 
-    async fn get_or_init_pool(&self) -> std::result::Result<&BrowserPool, ErrorData> {
-        self.pool
-            .get_or_try_init(|| async {
-                BrowserPool::new(MCP_POOL_TABS, self.profile.as_deref()).await
-            })
+    /// The shared browser: started on first use, and started again when Chrome
+    /// no longer answers (it crashed or was killed), so one dead Chrome does
+    /// not fail every later call.
+    async fn browser(&self) -> std::result::Result<Arc<BrowserPool>, ErrorData> {
+        let mut slot = self.pool.lock().await;
+        if let Some(pool) = slot.as_ref() {
+            if pool.is_alive().await {
+                return Ok(Arc::clone(pool));
+            }
+            info!("Chrome stopped answering; starting a new one");
+        }
+        // Dropping the old pool lets its profile go once its last call ends
+        *slot = None;
+        let pool = BrowserPool::new(MCP_POOL_TABS, self.profile.as_ref())
             .await
-            .map_err(|e| ErrorData::internal_error(format!("Browser pool init failed: {e}"), None))
+            .map_err(|e| {
+                ErrorData::internal_error(format!("Browser pool init failed: {e:#}"), None)
+            })?;
+        let pool = Arc::new(pool);
+        *slot = Some(Arc::clone(&pool));
+        Ok(pool)
     }
 
     /// The folder MCP tools may read and write in.
@@ -206,10 +223,14 @@ impl RefMcpServer {
                 .unwrap_or(crate::content::DEFAULT_MAX_SECTIONS),
         };
 
-        let pool = self.get_or_init_pool().await?;
+        // Nothing to fetch: answer without starting Chrome
+        if params.urls.is_empty() {
+            return Ok(CallToolResult::success(vec![ContentBlock::text("[]")]));
+        }
+        let shared = self.browser().await?;
 
         // Up to `parallel` pages at once, results in the order the URLs were given
-        let options = &options;
+        let (pool, options) = (&*shared, &options);
         let pages: Vec<fetch::Page> = futures::stream::iter(params.urls)
             .map(|url| async move { fetch::fetch_one(pool, &url, options).await })
             .buffered(parallel)
@@ -260,17 +281,24 @@ impl RefMcpServer {
         &self,
         Parameters(params): Parameters<CheckLinksParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
-        let config = CheckLinksConfig {
-            concurrency: parallelism(params.concurrency, 5, "concurrency")?,
-            timeout_ms: params.timeout.unwrap_or(15000),
-            retries: params.retries.unwrap_or(1),
-            // The shared browser has its own user agent and profile
-            user_agent: None,
-            profile: None,
+        let concurrency = parallelism(params.concurrency, 5, "concurrency")?;
+        let report = if params.urls.is_empty() {
+            check_links::LinkReport {
+                ok: 0,
+                failed: 0,
+                results: Vec::new(),
+            }
+        } else {
+            let pool = self.browser().await?;
+            check_links_with(
+                &pool,
+                &params.urls,
+                concurrency,
+                params.timeout.unwrap_or(15000),
+                params.retries.unwrap_or(1),
+            )
+            .await
         };
-
-        let pool = self.get_or_init_pool().await?;
-        let report = check_links_with(pool, &params.urls, &config).await;
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -323,20 +351,21 @@ impl RefMcpServer {
         Parameters(params): Parameters<VerifyRefsParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let root = self.workspace_root()?;
-        let args = VerifyRefsArgs {
-            file: guard::check_workspace_path(&params.file, &root).map_err(invalid)?,
-            parallel: parallelism(params.parallel, 4, "parallel")?,
-            category: params.category,
-            timeout: params.timeout.unwrap_or(30000),
-            dry_run: params.dry_run.unwrap_or(false),
-            // Runs in the shared browser, which has its own profile
-            profile: crate::profile::ProfileArgs::default(),
-        };
-
-        let pool = self.get_or_init_pool().await?;
-        let output = verify_refs::verify_refs_core(args, Some(pool))
+        let file = guard::check_workspace_path(&params.file, &root).map_err(invalid)?;
+        let parallel = parallelism(params.parallel, 4, "parallel")?;
+        // The file is read and checked before Chrome is started
+        let plan = Plan::load(&file, params.category.as_deref())
             .await
             .map_err(to_mcp_err)?;
+        let output = if plan.is_empty() {
+            plan.nothing_to_verify()
+        } else {
+            let pool = self.browser().await?;
+            let timeout = params.timeout.unwrap_or(30000);
+            plan.run(&pool, parallel, timeout, params.dry_run.unwrap_or(false))
+                .await
+                .map_err(to_mcp_err)?
+        };
         let json = serde_json::to_string(&output).map_err(json_err)?;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -370,8 +399,16 @@ impl RefMcpServer {
             crate::extract::extract_urls(&content)
         };
 
-        let pool = self.get_or_init_pool().await?;
-        let report = refresh_data_with(pool, &urls, timeout_ms).await;
+        let report = if urls.is_empty() {
+            crate::refresh_data::RefreshReport {
+                ok: 0,
+                failed: 0,
+                results: Vec::new(),
+            }
+        } else {
+            let pool = self.browser().await?;
+            refresh_data_with(&pool, &urls, timeout_ms).await
+        };
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -402,7 +439,7 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
 /// # Errors
 ///
 /// Returns an error if the transport fails to initialize or the server exits abnormally.
-pub async fn run_mcp(root: Option<PathBuf>, profile: Option<String>) -> Result<()> {
+pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> Result<()> {
     // All log output to stderr (stdout reserved for JSON-RPC)
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -595,16 +632,21 @@ mod tests {
         );
     }
 
+    fn text(result: &CallToolResult) -> serde_json::Value {
+        let t = result.content[0].as_text().map(|t| t.text.clone());
+        serde_json::from_str(&t.unwrap_or_default()).unwrap()
+    }
+
     #[tokio::test]
-    async fn every_browser_of_the_server_uses_its_profile() {
-        // Needs Chrome (ADR-004). A fresh profile, so calls cannot lock each other out.
+    async fn calls_with_nothing_to_do_never_start_chrome() {
+        // The profile is a file, so starting Chrome would fail the call
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("references.yaml"),
-            "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 0\nreferences: []\n",
-        )
-        .unwrap();
-        let server = RefMcpServer::new(dir.path().canonicalize().unwrap(), Some("fresh".into()));
+        let root = dir.path().canonicalize().unwrap();
+        let not_a_folder = root.join("not-a-folder");
+        std::fs::write(&not_a_folder, "").unwrap();
+        crate::verify_refs::tests::write_one_reference(&root.join("references.yaml"));
+        std::fs::write(root.join("empty.md"), "No links here.").unwrap();
+        let server = RefMcpServer::new(root, Some(ProfileChoice::Folder(not_a_folder)));
 
         let fetched = server
             .ref_fetch(Parameters(FetchParams {
@@ -616,10 +658,9 @@ mod tests {
                 max_chars: None,
                 max_sections: None,
             }))
-            .await;
-        assert!(fetched.is_ok());
-        let pool = server.pool.get().expect("shared pool started");
-        assert!(!pool.profile.is_saved(), "{:?}", pool.profile);
+            .await
+            .unwrap();
+        assert_eq!(text(&fetched), serde_json::json!([]));
 
         let checked = server
             .ref_check_links(Parameters(CheckLinksParams {
@@ -628,29 +669,92 @@ mod tests {
                 timeout: None,
                 retries: None,
             }))
-            .await;
-        assert!(checked.is_ok(), "{checked:?}");
+            .await
+            .unwrap();
+        assert_eq!(text(&checked)["ok"], 0);
 
         let refreshed = server
             .ref_refresh_data(Parameters(RefreshDataParams {
-                url: Some("file:///etc/hostname".into()),
-                file: None,
+                url: None,
+                file: Some("empty.md".into()),
                 timeout: None,
             }))
-            .await;
-        assert!(refreshed.is_ok(), "{refreshed:?}");
+            .await
+            .unwrap();
+        assert_eq!(text(&refreshed)["failed"], 0);
 
-        // Filtered to nothing: nothing is verified, and the call still succeeds
-        let verified = server
-            .ref_verify_refs(Parameters(VerifyRefsParams {
-                file: "references.yaml".into(),
-                parallel: None,
-                category: Some(vec!["none".into()]),
+        let verify = |file: &str, category: Option<Vec<String>>| VerifyRefsParams {
+            file: file.into(),
+            parallel: None,
+            category,
+            timeout: None,
+            dry_run: Some(true),
+        };
+        let filtered = server
+            .ref_verify_refs(Parameters(verify(
+                "references.yaml",
+                Some(vec!["none".into()]),
+            )))
+            .await
+            .unwrap();
+        assert_eq!(text(&filtered)["summary"]["skipped"], 1);
+        let missing = server
+            .ref_verify_refs(Parameters(verify("missing.yaml", None)))
+            .await
+            .unwrap_err();
+        assert!(
+            missing.message.contains("Failed to read"),
+            "{}",
+            missing.message
+        );
+
+        assert!(server.pool.lock().await.is_none(), "Chrome was started");
+
+        // With something to do, the unusable profile is reported as such
+        let refused = server
+            .ref_check_links(Parameters(CheckLinksParams {
+                urls: vec!["http://127.0.0.1:9/".into()],
+                concurrency: None,
                 timeout: None,
-                dry_run: Some(true),
+                retries: None,
             }))
-            .await;
-        assert!(verified.is_ok(), "{verified:?}");
+            .await
+            .unwrap_err();
+        assert!(
+            refused.message.starts_with("Browser pool init failed"),
+            "{}",
+            refused.message
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_chrome_is_replaced_on_the_next_call() {
+        // Needs Chrome (ADR-004)
+        let dir = tempfile::tempdir().unwrap();
+        let server = RefMcpServer::new(
+            dir.path().canonicalize().unwrap(),
+            Some(ProfileChoice::Fresh),
+        );
+        let check = || CheckLinksParams {
+            urls: vec!["http://127.0.0.1:9/".into()],
+            concurrency: None,
+            timeout: Some(5000),
+            retries: Some(0),
+        };
+
+        server.ref_check_links(Parameters(check())).await.unwrap();
+        let first = server.pool.lock().await.clone().unwrap();
+        first.kill_chrome().await;
+
+        let again = server.ref_check_links(Parameters(check())).await.unwrap();
+        let error = text(&again)["results"][0]["error"].to_string();
+        assert!(
+            !error.contains("Browser error"),
+            "the dead Chrome was used: {error}"
+        );
+        let second = server.pool.lock().await.clone().unwrap();
+        assert!(!Arc::ptr_eq(&first, &second), "no new Chrome was started");
+        assert!(second.is_alive().await);
     }
 
     #[tokio::test]
@@ -660,18 +764,15 @@ mod tests {
         // failed with "The profile ... is open in another Chrome".
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        std::fs::write(root.join("references.yaml"), "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 1\nreferences:\n- id: closed-port\n  url: http://127.0.0.1:9/\n  title: Nothing listens here\n  categories: [test]\n  cited_in: []\n  status: pending\n").unwrap();
+        crate::verify_refs::tests::write_one_reference(&root.join("references.yaml"));
         std::fs::write(
             root.join("notes.md"),
             "See http://127.0.0.1:9/ for nothing.",
         )
         .unwrap();
         let saved = root.join("saved-profile");
-        let server = RefMcpServer::new(root.clone(), Some(saved.to_string_lossy().into()));
-        let text = |r: CallToolResult| {
-            let t = r.content[0].as_text().map(|t| t.text.clone());
-            serde_json::from_str::<serde_json::Value>(&t.unwrap_or_default()).unwrap()
-        };
+        let server = RefMcpServer::new(root.clone(), Some(ProfileChoice::Folder(saved.clone())));
+        let text = |r: CallToolResult| text(&r);
 
         let fetched = server
             .ref_fetch(Parameters(FetchParams {
@@ -687,7 +788,7 @@ mod tests {
             .unwrap();
         assert_eq!(text(fetched)["status"], "dead");
         assert_eq!(
-            server.pool.get().unwrap().profile,
+            server.pool.lock().await.as_ref().unwrap().profile,
             crate::profile::Profile::Saved(saved.clone())
         );
 

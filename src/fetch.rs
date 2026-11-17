@@ -173,7 +173,7 @@ pub async fn run_fetch(args: FetchArgs, out: &mut impl std::io::Write) -> Result
         parallel
     );
 
-    let mut pool = BrowserPool::new(parallel, args.profile.profile.as_deref()).await?;
+    let mut pool = BrowserPool::new(parallel, args.profile.choice()?.as_ref()).await?;
     if let Some(ua) = &args.user_agent {
         pool.set_user_agent(ua)?;
     }

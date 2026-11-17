@@ -19,6 +19,7 @@ pub mod profile;
 pub mod refresh_data;
 pub mod scan;
 pub mod schema;
+pub mod task;
 pub mod text;
 pub mod update;
 pub mod verify_refs;

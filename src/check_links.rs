@@ -10,6 +10,7 @@ use clap::Args;
 use futures::StreamExt;
 use serde::Serialize;
 use std::io::{self, BufRead};
+use std::sync::Arc;
 use tokio::fs;
 
 #[derive(Args)]
@@ -53,8 +54,8 @@ pub struct CheckLinksConfig {
     pub timeout_ms: u64,
     pub retries: u8,
     pub user_agent: Option<String>,
-    /// `--profile` value: a saved profile folder, `fresh`, or `None` for the default
-    pub profile: Option<String>,
+    /// `--profile` value, or `None` for the default
+    pub profile: Option<crate::profile::ProfileChoice>,
 }
 
 /// Result for a single link check (compact)
@@ -66,6 +67,18 @@ pub struct LinkResult {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redirect_to: Option<String>,
+}
+
+impl LinkResult {
+    /// A check that failed inside ref itself (a panic), not at the site
+    fn internal_error(url: String, message: &str) -> Self {
+        Self {
+            url,
+            status: 0,
+            error: Some(format!("Internal error in ref: {message}")),
+            redirect_to: None,
+        }
+    }
 }
 
 /// Full report (compact)
@@ -101,7 +114,7 @@ pub async fn run_check_links(args: CheckLinksArgs, out: &mut impl std::io::Write
         timeout_ms: args.timeout,
         retries: args.retries,
         user_agent: args.user_agent.clone(),
-        profile: args.profile.profile.clone(),
+        profile: args.profile.choice()?,
     };
 
     let report = check_links(&urls, &config).await?;
@@ -151,28 +164,46 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
 ///
 /// Returns error if Chrome fails to launch or the user agent is invalid.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
-    let mut pool = BrowserPool::new(config.concurrency, config.profile.as_deref()).await?;
+    let mut pool = BrowserPool::new(config.concurrency, config.profile.as_ref()).await?;
     if let Some(ua) = &config.user_agent {
         pool.set_user_agent(ua)?;
     }
-    let report = check_links_with(&pool, urls, config).await;
-    pool.close().await?;
+    let pool = Arc::new(pool);
+    let report = check_links_with(
+        &pool,
+        urls,
+        config.concurrency,
+        config.timeout_ms,
+        config.retries,
+    )
+    .await;
+    BrowserPool::close_shared(pool).await?;
     Ok(report)
 }
 
 /// Check links in a browser the caller already has, such as the MCP server's
-/// shared one, at most `config.concurrency` at once.
-/// `config.user_agent` and `config.profile` are not used: the browser has its own.
+/// shared one, at most `concurrency` at once, each on a task of its own so a
+/// panic on one URL becomes that URL's error.
 pub async fn check_links_with(
-    pool: &BrowserPool,
+    pool: &Arc<BrowserPool>,
     urls: &[String],
-    config: &CheckLinksConfig,
+    concurrency: usize,
+    timeout_ms: u64,
+    retries: u8,
 ) -> LinkReport {
-    // Owned items: a stream over borrowed ones is not `Send` (needed by the MCP server)
-    let (timeout, retries) = (config.timeout_ms, config.retries);
     let results: Vec<LinkResult> = futures::stream::iter(urls.to_vec())
-        .map(|url| async move { check_one(pool, &url, timeout, retries).await })
-        .buffered(config.concurrency.max(1))
+        .map(|url| {
+            let pool = Arc::clone(pool);
+            async move {
+                let checked = crate::task::isolated({
+                    let url = url.clone();
+                    async move { check_one(&pool, &url, timeout_ms, retries).await }
+                })
+                .await;
+                checked.unwrap_or_else(|e| LinkResult::internal_error(url, &e))
+            }
+        })
+        .buffered(concurrency.max(1))
         .collect()
         .await;
 
@@ -275,6 +306,14 @@ async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_errors_say_ref_failed_not_the_site() {
+        let r = LinkResult::internal_error("https://a.example".into(), "bad page");
+        assert_eq!(r.status, 0);
+        assert_eq!(r.error.as_deref(), Some("Internal error in ref: bad page"));
+        assert!(r.redirect_to.is_none());
+    }
 
     #[test]
     fn test_check_links_config() {

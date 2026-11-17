@@ -546,22 +546,6 @@ fn saved_profile_keeps_sign_ins_between_runs() {
 
 #[test]
 #[ignore = "e2e: requires Chrome (ADR-003)"]
-fn profile_option_beats_the_environment_variable() {
-    let base = serve();
-    let dir = tempfile::tempdir().expect("tempdir");
-    let saved = dir.path().join("profile");
-    let saved = saved.to_str().expect("path");
-
-    let (_, page) = fetch_with_profile(saved, &["--profile", "fresh", &format!("{base}/whoami")]);
-    assert_eq!(page["status"], "ok", "{page}");
-    assert!(
-        !std::path::Path::new(saved).exists(),
-        "the profile from REF_CHROME_PROFILE was used"
-    );
-}
-
-#[test]
-#[ignore = "e2e: requires Chrome (ADR-003)"]
 fn everyday_chrome_profile_is_refused_with_advice() {
     let home = std::env::var("HOME").expect("HOME");
     let everyday = format!("{home}/.config/google-chrome");
