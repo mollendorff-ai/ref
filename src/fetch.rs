@@ -269,9 +269,12 @@ async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Re
 
     // A PDF opens in Chrome's viewer, which has no readable HTML: extract it instead
     if nav.mime.as_deref() == Some("application/pdf") && nav.status.is_some_and(|c| c < 400) {
+        // Same user agent and cookies as Chrome (the saved profile's sessions
+        // and any --cookies file), so a signed-in PDF downloads too
+        let cookie = page.cookie_header(url).await?;
         drop(page);
-        // Same user agent and cookies as Chrome, so a signed-in PDF downloads too
-        let headers = pool.download_headers(url);
+        let mut headers = pool.download_headers(url);
+        headers.cookie = cookie.or(headers.cookie);
         let mut pdf = crate::pdf::extract_pdf_from_url_with(url, &headers)
             .await
             .base;
@@ -1083,6 +1086,26 @@ mod tests {
             "{off}"
         );
         assert!(off.contains("code blocks"), "{off}");
+    }
+
+    #[tokio::test]
+    async fn signed_in_pdf_downloads_with_the_saved_profiles_session() {
+        // Needs Chrome (ADR-004): Chrome holds the session, ref downloads the PDF
+        let base = serve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let profile = dir.path().join("profile");
+        let profile = profile.to_str().expect("path");
+        let pdf = format!("{base}/signed-in.pdf");
+
+        let (_, before) = fetch_with_profile(profile, &[&pdf]).await;
+        assert_eq!(before["status"], "dead", "{before}");
+        let (_, signed_in) = fetch_with_profile(profile, &[&format!("{base}/pdf-sign-in")]).await;
+        assert_eq!(signed_in["status"], "ok", "{signed_in}");
+
+        let (code, after) = fetch_with_profile(profile, &[&pdf]).await;
+        assert_eq!(after["status"], "ok", "{after}");
+        assert!(all_content(&after).contains("signed-in readers"), "{after}");
+        assert_eq!(code, ExitCode::SUCCESS);
     }
 
     #[tokio::test]

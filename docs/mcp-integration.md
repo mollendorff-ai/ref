@@ -53,6 +53,8 @@ Add to `.vscode/mcp.json`:
 ## Signed-in sites
 
 The MCP server uses ref's saved profile (`~/.ref/chrome-profile`) when it exists, so tools see the sites you signed in to with `ref login`.
+`ref_pdf` does not: it reads PDF files and downloads PDF URLs without Chrome.
+For a PDF behind a sign-in, call `ref_fetch` on its URL; it downloads the PDF with the cookies Chrome has for that address.
 Stop the server before running `ref login`, since only one Chrome can use the profile at a time.
 To use another profile, pass `--profile` (or set `REF_CHROME_PROFILE` in the server's environment); `--profile fresh` gives an empty, temporary profile:
 

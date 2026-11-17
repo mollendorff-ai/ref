@@ -437,8 +437,8 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("ref", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Möllendorff Ref: compact JSON from web pages and PDFs for AI agents. \
-                 Renders JavaScript-heavy pages in headless Chrome. \
+                "Möllendorff Ref: renders web pages and PDFs into compact JSON for LLM agents. \
+                 JavaScript-heavy pages are rendered in headless Chrome. \
                  Each result has a status (ok, dead, redirect, paywall, login) and an http code; \
                  check `truncated` before treating content as complete.",
             )
