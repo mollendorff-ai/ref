@@ -132,12 +132,7 @@ impl BrowserPage {
             if error.is::<ChromeFailed>() {
                 return Err(error);
             }
-            return Ok(PageResult {
-                status: None,
-                mime: None,
-                title: None,
-                error: Some(error.to_string()),
-            });
+            return Ok(PageResult::failed(error.to_string()));
         }
 
         // Navigation succeeded, now wait for networkIdle
@@ -275,6 +270,19 @@ pub struct PageResult {
     pub error: Option<String>,
 }
 
+impl PageResult {
+    /// A navigation that failed with `error`: no status, type or title
+    #[must_use]
+    pub fn failed(error: String) -> Self {
+        Self {
+            status: None,
+            mime: None,
+            title: None,
+            error: Some(error),
+        }
+    }
+}
+
 /// Turn a Chrome navigation error into a short, stable label plus the raw message.
 fn describe_error(error: &str) -> String {
     let label = if error.contains("ERR_NAME_NOT_RESOLVED") {
@@ -294,6 +302,13 @@ fn describe_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_navigation_has_only_its_error() {
+        let failed = PageResult::failed("TIMEOUT: slow".into());
+        assert_eq!(failed.error.as_deref(), Some("TIMEOUT: slow"));
+        assert!(failed.status.is_none() && failed.mime.is_none() && failed.title.is_none());
+    }
 
     #[test]
     fn test_describe_error() {

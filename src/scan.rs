@@ -197,12 +197,11 @@ pub(crate) async fn expand_files(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
             let mut entries = tokio::fs::read_dir(pattern).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
-                if path.is_file() {
-                    if let Some(ext) = path.extension() {
-                        if ext == "md" || ext == "markdown" {
-                            files.push(path);
-                        }
-                    }
+                let markdown = path
+                    .extension()
+                    .is_some_and(|ext| ext == "md" || ext == "markdown");
+                if markdown && path.is_file() {
+                    files.push(path);
                 }
             }
         }
@@ -305,6 +304,283 @@ fn infer_categories(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::ref_cmd;
+    use std::process::ExitCode;
+
+    /// A folder with docs and a README holding links, to scan
+    fn project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "See [the guide](https://example.com/guide) and https://example.com/bare.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("docs/api.md"),
+            "The [guide](https://example.com/guide) again, and https://example.com/api.\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("docs/notes.txt"), "https://example.com/ignored").unwrap();
+        // A file without an extension is not markdown either
+        std::fs::write(root.join("docs/Makefile"), "https://example.com/ignored").unwrap();
+        dir
+    }
+
+    fn scan_json(out: &str) -> serde_json::Value {
+        serde_json::from_str(out).expect("scan printed JSON")
+    }
+
+    fn read_refs(path: &Path) -> ReferencesFile {
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn files_folders_and_globs_are_scanned_and_urls_merged() {
+        let dir = project();
+        let root = dir.path();
+        let out_file = root.join("references.yaml");
+        let (readme, docs, glob) = (
+            root.join("README.md"),
+            root.join("docs"),
+            root.join("docs/*.md"),
+        );
+        let line = [
+            "scan",
+            readme.to_str().unwrap(),
+            docs.to_str().unwrap(),
+            glob.to_str().unwrap(),
+            "--output",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        let json = scan_json(&out);
+        // The .txt file is not markdown; the folder and the glob find api.md twice
+        assert_eq!(json["total_urls"], 3, "{out}");
+        assert_eq!(json["new_urls"], 3);
+
+        let refs = read_refs(&out_file);
+        assert_eq!(refs.meta.total_links, 3);
+        let guide = refs
+            .references
+            .iter()
+            .find(|r| r.url.ends_with("/guide"))
+            .unwrap();
+        assert_eq!(guide.title, "the guide");
+        assert_eq!(guide.cited_in.len(), 2, "cited in README and api.md");
+        let readme = "readme".to_string();
+        assert!(guide.categories.contains(&readme), "{:?}", guide.categories);
+        let bare = refs
+            .references
+            .iter()
+            .find(|r| r.url.ends_with("/bare"))
+            .unwrap();
+        assert_eq!(bare.title, bare.url, "a bare URL is its own title");
+    }
+
+    #[tokio::test]
+    async fn scanning_again_merges_with_what_the_file_holds() {
+        let dir = project();
+        let root = dir.path();
+        let out_file = root.join("references.yaml");
+        let readme = root.join("README.md");
+        let first = [
+            "scan",
+            readme.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        ref_cmd(&first).await;
+
+        // A new file cites the bare URL under a title and adds one more link
+        std::fs::write(
+            root.join("more.md"),
+            "[Bare page](https://example.com/bare) and https://example.com/extra\n",
+        )
+        .unwrap();
+        let more = root.join("more.md");
+        let second = [
+            "scan",
+            more.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, out, _) = ref_cmd(&second).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        let json = scan_json(&out);
+        assert_eq!(json["total_urls"], 3, "{out}");
+        assert_eq!(json["new_urls"], 1);
+        assert_eq!(json["updated_urls"], 1);
+
+        let refs = read_refs(&out_file);
+        let bare = refs
+            .references
+            .iter()
+            .find(|r| r.url.ends_with("/bare"))
+            .unwrap();
+        assert_eq!(bare.title, "Bare page", "the title replaces the bare URL");
+        assert_eq!(bare.cited_in.len(), 2);
+
+        // --no-merge starts over
+        let fresh = [
+            "scan",
+            more.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+            "--no-merge",
+        ];
+        let (_, out, _) = ref_cmd(&fresh).await;
+        assert_eq!(scan_json(&out)["total_urls"], 2, "{out}");
+    }
+
+    #[tokio::test]
+    async fn scanning_the_same_file_again_changes_nothing() {
+        let dir = project();
+        let readme = dir.path().join("README.md");
+        let out_file = dir.path().join("references.yaml");
+        let line = [
+            "scan",
+            readme.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        ref_cmd(&line).await;
+        let before = std::fs::read_to_string(&out_file).unwrap();
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        let json = scan_json(&out);
+        assert_eq!(
+            (json["new_urls"].as_u64(), json["updated_urls"].as_u64()),
+            (Some(0), Some(0)),
+            "{out}"
+        );
+        assert_eq!(std::fs::read_to_string(&out_file).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_title_found_later_replaces_a_bare_url_within_one_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("a.md"), dir.path().join("b.md"));
+        std::fs::write(&first, "https://example.com/page\n").unwrap();
+        std::fs::write(&second, "[The page](https://example.com/page)\n").unwrap();
+        let out_file = dir.path().join("references.yaml");
+        let line = [
+            "scan",
+            first.to_str().unwrap(),
+            second.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, _, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        let refs = read_refs(&out_file);
+        assert_eq!(refs.references.len(), 1);
+        assert_eq!(refs.references[0].title, "The page");
+        assert_eq!(refs.references[0].cited_in.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cannot_be_read_or_an_output_that_cannot_be_written_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not UTF-8, so it cannot be read as text
+        let binary = dir.path().join("binary.md");
+        std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+        let out_file = dir.path().join("references.yaml");
+        let line = [
+            "scan",
+            binary.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, _, err) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(2));
+        assert!(err.contains("Failed to read"), "{err}");
+
+        // The folder for the output does not exist
+        let good = dir.path().join("good.md");
+        std::fs::write(&good, "https://example.com/a").unwrap();
+        let nowhere = dir.path().join("no-such-folder/references.yaml");
+        let line = [
+            "scan",
+            good.to_str().unwrap(),
+            "-o",
+            nowhere.to_str().unwrap(),
+        ];
+        let (code, _, err) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(2));
+        assert!(err.contains("Failed to write"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn nothing_to_scan_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("references.yaml");
+        let missing = dir.path().join("missing.md");
+        let line = [
+            "scan",
+            missing.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(scan_json(&out)["scanned_files"], 0, "{out}");
+        assert!(!out_file.exists());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_file_or_a_broken_references_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder_named_md = dir.path().join("looks-like.md");
+        std::fs::create_dir(&folder_named_md).unwrap();
+        // A glob matches only files, so a folder is skipped, not read
+        let glob = dir.path().join("*.md");
+        let out_file = dir.path().join("references.yaml");
+        let line = [
+            "scan",
+            glob.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, _, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        // An existing output that is not a references file stops the merge
+        std::fs::write(dir.path().join("a.md"), "https://example.com/a").unwrap();
+        std::fs::write(&out_file, "meta: [not, a, mapping").unwrap();
+        let a = dir.path().join("a.md");
+        let line = [
+            "scan",
+            a.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, _, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn categories_come_from_the_path() {
+        let cases = [
+            ("docs/a.md", "documentation"),
+            ("/x/research/a.md", "research"),
+            ("adr/ADR-1.md", "architecture"),
+            ("/x/api/a.md", "api"),
+            ("/x/tests/a.md", "testing"),
+            ("README.md", "readme"),
+            ("CHANGELOG.md", "changelog"),
+            ("LICENSE.md", "legal"),
+            ("notes.md", "general"),
+        ];
+        for (path, category) in cases {
+            assert!(
+                infer_categories(path).contains(&category.to_string()),
+                "{path}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn the_command_refuses_to_overwrite_other_files() {

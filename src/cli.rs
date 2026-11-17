@@ -13,7 +13,7 @@ use crate::verify_refs::{run_verify_refs, VerifyRefsArgs};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::future::Future;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -69,14 +69,14 @@ pub enum Commands {
 ///
 /// # Errors
 /// Returns the command's error (bad arguments, Chrome missing, I/O error).
-pub async fn run(cli: Cli, out: &mut dyn Write) -> Result<bool> {
+pub async fn run(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool> {
     match cli.command {
         Commands::Fetch(args) => run_fetch(args, out).await,
         Commands::Pdf(args) => run_pdf(&args, out).await,
         Commands::Init(args) => run_init(&args, out).map(|()| true),
         Commands::Login(args) => run_login(&args, out).map(|()| true),
         Commands::Scan(args) => run_scan(args, out).await.map(|()| true),
-        Commands::CheckLinks(args) => run_check_links(args, out).await,
+        Commands::CheckLinks(args) => run_check_links(args, input, out).await,
         Commands::RefreshData(args) => run_refresh_data(args, out).await,
         Commands::VerifyRefs(args) => run_verify_refs(args, out).await,
         Commands::Update(args) => run_update(args, out).await.map(|()| true),
@@ -91,12 +91,14 @@ pub async fn run(cli: Cli, out: &mut dyn Write) -> Result<bool> {
 /// 2 = the command itself failed (bad arguments, Chrome missing, I/O error),
 /// 130 = interrupted.
 ///
-/// `args` are the command line (first the program name); the command's JSON
+/// `args` are the command line (first the program name); `input` is the
+/// standard input (`check-links --stdin` reads URLs from it); the command's JSON
 /// goes to `out` and its error to `err`. When `stop` finishes first (Ctrl-C or
 /// SIGTERM in the real program), the command is dropped, which closes Chrome
 /// and removes its temporary profile, instead of leaving them behind.
 pub async fn execute(
     args: Vec<std::ffi::OsString>,
+    input: &mut dyn BufRead,
     out: &mut dyn Write,
     err: &mut dyn Write,
     stop: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
@@ -115,7 +117,7 @@ pub async fn execute(
         }
     };
     let result = tokio::select! {
-        r = run(cli, out) => r,
+        r = run(cli, input, out) => r,
         () = stop => {
             let _ = writeln!(err, "Interrupted.");
             return ExitCode::from(130);
@@ -138,6 +140,7 @@ pub fn main() -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
         std::env::args_os().collect(),
+        &mut std::io::stdin().lock(),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
@@ -147,6 +150,7 @@ pub fn main() -> ExitCode {
 fn start(
     runtime: std::io::Result<tokio::runtime::Runtime>,
     args: Vec<std::ffi::OsString>,
+    input: &mut dyn BufRead,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
@@ -157,7 +161,7 @@ fn start(
             return ExitCode::from(2);
         }
     };
-    let code = runtime.block_on(execute(args, out, err, Box::pin(shutdown_signal())));
+    let code = runtime.block_on(execute(args, input, out, err, Box::pin(shutdown_signal())));
     // Shutting the runtime down drops every task, which kills Chrome; only
     // then can its temporary profile be removed for good.
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
@@ -332,7 +336,14 @@ mod tests {
         let args = ["ref", "check-links", "--url", "http://127.0.0.1:9/"]
             .map(Into::into)
             .to_vec();
-        let code = execute(args, &mut out, &mut err, Box::pin(std::future::ready(()))).await;
+        let code = execute(
+            args,
+            &mut &b""[..],
+            &mut out,
+            &mut err,
+            Box::pin(std::future::ready(())),
+        )
+        .await;
         assert_eq!(code, ExitCode::from(130));
         assert_eq!(String::from_utf8_lossy(&err), "Interrupted.\n");
     }
@@ -371,7 +382,13 @@ mod tests {
     fn the_program_says_so_when_the_runtime_cannot_start() {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let failed = Err(std::io::Error::other("no threads"));
-        let code = start(failed, vec!["ref".into()], &mut out, &mut err);
+        let code = start(
+            failed,
+            vec!["ref".into()],
+            &mut &b""[..],
+            &mut out,
+            &mut err,
+        );
         assert_eq!(code, ExitCode::from(2));
         let text = String::from_utf8_lossy(&err);
         assert!(
@@ -387,6 +404,7 @@ mod tests {
         let code = start(
             runtime,
             vec!["ref".into(), "--version".into()],
+            &mut &b""[..],
             &mut out,
             &mut err,
         );

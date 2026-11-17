@@ -35,6 +35,20 @@ fn handle(mut stream: TcpStream) {
         line.clear();
     }
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+    if path == "/cross-host" {
+        // Like a site that moves to another host name: same server, other name
+        let port = headers
+            .lines()
+            .find_map(|l| l.strip_prefix("host:"))
+            .and_then(|h| h.trim().rsplit(':').next())
+            .unwrap_or("80")
+            .to_string();
+        let head = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/report\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(head.as_bytes());
+        return;
+    }
     if path == "/whoami" {
         let cookie = headers
             .lines()
@@ -212,15 +226,21 @@ fn route(path: &str) -> (&'static str, String, String) {
     }
 }
 
-/// Run `ref <args>` in-process: (exit code, standard output, error output)
+/// Run `ref <args>` in-process with no standard input:
+/// (exit code, standard output, error output)
 pub(crate) async fn ref_cmd(args: &[&str]) -> (ExitCode, String, String) {
+    ref_cmd_with_input(args, "").await
+}
+
+/// Run `ref <args>` in-process with `input` as its standard input
+pub(crate) async fn ref_cmd_with_input(args: &[&str], input: &str) -> (ExitCode, String, String) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let line = std::iter::once("ref")
         .chain(args.iter().copied())
         .map(Into::into)
         .collect();
     let stop = Box::pin(std::future::pending());
-    let code = crate::cli::execute(line, &mut out, &mut err, stop).await;
+    let code = crate::cli::execute(line, &mut input.as_bytes(), &mut out, &mut err, stop).await;
     let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned();
     (code, text(out), text(err))
 }
