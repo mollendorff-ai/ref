@@ -47,6 +47,10 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- A page that only mentions `isAccessibleForFree: false` is no longer a `paywall`: the signal counts only in the page's JSON-LD or microdata, not in its text or other scripts.
+  ref's own GitHub page, whose README explains the signal, came back as a paywall.
+- A `main` element that holds exactly one `article` with at least a third of its text gives just that article as content, for `ref fetch` and `ref refresh-data`.
+  A GitHub repository page now starts with its README instead of the file list and the About, Stars and Forks sidebar.
 - **MCP with a saved profile**: `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` failed once `ref_fetch` had run, because each started a second Chrome on the profile the server's browser already held.
   They now share the server's browser.
 - The "profile is open in another Chrome" error names the possible holders (`ref login`, a running `ref mcp`, another ref command) instead of only `ref login`.

@@ -79,14 +79,14 @@ upcoming:
     deliverables:
       - "The CI test-count badge reads about four too high: the profile.rs tests start child test runs, and their \"test result:\" lines are counted too"
       - "ref check-links --stdin at a terminal can swallow Ctrl-C while it waits for input (older than this branch)"
-      - "Clippy 1.100 (pedantic) flags code that 1.99.1, the version CI's lint job pins, accepts: src/cli.rs:139 (must_use with no message), src/fetch.rs:530 and src/test_server.rs:387 (map then unwrap_or_default), src/scan.rs:395 and :449 and src/test_server.rs:410 (unused ExitCode in a tuple); fix them before moving the pin"
+      - "Clippy 1.100 (pedantic) flags code that 1.99.1, the version CI's lint job pins, accepts: src/cli.rs:139 (must_use with no message), src/test_server.rs:387 (map then unwrap_or_default; the one in fetch.rs went with main_content), src/scan.rs:395 and :449 and src/test_server.rs:410 (unused ExitCode in a tuple); fix them before moving the pin"
       - "CI's coverage job runs on the stable toolchain, which moves with each Rust release and changes which lines the gate counts (Rust 1.100 showed 8 untaken branches that 1.97 and 1.99.1 did not); run the gate on the same version CI uses, or pin it"
-  - summary: "Content detection on GitHub pages"
+  - summary: "Content detection on GitHub pages (done 2026-11-17, Unreleased)"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
     deliverables:
-      - "No false paywall: a public repo page (13,046 readable chars) comes back as status paywall, likely from GitHub's 'You must be signed in to...' button wording"
-      - "Main content: the README (article.markdown-body) should win over repository navigation, About, Stars, Forks and other sidebar sections, which come first and repeat after it"
+      - "Done 2026-11-17. No false paywall: the cause was not GitHub's sign-in wording but ref's own README, which quotes `isAccessibleForFree: false`; the check ran over the whole HTML. It now reads only JSON-LD blocks and microdata properties (access.rs)"
+      - "Done 2026-11-17. Main content: a main with exactly one article holding at least a third of its text gives that article (content::main_content, moved from fetch.rs). On 2026-11-17 the README was 43% (rust-lang/rust) to 90% (BurntSushi/ripgrep) of main; torvalds/linux has no article and still starts with the sidebar"
   - summary: "Evaluation fixes (Ref Evaluation, 2026-11-16, grade A-)"
     goal: "EVAL_FIXES"
     deliverables:

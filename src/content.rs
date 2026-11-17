@@ -8,8 +8,9 @@
 
 use crate::text::cut_at_word;
 use ego_tree::NodeRef;
-use scraper::{ElementRef, Html, Node};
+use scraper::{ElementRef, Html, Node, Selector};
 use serde::Serialize;
+use std::sync::LazyLock;
 
 /// Maximum heading length in characters (bytes, on a character boundary)
 const MAX_HEADING: usize = 200;
@@ -219,6 +220,59 @@ impl Builder {
     }
 }
 
+/// Where a page keeps its own content, best first
+const MAIN_SELECTORS: [&str; 8] = [
+    "main",
+    "article",
+    "[role='main']",
+    ".post-content",
+    ".article-content",
+    ".entry-content",
+    "#content",
+    ".content",
+];
+
+static ARTICLE: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("article").expect("constant selector"));
+
+/// The HTML of a page's own content: the first match of [`MAIN_SELECTORS`],
+/// else the whole body (its page chrome is skipped by [`extract_sections`]).
+///
+/// When that element holds exactly one `article` with at least a third of its
+/// text, the article is the content: a repository page around its README (on
+/// GitHub the README is 40% to 90% of the page), a news page around its story.
+/// Several articles (a listing) or a small one (a card) leave the element as
+/// it is.
+#[must_use]
+pub fn main_content(doc: &Html) -> String {
+    for css in MAIN_SELECTORS {
+        if let Some(el) = doc.select(&selector(css)).next() {
+            return sole_article(el).unwrap_or(el).html();
+        }
+    }
+    doc.select(&selector("body"))
+        .next()
+        .map_or_else(String::new, |body| body.html())
+}
+
+/// A selector written in this file, which always parses
+fn selector(css: &str) -> Selector {
+    Selector::parse(css).expect("constant selector")
+}
+
+/// The one `article` below `el` that carries at least a third of its text
+fn sole_article(el: ElementRef<'_>) -> Option<ElementRef<'_>> {
+    let mut articles = el.select(&ARTICLE).filter(|a| a.id() != el.id());
+    let article = articles.next()?;
+    let alone = articles.next().is_none();
+    let carries = 3 * text_len(article) >= text_len(el);
+    (alone && carries).then_some(article)
+}
+
+fn text_len(el: ElementRef<'_>) -> usize {
+    normalized_text(el).chars().count()
+}
+
 fn heading_level(name: &str) -> Option<u8> {
     match name {
         "h1" => Some(1),
@@ -345,6 +399,47 @@ mod tests {
 
     fn sections(html: &str) -> Extracted {
         extract_sections(&Html::parse_document(html), 0, 0, false)
+    }
+
+    fn main_of(html: &str) -> String {
+        main_content(&Html::parse_document(html))
+    }
+
+    #[test]
+    fn the_one_article_that_carries_main_is_the_content() {
+        // Like a repository page: files and sidebar around the README
+        let readme = "The project explains itself at length. ".repeat(20);
+        let page = format!(
+            "<main><nav>Files</nav><div>About Stars Forks</div>\
+             <article><h1>Project</h1><p>{readme}</p></article><div>Releases</div></main>"
+        );
+        let main = main_of(&page);
+        assert!(main.starts_with("<article>"), "{main}");
+        assert!(
+            !main.contains("Stars") && !main.contains("Releases"),
+            "{main}"
+        );
+        // A short README beside a long file list still wins (about 40%)
+        let files = "<li>src/module.rs Fix the thing 2 days ago</li>".repeat(30);
+        let short = "The project in a few sentences. ".repeat(20);
+        let page = format!("<main><ul>{files}</ul><article><p>{short}</p></article></main>");
+        assert!(main_of(&page).starts_with("<article>"), "{page}");
+        // An article found first is kept as it is, with what it holds
+        let alone = "<body><article><p>Story</p><article>Quote</article></article></body>";
+        assert!(main_of(alone).contains("Quote"));
+    }
+
+    #[test]
+    fn main_stays_when_its_article_is_small_or_one_of_several() {
+        let text = "Main text that goes on for a while. ".repeat(20);
+        let card = format!("<main><p>{text}</p><article>Related story</article></main>");
+        assert!(main_of(&card).starts_with("<main>"));
+        let listing = "<main><article>First post</article><article>Second post</article></main>";
+        assert!(main_of(listing).starts_with("<main>"));
+        let plain = format!("<main><p>{text}</p></main>");
+        assert!(main_of(&plain).starts_with("<main>"));
+        // No main content element at all: the body
+        assert!(main_of("<p>Just text</p>").starts_with("<body>"));
     }
 
     #[test]

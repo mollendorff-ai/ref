@@ -387,12 +387,12 @@ pub(crate) fn parse_page(html: &str, url: &str, options: &FetchOptions) -> Page 
             alerts.push(format!(
                 "Selector {sel_str:?} {why}; returned the main content instead"
             ));
-            extract_main_content(&doc)
+            content::main_content(&doc)
         }
     } else if raw {
         html.to_string()
     } else {
-        extract_main_content(&doc)
+        content::main_content(&doc)
     };
 
     let content_doc = Html::parse_document(&content_html);
@@ -504,33 +504,6 @@ fn detect_status(html: &str) -> PageStatus {
         Access::Paywall => PageStatus::Paywall,
         Access::Login => PageStatus::Login,
     }
-}
-
-pub(crate) fn extract_main_content(doc: &Html) -> String {
-    // Priority: main > article > [role=main] > body
-    let selectors = [
-        "main",
-        "article",
-        "[role='main']",
-        ".post-content",
-        ".article-content",
-        ".entry-content",
-        "#content",
-        ".content",
-    ];
-
-    for sel_str in selectors {
-        if let Some(el) = doc.select(&selector(sel_str)).next() {
-            return el.html();
-        }
-    }
-
-    // Fallback: the whole body; page chrome (nav, header, footer, aside,
-    // forms) is skipped later by content::extract_sections
-    doc.select(&selector("body"))
-        .next()
-        .map(|body| body.html())
-        .unwrap_or_default()
 }
 
 /// Content links, deduplicated; the flag is true when more than [`MAX_LINKS`] were found
