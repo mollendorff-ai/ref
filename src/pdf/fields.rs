@@ -171,6 +171,103 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_title_is_the_first_line_or_else_the_file_name() {
+        let path = Path::new("/docs/annual-report.pdf");
+        assert_eq!(
+            extract_title("\n  Annual Report 2026  \nbody", path).as_deref(),
+            Some("Annual Report 2026")
+        );
+        // Too short or too long to be a title
+        assert_eq!(
+            extract_title("ab\nbody", path).as_deref(),
+            Some("annual-report")
+        );
+        assert_eq!(
+            extract_title(&"x".repeat(300), path).as_deref(),
+            Some("annual-report")
+        );
+        assert_eq!(extract_title("", path).as_deref(), Some("annual-report"));
+        // No file name either
+        assert_eq!(extract_title("", Path::new("")), None);
+    }
+
+    #[test]
+    fn dates_dois_and_authors_are_found_in_the_text() {
+        assert_eq!(
+            extract_date("Date: 2026-11-06").as_deref(),
+            Some("2026-11-06")
+        );
+        assert_eq!(
+            extract_date("Published November 6, 2026").as_deref(),
+            Some("November 6, 2026")
+        );
+        assert_eq!(extract_date("no date here"), None);
+        assert_eq!(
+            extract_doi("see doi: 10.1234/abc.def for more").as_deref(),
+            Some("10.1234/abc.def")
+        );
+        assert_eq!(extract_doi("nothing"), None);
+        assert_eq!(
+            extract_author("Author: Jane Doe\nbody").as_deref(),
+            Some("Jane Doe")
+        );
+        assert_eq!(extract_author("sold by region, in thousands"), None);
+    }
+
+    #[test]
+    fn links_are_deduplicated_cleaned_and_limited_to_fifty() {
+        let text = "See https://a.example/x, and https://a.example/x. Also (https://b.example/y).";
+        let urls: Vec<_> = extract_links(text).into_iter().map(|l| l.url).collect();
+        assert_eq!(urls, ["https://a.example/x", "https://b.example/y"]);
+        let many = (0..80).fold(String::new(), |all, i| {
+            all + &format!("https://c.example/{i} ")
+        });
+        assert_eq!(extract_links(&many).len(), 50);
+    }
+
+    #[test]
+    fn code_is_recognised_by_indentation_and_keywords_and_named() {
+        let rust = "Text before\n    fn add(a: i32) -> i32 {\n        a + 1\n    }\nText after";
+        let blocks = extract_code(rust);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].lang.as_deref(), Some("rust"));
+
+        // A block that ends the text is kept too
+        let python = "intro\n    def add(a, b):\n        return a + b\n    print(add(1, 2))";
+        assert_eq!(extract_code(python)[0].lang.as_deref(), Some("python"));
+
+        // Too short (under 3 lines, or under 20 characters) is not a block
+        assert!(extract_code("    a\n    b\ntext").is_empty());
+        assert!(extract_code("text\n    a\n    b\n    c\ntext").is_empty());
+        assert!(extract_code("    a\n    b\n    c").is_empty());
+    }
+
+    #[test]
+    fn the_language_comes_from_what_the_code_uses() {
+        let cases = [
+            ("fn main() -> () {}", Some("rust")),
+            ("def run():\n    pass", Some("python")),
+            ("function go() {}", Some("javascript")),
+            ("const x = 1;", Some("javascript")),
+            ("let y = 2;", Some("javascript")),
+            ("public class A {}", Some("java")),
+            ("private int n;", Some("java")),
+            ("#include <stdio.h>", Some("c")),
+            ("SELECT 1;", None),
+        ];
+        for (code, language) in cases {
+            assert_eq!(detect_language(code).as_deref(), language, "{code}");
+        }
+    }
+
+    #[test]
+    fn at_most_ten_code_blocks_are_returned() {
+        let block = "    fn go() -> u8 {\n        1\n    }\ntext\n";
+        let blocks = extract_code(&block.repeat(15));
+        assert_eq!(blocks.len(), 10);
+    }
+
+    #[test]
     fn author_lines_are_labels_or_names_only() {
         assert_eq!(
             extract_author("Author: Jane Doe\nText"),

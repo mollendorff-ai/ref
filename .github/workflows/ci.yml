@@ -136,7 +136,7 @@ jobs:
         id: coverage
         run: |
           # IO modules excluded until STRICT_RULES removes this (ADR-004)
-          EXCLUDE='browser/|fetch\.rs|login\.rs|main\.rs|mcp\.rs|pdf/|refresh_data\.rs|update\.rs|verify_refs\.rs'
+          EXCLUDE='browser/|login\.rs|main\.rs|mcp\.rs|update\.rs'
           OUTPUT=$(cargo llvm-cov --ignore-filename-regex "$EXCLUDE" 2>&1)
           echo "$OUTPUT"
 

@@ -80,14 +80,8 @@ pub(super) fn parse_sections(text: &str) -> Vec<Section> {
             }
             // Column gaps are kept for table detection; in section text one
             // space is enough (the `tables` field keeps the layout)
-            let mut words = trimmed.split_whitespace();
-            if let Some(first) = words.next() {
-                current_content.push_str(first);
-                for word in words {
-                    current_content.push(' ');
-                    current_content.push_str(word);
-                }
-            }
+            let words: Vec<&str> = trimmed.split_whitespace().collect();
+            current_content.push_str(&words.join(" "));
         }
     }
 

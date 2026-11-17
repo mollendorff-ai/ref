@@ -18,7 +18,6 @@ use futures::{StreamExt, TryStreamExt};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use url::Url;
 
 #[derive(Args)]
 pub struct VerifyRefsArgs {
@@ -193,8 +192,7 @@ impl Plan {
                         async move { verify_url(&pool, &url, timeout).await }
                     })
                     .await;
-                    let checked = checked
-                        .unwrap_or_else(|e| Err(anyhow::anyhow!("Internal error in ref: {e}")));
+                    let checked = settled(checked);
                     // Context keeps a ChromeFailed recognisable to the caller
                     checked
                         .map(|result| (idx, result))
@@ -261,6 +259,12 @@ struct VerifyResult {
     notes: Option<String>,
 }
 
+/// The outcome of a check run on its own task; a panic in it is an error that
+/// ends the run (nothing may be recorded for that URL)
+fn settled(checked: std::result::Result<Result<VerifyResult>, String>) -> Result<VerifyResult> {
+    checked.unwrap_or_else(|panic| Err(anyhow::anyhow!("Internal error in ref: {panic}")))
+}
+
 /// Verify one URL. `Err` means nothing may be recorded for it (ADR-005 rule 3):
 /// Chrome itself failed ([`ChromeFailed`](crate::browser::ChromeFailed)), or a
 /// tab could not be opened or set up, which says nothing about the URL either.
@@ -283,10 +287,6 @@ async fn judge(
     url: &str,
     nav: crate::browser::PageResult,
 ) -> Result<VerifyResult> {
-    let original_host = Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(std::string::ToString::to_string));
-
     // Check for navigation errors (DNS, connection, etc.)
     if nav.error.is_some() {
         return Ok(VerifyResult {
@@ -303,31 +303,17 @@ async fn judge(
         });
     }
 
-    // Get final URL to check for cross-domain redirect
-    let final_url = page.current_url().await?;
-    if let (Some(orig), Some(final_u)) = (&original_host, &final_url) {
-        if let Ok(parsed) = Url::parse(final_u) {
-            if let Some(final_host) = parsed.host_str() {
-                // Normalize hosts (remove www prefix for comparison)
-                let orig_norm = orig.trim_start_matches("www.");
-                let final_norm = final_host.trim_start_matches("www.");
-                if orig_norm != final_norm {
-                    return Ok(VerifyResult {
-                        status: Status::Redirect,
-                        notes: Some(final_u.clone()),
-                    });
-                }
-            }
-        }
+    // A redirect to another host (www. does not count) is a redirect
+    if let Some(moved_to) = crate::fetch::redirect_target(url, page.current_url().await?) {
+        return Ok(VerifyResult {
+            status: Status::Redirect,
+            notes: Some(moved_to),
+        });
     }
 
-    // Get page content to detect paywall/login
-    let Ok(html) = page_failure(page.content().await)? else {
-        return Ok(VerifyResult {
-            status: Status::Ok,
-            notes: None,
-        });
-    };
+    // Get page content to detect paywall/login; a page that cannot be read
+    // has neither
+    let html = page_failure(page.content().await)?.unwrap_or_default();
 
     match access::detect(&html) {
         Access::Paywall => {
@@ -354,6 +340,118 @@ async fn judge(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::test_server::{ref_cmd, serve};
+    use std::process::ExitCode;
+
+    /// A references file with one entry per path on the test server
+    fn references_for(base: &str, paths: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("references.yaml");
+        let mut yaml = format!(
+            "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: {}\nreferences:\n",
+            paths.len()
+        );
+        for (i, path) in paths.iter().enumerate() {
+            let category = if i == 0 { "first" } else { "rest" };
+            let entry = format!(
+                "- id: r{i}\n  url: {base}{path}\n  title: R{i}\n  categories: [{category}]\n  cited_in: []\n  status: pending\n"
+            );
+            yaml.push_str(&entry);
+        }
+        std::fs::write(&file, yaml).unwrap();
+        (dir, file)
+    }
+
+    #[tokio::test]
+    async fn every_kind_of_page_gets_its_status() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let paths = [
+            "/report",
+            "/missing",
+            "/moved",
+            "/cross-host",
+            "/walled",
+            "/login",
+        ];
+        let (_dir, file) = references_for(&base, &paths);
+        let line = ["verify-refs", "--profile", "fresh", file.to_str().unwrap()];
+        let (code, out, _) = ref_cmd(&line).await;
+        // A dead reference makes the run fail
+        assert_eq!(code, ExitCode::from(1), "{out}");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let s = &json["summary"];
+        assert_eq!(
+            (s["ok"].as_u64(), s["dead"].as_u64(), s["redirect"].as_u64()),
+            (Some(2), Some(1), Some(1)),
+            "{out}"
+        );
+        assert_eq!(
+            (s["paywall"].as_u64(), s["login"].as_u64()),
+            (Some(1), Some(1)),
+            "{out}"
+        );
+
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("HTTP 404"), "{written}");
+        assert!(written.contains("http://localhost:"), "{written}");
+        assert!(written.contains("Paywall detected"), "{written}");
+        assert!(written.contains("Login required"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn a_category_limits_what_is_verified_and_a_dry_run_writes_nothing() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_dir, file) = references_for(&base, &["/report", "/missing"]);
+        let before = std::fs::read_to_string(&file).unwrap();
+        let path = file.to_str().unwrap();
+        let line = [
+            "verify-refs",
+            "--profile",
+            "fresh",
+            "--dry-run",
+            "--category",
+            "first",
+            path,
+        ];
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::SUCCESS, "{out}");
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json["summary"]["verified"], 1, "{out}");
+        assert_eq!(json["summary"]["skipped"], 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cannot_be_written_back_is_an_error() {
+        // Needs Chrome (ADR-004): a folder sits where the temporary file goes
+        let base = serve();
+        let (dir, file) = references_for(&base, &["/report"]);
+        let blocker = format!(".references.yaml.ref-tmp-{}", std::process::id());
+        std::fs::create_dir(dir.path().join(blocker)).unwrap();
+        let line = ["verify-refs", "--profile", "fresh", file.to_str().unwrap()];
+        let (code, _, err) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(2));
+        assert!(err.contains("Failed to write"), "{err}");
+    }
+
+    #[test]
+    fn a_panicked_check_ends_the_run_with_an_error() {
+        let ok = VerifyResult {
+            status: Status::Ok,
+            notes: None,
+        };
+        assert_eq!(settled(Ok(Ok(ok))).unwrap().status, Status::Ok);
+        let err = settled(Err("boom".into())).err().unwrap();
+        assert_eq!(err.to_string(), "Internal error in ref: boom");
+    }
+
+    #[test]
+    fn a_pending_reference_counts_as_neither_good_nor_bad() {
+        let summary = compute_summary(2, 0, &[Status::Pending, Status::Ok]);
+        assert_eq!((summary.ok, summary.dead, summary.verified), (1, 0, 2));
+    }
 
     #[tokio::test]
     async fn a_tab_chrome_refuses_ends_the_run_and_changes_nothing() {

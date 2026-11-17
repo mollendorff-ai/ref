@@ -4,7 +4,7 @@
 //! JSON compact output only. No YAML, no pretty printing.
 
 use crate::access::{self, Access};
-use crate::browser::{page_failure, BrowserPool};
+use crate::browser::BrowserPool;
 pub use crate::content::Section;
 use crate::content::{self, DEFAULT_MAX_SECTIONS};
 use crate::text::{cut_at_word, truncate};
@@ -246,42 +246,24 @@ pub(crate) async fn fetch_one(
     options: &FetchOptions,
 ) -> Result<Page> {
     eprintln!("  -> {}", truncate(url, 60));
-
-    if let Err(e) = crate::guard::check_web_url(url) {
-        return Ok(error_page(url, &e));
+    match fetch_page(pool, url, options).await {
+        Err(e) if !e.is::<crate::browser::ChromeFailed>() => Ok(error_page(url, &e.to_string())),
+        fetched => fetched,
     }
+}
 
-    let page = match page_failure(pool.new_page().await)? {
-        Ok(p) => p,
-        Err(e) => return Ok(error_page(url, &e)),
-    };
+/// [`fetch_one`] with every failure an error: Chrome's, or the page's
+async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Result<Page> {
+    crate::guard::check_web_url(url).map_err(|e| anyhow!(e))?;
 
-    // Parse original URL for redirect detection
-    let original_host = Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(String::from));
+    let page = pool.new_page().await?;
+    let nav = page.goto(url, options.timeout).await?;
 
-    let nav = match page_failure(page.goto(url, options.timeout).await)? {
-        Ok(n) => n,
-        Err(e) => return Ok(error_page(url, &e)),
-    };
-
-    if nav.error.is_some() {
+    if let Some(error) = nav.error {
         return Ok(Page {
-            url: url.to_string(),
             status: PageStatus::Dead,
-            http: None,
             title: nav.title,
-            site: None,
-            author: None,
-            date: None,
-            doi: None,
-            sections: vec![],
-            links: vec![],
-            code: vec![],
-            alerts: vec![nav.error.unwrap_or_default()],
-            chars: 0,
-            truncated: false,
+            ..error_page(url, &error)
         });
     }
 
@@ -302,45 +284,38 @@ pub(crate) async fn fetch_one(
     }
 
     // Check for redirect
-    let final_url = page.current_url().await?;
-    if let (Some(orig), Some(final_u)) = (&original_host, &final_url) {
-        if let Ok(parsed) = Url::parse(final_u) {
-            if let Some(final_host) = parsed.host_str() {
-                let orig_norm = orig.trim_start_matches("www.");
-                let final_norm = final_host.trim_start_matches("www.");
-                if orig_norm != final_norm {
-                    return Ok(Page {
-                        url: url.to_string(),
-                        status: PageStatus::Redirect,
-                        http: nav.status,
-                        title: nav.title,
-                        site: None,
-                        author: None,
-                        date: None,
-                        doi: None,
-                        sections: vec![],
-                        links: vec![],
-                        code: vec![],
-                        alerts: vec![format!("Redirected to: {}", final_u)],
-                        chars: 0,
-                        truncated: false,
-                    });
-                }
-            }
-        }
+    if let Some(moved_to) = redirect_target(url, page.current_url().await?) {
+        return Ok(Page {
+            status: PageStatus::Redirect,
+            http: nav.status,
+            title: nav.title,
+            alerts: vec![format!("Redirected to: {moved_to}")],
+            ..error_page(url, "")
+        });
     }
 
-    let html = match page_failure(page.content().await)? {
-        Ok(h) => h,
-        Err(e) => return Ok(error_page(url, &e)),
-    };
-
+    let html = page.content().await?;
     let mut parsed = parse_page(&html, url, options);
     apply_http_status(&mut parsed, nav.status);
     if nav.status == Some(403) && !pool.has_custom_user_agent() {
         parsed.alerts.insert(1, USER_AGENT_HINT.to_string());
     }
     Ok(parsed)
+}
+
+/// Where `url` ended up, when that is another host (`www.` does not count);
+/// `None` for the same host, or when either address has no host
+pub(crate) fn redirect_target(url: &str, final_url: Option<String>) -> Option<String> {
+    let final_url = final_url?;
+    let host = |address: &str| {
+        let parsed = Url::parse(address).ok()?;
+        let host = parsed.host_str()?;
+        Some(host.trim_start_matches("www.").to_string())
+    };
+    match (host(url), host(&final_url)) {
+        (Some(from), Some(to)) if from != to => Some(final_url),
+        _ => None,
+    }
 }
 
 /// Added after "HTTP 403" when ref used its own user agent
@@ -429,11 +404,7 @@ pub(crate) fn parse_page(html: &str, url: &str, options: &FetchOptions) -> Page 
     let mut truncated = extracted.truncated;
 
     // Extract links (content only, not nav)
-    let (links, links_capped) = if raw {
-        extract_all_links(&doc, url)
-    } else {
-        extract_content_links(&content_doc, url)
-    };
+    let (links, links_capped) = extract_content_links(if raw { &doc } else { &content_doc }, url);
     if links_capped {
         alerts.push(format!("Links limited to the first {MAX_LINKS}"));
     }
@@ -519,14 +490,12 @@ fn extract_doi(doc: &Html) -> Option<String> {
         }
     }
     // Check for DOI links
-    if let Ok(sel) = Selector::parse("a[href*='doi.org']") {
-        if let Some(el) = doc.select(&sel).next() {
-            if let Some(href) = el.value().attr("href") {
-                return Some(href.to_string());
-            }
-        }
-    }
-    None
+    select_attr(doc, "a[href*='doi.org']", "href")
+}
+
+/// A selector written in this file, which always parses
+fn selector(css: &str) -> Selector {
+    Selector::parse(css).expect("constant selector")
 }
 
 fn detect_status(html: &str) -> PageStatus {
@@ -551,22 +520,17 @@ pub(crate) fn extract_main_content(doc: &Html) -> String {
     ];
 
     for sel_str in selectors {
-        if let Ok(sel) = Selector::parse(sel_str) {
-            if let Some(el) = doc.select(&sel).next() {
-                return el.html();
-            }
+        if let Some(el) = doc.select(&selector(sel_str)).next() {
+            return el.html();
         }
     }
 
     // Fallback: the whole body; page chrome (nav, header, footer, aside,
     // forms) is skipped later by content::extract_sections
-    if let Ok(body_sel) = Selector::parse("body") {
-        if let Some(body) = doc.select(&body_sel).next() {
-            return body.html();
-        }
-    }
-
-    doc.html()
+    doc.select(&selector("body"))
+        .next()
+        .map(|body| body.html())
+        .unwrap_or_default()
 }
 
 /// Content links, deduplicated; the flag is true when more than [`MAX_LINKS`] were found
@@ -575,51 +539,44 @@ fn extract_content_links(doc: &Html, base_url: &str) -> (Vec<Link>, bool) {
     let mut seen = HashSet::new();
     let base = Url::parse(base_url).ok();
 
-    if let Ok(sel) = Selector::parse("a[href]") {
-        for el in doc.select(&sel) {
-            let text: String = el.text().collect::<String>().trim().to_string();
-            let href = el.value().attr("href").unwrap_or("");
+    for el in doc.select(&selector("a[href]")) {
+        let text: String = el.text().collect::<String>().trim().to_string();
+        let href = el.value().attr("href").unwrap_or("");
 
-            // Skip empty, anchor-only, or javascript links
-            if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") {
-                continue;
-            }
-
-            // Skip short link text (likely nav)
-            if text.len() < 3 {
-                continue;
-            }
-
-            // Resolve relative URLs
-            let full_url = if let Some(ref base) = base {
-                base.join(href)
-                    .map_or_else(|_| href.to_string(), |u| u.to_string())
-            } else {
-                href.to_string()
-            };
-
-            // Dedupe
-            if seen.contains(&full_url) {
-                continue;
-            }
-            seen.insert(full_url.clone());
-
-            if links.len() == MAX_LINKS {
-                return (links, true);
-            }
-            links.push(Link {
-                text: truncate(&text, 100),
-                url: full_url,
-            });
+        // Skip empty, anchor-only, or javascript links
+        if href.is_empty() || href.starts_with('#') || href.starts_with("javascript:") {
+            continue;
         }
+
+        // Skip short link text (likely nav)
+        if text.len() < 3 {
+            continue;
+        }
+
+        // Resolve relative URLs
+        let full_url = if let Some(ref base) = base {
+            base.join(href)
+                .map_or_else(|_| href.to_string(), |u| u.to_string())
+        } else {
+            href.to_string()
+        };
+
+        // Dedupe
+        if seen.contains(&full_url) {
+            continue;
+        }
+        seen.insert(full_url.clone());
+
+        if links.len() == MAX_LINKS {
+            return (links, true);
+        }
+        links.push(Link {
+            text: truncate(&text, 100),
+            url: full_url,
+        });
     }
 
     (links, false)
-}
-
-fn extract_all_links(doc: &Html, base_url: &str) -> (Vec<Link>, bool) {
-    // In raw mode, extract all links
-    extract_content_links(doc, base_url)
 }
 
 /// Maximum code blocks returned per page
@@ -634,10 +591,7 @@ fn extract_code_blocks(doc: &Html) -> (Vec<CodeBlock>, bool) {
 
     // Look for <pre><code> blocks first (more specific), then <pre>
     for selector_str in ["pre code", "pre"] {
-        let Ok(sel) = Selector::parse(selector_str) else {
-            continue;
-        };
-        for el in doc.select(&sel) {
+        for el in doc.select(&selector(selector_str)) {
             let source: String = el.text().collect::<String>().trim().to_string();
             if source.is_empty() || source.len() < 10 {
                 continue;
@@ -698,6 +652,242 @@ mod tests {
     use crate::test_server::{all_content, fetch, fetch_with_profile, ref_cmd, serve};
     use crate::text::floor_char_boundary;
     use std::process::ExitCode;
+
+    #[test]
+    fn only_another_host_is_a_redirect() {
+        let go = |from: &str, to: Option<&str>| redirect_target(from, to.map(String::from));
+        let to = Some("https://other.example/x");
+        assert_eq!(go("https://a.example/x", to).as_deref(), to);
+        assert_eq!(go("https://a.example/x", Some("https://a.example/y")), None);
+        // www. does not count, either way round
+        assert_eq!(
+            go("https://www.a.example/", Some("https://a.example/")),
+            None
+        );
+        assert_eq!(
+            go("https://a.example/", Some("https://www.a.example/")),
+            None
+        );
+        // No final address, or an address without a host
+        assert_eq!(go("https://a.example/", None), None);
+        assert_eq!(go("https://a.example/", Some("about:blank")), None);
+        assert_eq!(go("not an address", to), None);
+    }
+
+    #[test]
+    fn tiny_code_snippets_are_not_code_blocks() {
+        let page = parsed(
+            "<html><body><main><p>Text.</p><pre>x = 1</pre><pre>   </pre></main></body></html>",
+        );
+        assert!(page.code.is_empty(), "{:?}", page.code);
+    }
+
+    #[test]
+    fn at_most_twenty_code_blocks_are_kept_and_the_page_says_so() {
+        let mut blocks = String::new();
+        for i in 0..25 {
+            std::fmt::Write::write_fmt(
+                &mut blocks,
+                format_args!("<pre><code>let value_{i} = {i};</code></pre>"),
+            )
+            .unwrap();
+        }
+        let page = parsed(&format!(
+            "<html><body><main><p>Text.</p>{blocks}</main></body></html>"
+        ));
+        assert_eq!(page.code.len(), MAX_CODE_BLOCKS);
+        assert!(page.truncated);
+    }
+
+    fn parsed(html: &str) -> Page {
+        parse_page(
+            html,
+            "https://site.example/dir/page",
+            &FetchOptions::default(),
+        )
+    }
+
+    #[test]
+    fn links_are_resolved_deduplicated_and_the_noise_skipped() {
+        let page = parsed(
+            "<html><body><main><h1>T</h1><p>Text.</p>\
+             <a href='/docs/a'>Docs page</a><a href='/docs/a'>Docs page again</a>\
+             <a href='#top'>To the top</a><a href='javascript:x()'>Run script</a>\
+             <a href=''>Nothing at all</a><a href='/b'>go</a>\
+             <a href='http://[bad'>Broken address</a></main></body></html>",
+        );
+        let urls: Vec<_> = page.links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(urls, ["https://site.example/docs/a", "http://[bad"]);
+    }
+
+    #[test]
+    fn links_without_a_usable_page_address_stay_as_written() {
+        let page = parse_page(
+            "<html><body><main><p>Text.</p><a href='/x'>Relative link</a></main></body></html>",
+            "not an address",
+            &FetchOptions::default(),
+        );
+        assert_eq!(page.links[0].url, "/x");
+    }
+
+    #[test]
+    fn only_the_first_links_are_kept_and_the_page_says_so() {
+        let mut many = String::new();
+        for i in 0..60 {
+            std::fmt::Write::write_fmt(
+                &mut many,
+                format_args!("<a href='/p{i}'>Page number {i}</a>"),
+            )
+            .unwrap();
+        }
+        let page = parsed(&format!(
+            "<html><body><main><p>Text.</p>{many}</main></body></html>"
+        ));
+        assert_eq!(page.links.len(), MAX_LINKS);
+        assert!(
+            page.alerts.iter().any(|a| a.contains("Links limited")),
+            "{:?}",
+            page.alerts
+        );
+    }
+
+    #[test]
+    fn raw_keeps_the_links_of_the_whole_page() {
+        let html = "<html><body><nav><a href='/menu'>Menu entry</a></nav><main><p>Text.</p></main></body></html>";
+        let raw = FetchOptions {
+            raw: true,
+            ..FetchOptions::default()
+        };
+        let page = parse_page(html, "https://site.example/", &raw);
+        assert!(page.links.iter().any(|l| l.url.ends_with("/menu")));
+        assert!(parsed(html).links.is_empty());
+    }
+
+    #[test]
+    fn walls_are_named_in_the_alerts() {
+        let walled = "<html><head><script type='application/ld+json'>{\"isAccessibleForFree\": false}</script></head><body><p>Subscribe.</p></body></html>";
+        let page = parsed(walled);
+        assert_eq!(page.status, PageStatus::Paywall);
+        assert!(page.alerts.contains(&"Paywall detected".to_string()));
+        let login = parsed(
+            "<html><body><h1>Sign in</h1><form><input type='password'></form></body></html>",
+        );
+        assert_eq!(login.status, PageStatus::Login);
+        assert!(login.alerts.contains(&"Login required".to_string()));
+    }
+
+    #[test]
+    fn a_selector_that_is_not_css_is_said_so() {
+        let options = FetchOptions {
+            selector: Some("<<<".into()),
+            ..FetchOptions::default()
+        };
+        let page = parse_page(
+            "<html><body><p>Some text here.</p></body></html>",
+            "https://a.example/",
+            &options,
+        );
+        assert!(
+            page.alerts.iter().any(|a| a.contains("is not valid CSS")),
+            "{:?}",
+            page.alerts
+        );
+        assert!(!page.sections.is_empty());
+    }
+
+    #[test]
+    fn the_doi_comes_from_the_best_place_it_is_given() {
+        let doi = |head: &str, body: &str| {
+            parsed(&format!(
+                "<html><head>{head}</head><body>{body}</body></html>"
+            ))
+            .doi
+        };
+        assert_eq!(
+            doi("<meta name='citation_doi' content='10.1/x'>", "").as_deref(),
+            Some("10.1/x")
+        );
+        assert_eq!(
+            doi("<meta name='DC.identifier' content='10.2/y'>", "").as_deref(),
+            Some("10.2/y")
+        );
+        assert_eq!(
+            doi(
+                "<meta name='DC.identifier' content='https://doi.org/10.3/z'>",
+                ""
+            )
+            .as_deref(),
+            Some("https://doi.org/10.3/z")
+        );
+        // An identifier that is not a DOI is ignored
+        assert_eq!(
+            doi("<meta name='DC.identifier' content='isbn:123'>", ""),
+            None
+        );
+        let link = doi("", "<a href='https://doi.org/10.4/w'>the paper</a>");
+        assert_eq!(link.as_deref(), Some("https://doi.org/10.4/w"));
+        assert_eq!(doi("", "<p>none</p>"), None);
+    }
+
+    #[tokio::test]
+    async fn several_urls_give_one_json_line_each() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (a, b) = (format!("{base}/report"), format!("{base}/fortune"));
+        let (code, out, _) = ref_cmd(&["fetch", "--profile", "fresh", &a, &b]).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        let pages: Vec<serde_json::Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(pages.len(), 2, "{out}");
+        assert!(pages.iter().all(|p| p["status"] == "ok"));
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_another_host_is_a_redirect_page() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (code, page) = fetch(&[&format!("{base}/cross-host")]).await;
+        assert_eq!(page["status"], "redirect", "{page}");
+        assert!(
+            page["alerts"]
+                .to_string()
+                .contains("Redirected to: http://localhost:"),
+            "{page}"
+        );
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[tokio::test]
+    async fn a_cookie_file_that_cannot_be_read_or_parsed_is_an_error() {
+        let (code, _, err) = ref_cmd(&[
+            "fetch",
+            "--profile",
+            "fresh",
+            "--cookies",
+            "/no/such/jar.txt",
+            "http://127.0.0.1:9/",
+        ])
+        .await;
+        assert_eq!(code, ExitCode::from(2));
+        assert!(err.contains("Failed to read cookie file"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("jar.txt");
+        std::fs::write(&jar, "not\ta\tcookie\tline\n").unwrap();
+        let line = [
+            "fetch",
+            "--profile",
+            "fresh",
+            "--cookies",
+            jar.to_str().unwrap(),
+            "http://127.0.0.1:9/",
+        ];
+        let (code, _, err) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(2));
+        assert!(err.contains("jar.txt"), "{err}");
+    }
 
     #[tokio::test]
     async fn http_404_is_dead_and_exits_1() {
@@ -1076,21 +1266,18 @@ mod tests {
         ";
         let page = parse_page(html, "https://test.com", &FetchOptions::default());
         assert!(!page.sections.is_empty(), "should have sections");
-        // Find Alpha section
-        let alpha = page.sections.iter().find(|s| s.heading == "Alpha");
-        assert!(alpha.is_some(), "should have Alpha section");
+        let section = |name: &str| page.sections.iter().find(|s| s.heading == name);
+        let alpha = section("Alpha").expect("should have Alpha section");
         assert!(
-            alpha.unwrap().content.contains("Content under alpha"),
-            "Alpha section should contain its own paragraph, got: {:?}",
-            alpha.unwrap().content
+            alpha.content.contains("Content under alpha"),
+            "{}",
+            alpha.content
         );
-        // Find Beta section
-        let beta = page.sections.iter().find(|s| s.heading == "Beta");
-        assert!(beta.is_some(), "should have Beta section");
+        let beta = section("Beta").expect("should have Beta section");
         assert!(
-            beta.unwrap().content.contains("Content under beta"),
-            "Beta section should contain its own paragraph, got: {:?}",
-            beta.unwrap().content
+            beta.content.contains("Content under beta"),
+            "{}",
+            beta.content
         );
     }
 

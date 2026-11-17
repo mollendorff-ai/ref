@@ -4,7 +4,7 @@
 //! Numbers are taken from the page's main content (the same content `fetch`
 //! returns), so ads and navigation do not leak in.
 
-use crate::browser::{page_failure, BrowserPage, BrowserPool};
+use crate::browser::{page_failure, BrowserPage, BrowserPool, PageResult};
 use crate::content;
 use crate::extract::{extract_amounts, extract_percentages, extract_urls, AmountMatch};
 use crate::fetch::extract_main_content;
@@ -157,8 +157,7 @@ pub async fn refresh_data_with(
             }
         })
         .await;
-        let internal = |e| Ok(failure(url, None, format!("Internal error in ref: {e}")));
-        results.push(result.unwrap_or_else(internal)?);
+        results.push(settled(result, url)?);
     }
 
     let ok = results.iter().filter(|r| r.success).count();
@@ -191,20 +190,46 @@ async fn extract_from_page(
     if let Err(e) = crate::guard::check_web_url(url) {
         return Ok(failure(url, None, e));
     }
-    let nav = match page_failure(page.goto(url, timeout_ms).await)? {
-        Ok(nav) => nav,
-        Err(e) => return Ok(failure(url, None, e)),
-    };
+    let nav = page_failure(page.goto(url, timeout_ms).await)?.unwrap_or_else(PageResult::failed);
     if let Some(error) = nav.error {
         return Ok(failure(url, nav.status, error));
     }
     if let Some(code) = nav.status.filter(|c| *c >= 400) {
         return Ok(failure(url, Some(code), format!("HTTP {code}")));
     }
-    Ok(match page_failure(page.content().await)? {
-        Ok(html) => extract_numbers(url, nav.status, &html),
-        Err(e) => failure(url, nav.status, e),
-    })
+    Ok(extracted(
+        page_failure(page.content().await)?,
+        url,
+        nav.status,
+    ))
+}
+
+/// The numbers of a page that was read, or that URL's failure when it could not be
+fn extracted(
+    content: std::result::Result<String, String>,
+    url: &str,
+    http: Option<u16>,
+) -> ExtractedData {
+    match content {
+        Ok(html) => extract_numbers(url, http, &html),
+        Err(e) => failure(url, http, e),
+    }
+}
+
+/// The outcome of an extraction run on its own task; a panic in it is that
+/// URL's failure and the run goes on
+fn settled(
+    result: std::result::Result<Result<ExtractedData>, String>,
+    url: &str,
+) -> Result<ExtractedData> {
+    match result {
+        Ok(outcome) => outcome,
+        Err(panic) => Ok(failure(
+            url,
+            None,
+            format!("Internal error in ref: {panic}"),
+        )),
+    }
 }
 
 /// Amounts and percentages from the main content of a rendered page
@@ -235,6 +260,97 @@ fn extract_numbers(url: &str, http: Option<u16>, html: &str) -> ExtractedData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{ref_cmd, serve};
+    use std::process::ExitCode;
+
+    #[tokio::test]
+    async fn numbers_come_from_every_page_of_a_file_and_failures_stay_with_their_url() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("urls.md");
+        std::fs::write(
+            &file,
+            format!("{base}/report\n{base}/missing\n{base}/late\n"),
+        )
+        .unwrap();
+        let line = ["refresh-data", "--profile", "fresh", file.to_str().unwrap()];
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(1), "{out}");
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let results = report["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3, "{out}");
+        assert_eq!(results[0]["success"], true);
+        assert!(
+            results[0]["percentages"].to_string().contains("12%"),
+            "{out}"
+        );
+        assert_eq!(results[1]["error"], "HTTP 404", "{out}");
+        assert_eq!(results[2]["success"], true, "{out}");
+        assert_eq!(report["ok"], 2);
+        assert_eq!(report["failed"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_page_that_cannot_be_reached_is_that_urls_failure() {
+        // Needs Chrome (ADR-004)
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let url = format!("http://127.0.0.1:{port}/");
+        let line = ["refresh-data", "--profile", "fresh", "--url", &url];
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(1));
+        assert!(out.contains("CONNECTION_REFUSED"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn an_address_that_is_not_a_web_page_is_that_urls_failure() {
+        let line = [
+            "refresh-data",
+            "--profile",
+            "fresh",
+            "--url",
+            "file:///etc/hostname",
+        ];
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(1));
+        assert!(out.contains("Only http and https"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_is_an_error() {
+        let (code, _, err) = ref_cmd(&["refresh-data", "/no/such/urls.md"]).await;
+        assert_eq!(code, ExitCode::from(2));
+        assert!(err.contains("Failed to read file"), "{err}");
+    }
+
+    #[test]
+    fn a_page_that_could_not_be_read_and_a_panic_are_failures_of_their_url() {
+        let read = extracted(Err("tab closed".into()), "https://a.example/", Some(200));
+        assert_eq!((read.success, read.http), (false, Some(200)));
+        assert_eq!(read.error.as_deref(), Some("tab closed"));
+        let html = "<html><body><p>Revenue rose 12% to $5 million.</p></body></html>";
+        assert!(extracted(Ok(html.into()), "https://a.example/", Some(200)).success);
+
+        let ok = failure("https://b.example/", None, "x".into());
+        assert_eq!(
+            settled(Ok(Ok(ok)), "https://b.example/")
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("x")
+        );
+        let panicked = settled(Err("boom".into()), "https://c.example/").unwrap();
+        assert_eq!(
+            panicked.error.as_deref(),
+            Some("Internal error in ref: boom")
+        );
+        let chrome = anyhow::Error::new(crate::browser::ChromeFailed("gone".into()));
+        assert!(settled(Ok(Err(chrome)), "https://d.example/").is_err());
+    }
 
     #[tokio::test]
     async fn a_tab_chrome_refuses_is_that_urls_failure() {

@@ -5,6 +5,7 @@
 //! mentioning paywalls flagged as walled.
 
 use serde_json::Value;
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
@@ -35,6 +36,13 @@ fn handle(mut stream: TcpStream) {
         line.clear();
     }
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+    let is_pdf = std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    if is_pdf && path != "/signed-in.pdf" {
+        serve_pdf(path, &mut stream);
+        return;
+    }
     if path == "/cross-host" {
         // Like a site that moves to another host name: same server, other name
         let port = headers
@@ -120,6 +128,60 @@ fn handle(mut stream: TcpStream) {
     let _ = stream.write_all(body.as_bytes());
 }
 
+/// PDF downloads that go wrong in the ways real servers do
+fn serve_pdf(path: &str, stream: &mut TcpStream) {
+    let pdf: &[u8] = include_bytes!("../tests/fixtures/report.pdf");
+    let head = |extra: &str, length: usize| {
+        format!("HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n{extra}Content-Length: {length}\r\nConnection: close\r\n\r\n")
+    };
+    match path {
+        // Answers, but only after a pause: longer than a short download limit
+        "/slow.pdf" => {
+            thread::sleep(std::time::Duration::from_secs(2));
+            let _ = stream.write_all(head("", pdf.len()).as_bytes());
+            let _ = stream.write_all(pdf);
+        }
+        // Promises 1,500 bytes (under the size limit), sends 10, then stalls
+        "/stall.pdf" => {
+            let _ = stream.write_all(head("", 1500).as_bytes());
+            let _ = stream.write_all(&pdf[..10]);
+            let _ = stream.flush();
+            thread::sleep(std::time::Duration::from_secs(3));
+        }
+        // Says up front that it is huge
+        "/big.pdf" => {
+            let _ = stream.write_all(head("", 99_999_999).as_bytes());
+        }
+        // No length up front: only the bytes themselves show it is huge
+        "/chunked.pdf" => {
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+            for _ in 0..3 {
+                let _ = stream.write_all(b"3e8\r\n");
+                let _ = stream.write_all(&[b'x'; 1000]);
+                let _ = stream.write_all(b"\r\n");
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        }
+        // Not a PDF at all
+        "/text.pdf" => {
+            let body = b"plain text, not a pdf";
+            let _ = stream.write_all(head("", body.len()).as_bytes());
+            let _ = stream.write_all(body);
+        }
+        // Cuts the connection in the middle of the body
+        "/cut.pdf" => {
+            let _ = stream.write_all(head("", pdf.len() + 50).as_bytes());
+            let _ = stream.write_all(pdf);
+        }
+        _ => {
+            let _ = stream.write_all(head("", pdf.len()).as_bytes());
+            let _ = stream.write_all(pdf);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)] // one flat table of test pages
 fn route(path: &str) -> (&'static str, String, String) {
     let page = |title: &str, body: &str| {
@@ -187,6 +249,14 @@ fn route(path: &str) -> (&'static str, String, String) {
                 "<form id='aspnetForm' method='post'><h1>Annual report</h1><p>Revenue rose this year.</p><input type='hidden' name='v'></form>",
             ),
         ),
+        "/walled" => (
+            "200 OK",
+            String::new(),
+            "<!doctype html><html><head><title>Members</title>\
+             <script type='application/ld+json'>{\"isAccessibleForFree\": false}</script>\
+             </head><body><p>Subscribe to read.</p></body></html>"
+                .to_string(),
+        ),
         "/empty" => ("200 OK", String::new(), page("Empty", "<div id='app'></div>")),
         "/no-paywall" => (
             "200 OK",
@@ -224,6 +294,58 @@ fn route(path: &str) -> (&'static str, String, String) {
         "/broken" => ("500 Internal Server Error", String::new(), page("Oops", "<p>Server error page.</p>")),
         _ => ("404 Not Found", String::new(), page("Not found", "<p>Nothing here.</p>")),
     }
+}
+
+/// A one-page PDF with `lines` of text, one under the other (none: a page
+/// without text)
+pub(crate) fn pdf_with_lines(lines: &[&str]) -> Vec<u8> {
+    let mut y = 780.0;
+    let placed: Vec<(f32, f32, &str)> = lines
+        .iter()
+        .map(|line| {
+            y -= 12.0;
+            (20.0, y, *line)
+        })
+        .collect();
+    pdf_with_text(&placed)
+}
+
+/// A one-page PDF with each text drawn at its own (x, y)
+pub(crate) fn pdf_with_text(items: &[(f32, f32, &str)]) -> Vec<u8> {
+    let mut content = String::from("BT /F1 10 Tf\n");
+    for (x, y, text) in items {
+        let text = text
+            .replace('\\', "\\\\")
+            .replace('(', "\\(")
+            .replace(')', "\\)");
+        writeln!(content, "1 0 0 1 {x} {y} Tm ({text}) Tj").unwrap();
+    }
+    content.push_str("ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_string(),
+    ];
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        write!(pdf, "{} 0 obj\n{object}\nendobj\n", i + 1).unwrap();
+    }
+    let xref = pdf.len();
+    let count = objects.len() + 1;
+    write!(pdf, "xref\n0 {count}\n0000000000 65535 f \n").unwrap();
+    for offset in offsets {
+        writeln!(pdf, "{offset:010} 00000 n ").unwrap();
+    }
+    write!(
+        pdf,
+        "trailer\n<< /Size {count} /Root 1 0 R /ID [<00112233445566778899aabbccddeeff> <00112233445566778899aabbccddeeff>] >>\nstartxref\n{xref}\n%%EOF\n"
+    )
+    .unwrap();
+    pdf.into_bytes()
 }
 
 /// Run `ref <args>` in-process with no standard input:

@@ -241,21 +241,6 @@ pub async fn check_links_with(
     })
 }
 
-/// Where `url` ended up, when that is another host (`www.` does not count);
-/// `None` for the same host, or when either address has no host
-fn redirect_target(url: &str, final_url: Option<String>) -> Option<String> {
-    let final_url = final_url?;
-    let host = |address: &str| {
-        let parsed = url::Url::parse(address).ok()?;
-        let host = parsed.host_str()?;
-        Some(host.trim_start_matches("www.").to_string())
-    };
-    match (host(url), host(&final_url)) {
-        (Some(from), Some(to)) if from != to => Some(final_url),
-        _ => None,
-    }
-}
-
 /// Check one link; `Err` only for a Chrome failure
 async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> Result<LinkResult> {
     eprintln!("  -> {}", truncate(url, 60));
@@ -288,7 +273,7 @@ async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> 
     // Determine if redirect (check final URL)
     let status = result.status.unwrap_or(0);
     let redirect_to = if (200..400).contains(&status) {
-        redirect_target(url, page.current_url().await?)
+        crate::fetch::redirect_target(url, page.current_url().await?)
     } else {
         None
     };
@@ -329,26 +314,6 @@ mod tests {
         assert!(failed.unwrap_err().is::<crate::browser::ChromeFailed>());
     }
 
-    #[test]
-    fn only_another_host_is_a_redirect() {
-        let go = |from: &str, to: Option<&str>| redirect_target(from, to.map(String::from));
-        let to = Some("https://other.example/x");
-        assert_eq!(go("https://a.example/x", to).as_deref(), to);
-        assert_eq!(go("https://a.example/x", Some("https://a.example/y")), None);
-        // www. does not count, either way round
-        assert_eq!(
-            go("https://www.a.example/", Some("https://a.example/")),
-            None
-        );
-        assert_eq!(
-            go("https://a.example/", Some("https://www.a.example/")),
-            None
-        );
-        // No final address, or an address without a host
-        assert_eq!(go("https://a.example/", None), None);
-        assert_eq!(go("https://a.example/", Some("about:blank")), None);
-        assert_eq!(go("not an address", to), None);
-    }
     use crate::test_server::{ref_cmd, ref_cmd_with_input, serve};
     use std::process::ExitCode;
 
