@@ -599,11 +599,18 @@ pub(crate) mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            for (n, stream) in listener.incoming().flatten().enumerate() {
+            let mut visits = 0;
+            for stream in listener.incoming().flatten() {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
+                let (mut first, mut line) = (String::new(), String::new());
+                let _ = reader.read_line(&mut first);
                 while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
                     line.clear();
+                }
+                // Only the page counts: Chrome may also ask for /favicon.ico
+                let n = visits;
+                if first.contains("/page") {
+                    visits += 1;
                 }
                 let body = format!("<html><body><p>visit {n}</p></body></html>");
                 let head = format!(
@@ -631,7 +638,6 @@ pub(crate) mod tests {
             seen.push(page.content().await.unwrap());
         }
         pool.close().await;
-        // Chrome may also ask for /favicon.ico, which counts as a visit too
         assert!(seen[0].contains("visit 0"), "{}", seen[0]);
         assert!(
             !seen[1].contains("visit 0"),
