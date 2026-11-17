@@ -41,6 +41,20 @@ upcoming:
       - "ref_check_links, ref_refresh_data and ref_verify_refs reuse the server's shared browser instead of starting a second Chrome on the same profile"
       - "The lock error names the real holder (here the MCP server's own Chrome), not only ref login"
       - "Test with a saved profile: ref_fetch, then each other browser tool, all succeed"
+  - summary: "Chrome lifecycle: implement ADR-005 in one pass"
+    goal: "CHROME_LIFECYCLE"
+    source: "Third review on 2026-11-17 (range 8b9cd7c..18a7b16): ten findings, all in how ref handles a Chrome that crashes or hangs; ADR-005 replaces patching"
+    deliverables:
+      - "ADR-005 accepted by the maintainer (it is Proposed)"
+      - "Rule 1: the pool records its Chrome's process id at start and signals nothing else; remove stop_chrome (kill by lock file)"
+      - "Rule 2: is_alive with a 5 s limit"
+      - "Rule 3: typed ChromeFailed error, failed pools stay failed, a Chrome failure ends the command (exit 2, MCP tool error); verify-refs never writes after one, also mid-navigation"
+      - "Rule 4: stop through &self (browser handle behind a read-write lock): ask, wait 30 s after an acknowledged close, then kill; collect the process; remove close_shared, is_zombie and the unconditional kill after 5 s"
+      - "Rule 5: the MCP server replaces a failed Chrome between calls"
+      - "Rule 6: one helper and one table of time limits; one 30 s budget for a tab's set-up and one for a page's reads; a tab is closed whichever way set-up ends"
+      - "Rule 7: task::isolated cancels its task when the caller stops waiting"
+      - "The seven tests in the ADR, with a real Chrome frozen (SIGSTOP) or killed; one kill_process helper"
+      - "README, MCP guide and CHANGELOG say what a Chrome failure does"
   - summary: "Content detection on GitHub pages"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
@@ -64,6 +78,8 @@ upcoming:
     goal: "MACOS_CHECK"
     deliverables:
       - "ref update, ref login, sign in to sites, quit Chrome with Cmd-Q, then check that a signed-in page fetches"
+      - "After CHROME_LIFECYCLE (ADR-005, untested on macOS): with ref mcp running on the saved profile, kill ref's Chrome and make another call; it should start a new Chrome and succeed"
+      - "After CHROME_LIFECYCLE: after such a crash, run ref login, then make an MCP call; the login window must stay open and the call must say the profile is in use"
 
 backlog:
   - summary: "Reference management"
