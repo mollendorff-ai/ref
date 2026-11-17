@@ -6,6 +6,9 @@ All notable changes to Möllendorff Ref.
 
 ### Added
 
+- **`user_agent` on the MCP tools `ref_fetch` and `ref_check_links`**: the same as `--user-agent`, for that call only.
+  Calls sharing the server's Chrome each send their own; a call without one sends Chrome's.
+  The user agent now belongs to each tab, not to the browser, and `--user-agent` uses the same path; an invalid one is refused before Chrome starts.
 - **`--profile <folder|fresh>`** on `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and `ref mcp`: chooses the Chrome profile for that run.
   Without it, `REF_CHROME_PROFILE` gives the value, as before.
 

@@ -102,11 +102,11 @@ upcoming:
       - "Done 2026-11-17. ref fetch of a page that is a PDF downloads it with the cookies Chrome has for that address (BrowserPage::cookie_header, Network.getCookies through Chrome::ask and the page's read budget); the --cookies file is the fallback when Chrome cannot say, and a Chrome failure still ends the command (ADR-005 rule 3)"
       - "Decided 2026-11-17: ref pdf stays without Chrome (it works where Chrome is not installed, as the README's requirements say); ref fetch is the command for signed-in PDFs, and the README and MCP guide say so"
       - "Done 2026-11-17. Test: sign in at /pdf-sign-in with a saved profile, then /signed-in.pdf is ok (it was dead before); it fails without the fix"
-  - summary: "--user-agent in the MCP server"
+  - summary: "--user-agent in the MCP server (done 2026-11-17, Unreleased)"
     goal: "MCP_USER_AGENT"
     deliverables:
-      - "user_agent parameter on ref_fetch and ref_check_links (src/mcp.rs passes None today)"
-      - "Try --user-agent against sec.gov (www.sec.gov is allowed in the cloud environment)"
+      - "Done 2026-11-17. user_agent parameter on ref_fetch and ref_check_links. The agent travels with each request (FetchOptions, check_links_with, BrowserPool::new_page_as, download_headers), so calls sharing the server's Chrome each send their own; set_user_agent on the pool is gone and --user-agent uses the same path"
+      - "Not done: try --user-agent against sec.gov. On 2026-11-17 the session's network refused www.sec.gov (proxy: tunnel failed); the test server's /needs-declared-agent stands in for it in the tests"
   - summary: "macOS check (manual, on Luis's Mac)"
     goal: "MACOS_CHECK"
     deliverables:

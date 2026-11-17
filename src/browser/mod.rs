@@ -208,7 +208,6 @@ pub struct BrowserPool {
     pub(crate) profile: Profile,
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
-    custom_user_agent: bool,
     /// While the pool lives, the final clean-up leaves its fresh profile alone
     _owner: Arc<()>,
 }
@@ -327,26 +326,8 @@ impl BrowserPool {
             profile: chosen,
             cookies: Vec::new(),
             cookie_jar: Vec::new(),
-            custom_user_agent: false,
             _owner: owner,
         })
-    }
-
-    /// Use this user agent, exactly as given, for every page and every download
-    /// from now on. It replaces Chrome's own label with ref's name added.
-    ///
-    /// # Errors
-    /// Returns an error if the text is empty or contains control characters.
-    pub fn set_user_agent(&mut self, user_agent: &str) -> Result<()> {
-        self.user_agent = validate_user_agent(user_agent)?;
-        self.custom_user_agent = true;
-        Ok(())
-    }
-
-    /// `true` when the user agent was set with [`set_user_agent`](Self::set_user_agent).
-    #[must_use]
-    pub const fn has_custom_user_agent(&self) -> bool {
-        self.custom_user_agent
     }
 
     /// Send these cookies with every page opened from now on.
@@ -356,11 +337,12 @@ impl BrowserPool {
     }
 
     /// Headers for a download outside Chrome that should look like the page
-    /// Chrome just loaded: the same user agent and the cookies that apply.
+    /// Chrome just loaded: the same user agent (`agent`, else the pool's own)
+    /// and the cookies of the cookie file that apply.
     #[must_use]
-    pub fn download_headers(&self, url: &str) -> DownloadHeaders {
+    pub fn download_headers(&self, url: &str, agent: Option<&str>) -> DownloadHeaders {
         DownloadHeaders {
-            user_agent: self.user_agent.clone(),
+            user_agent: agent.unwrap_or(&self.user_agent).to_string(),
             cookie: url::Url::parse(url)
                 .ok()
                 .and_then(|u| crate::cookies::header_for(&self.cookie_jar, &u)),
@@ -382,6 +364,18 @@ impl BrowserPool {
     /// Returns [`ChromeFailed`] when Chrome failed, or an error when the tab
     /// could not be set up (it is closed then).
     pub async fn new_page(&self) -> Result<BrowserPage> {
+        self.new_page_as(None).await
+    }
+
+    /// [`new_page`](Self::new_page) with this user agent instead of the pool's
+    /// own: a request's `--user-agent`, or an MCP call's `user_agent`. The agent
+    /// belongs to the tab, so calls sharing one browser can each declare theirs.
+    /// It must have passed [`validate_user_agent`].
+    ///
+    /// # Errors
+    /// Returns [`ChromeFailed`] when Chrome failed, or an error when the tab
+    /// could not be set up (it is closed then).
+    pub async fn new_page_as(&self, agent: Option<&str>) -> Result<BrowserPage> {
         // A failed pool fails at once, also when every tab slot is taken
         if self.chrome.has_failed() {
             return Err(Chrome::failure("opening a tab"));
@@ -403,7 +397,8 @@ impl BrowserPool {
         };
         // Closed before the error is returned, however set-up ends, so a
         // long-lived browser does not collect half-made tabs
-        if let Err(e) = self.set_up(&page, until).await {
+        let agent = agent.unwrap_or(&self.user_agent);
+        if let Err(e) = self.set_up(&page, until, agent).await {
             let _ = tokio::time::timeout(CLOSE_ACK_LIMIT, page.close()).await;
             return Err(e);
         }
@@ -415,11 +410,11 @@ impl BrowserPool {
         })
     }
 
-    async fn set_up(&self, page: &Page, until: tokio::time::Instant) -> Result<()> {
+    async fn set_up(&self, page: &Page, until: tokio::time::Instant, agent: &str) -> Result<()> {
         // Each step on one line: a `?` alone on its line counts as a line
         // missed whenever that step happens not to fail
         let chrome = &self.chrome;
-        let agent = page.execute(SetUserAgentOverrideParams::new(&self.user_agent));
+        let agent = page.execute(SetUserAgentOverrideParams::new(agent));
         chrome.ask(until, "setting the user agent", agent).await?;
 
         if !self.cookies.is_empty() {

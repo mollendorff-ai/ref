@@ -53,6 +53,9 @@ pub struct FetchParams {
     pub max_chars: Option<usize>,
     /// Maximum sections per page (default: 50, 0 = no limit)
     pub max_sections: Option<usize>,
+    /// User agent to send instead of Chrome's own, for pages and PDF downloads.
+    /// Some sites want a declared name and email (SEC EDGAR answers 403 without one).
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -71,6 +74,9 @@ pub struct CheckLinksParams {
     pub timeout: Option<u64>,
     /// Retry count on failure (default: 1)
     pub retries: Option<u8>,
+    /// User agent to send instead of Chrome's own.
+    /// Some sites want a declared name and email (SEC EDGAR answers 403 without one).
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -195,6 +201,12 @@ fn parallelism(
 }
 
 #[allow(clippy::needless_pass_by_value)] // used as map_err callback
+/// A `user_agent` parameter, checked before Chrome starts
+fn declared_agent(agent: Option<&str>) -> std::result::Result<Option<String>, ErrorData> {
+    let checked = agent.map(crate::browser::validate_user_agent).transpose();
+    checked.map_err(|e| invalid(format!("`user_agent`: {e}")))
+}
+
 fn invalid(msg: String) -> ErrorData {
     ErrorData::new(ErrorCode::INVALID_PARAMS, msg, None)
 }
@@ -244,6 +256,7 @@ impl RefMcpServer {
         Parameters(params): Parameters<FetchParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let parallel = parallelism(params.parallel, 4, "parallel")?;
+        let user_agent = declared_agent(params.user_agent.as_deref())?;
         let options = fetch::FetchOptions {
             timeout: params.timeout.unwrap_or(30_000),
             raw: params.raw.unwrap_or(false),
@@ -252,6 +265,7 @@ impl RefMcpServer {
             max_sections: params
                 .max_sections
                 .unwrap_or(crate::content::DEFAULT_MAX_SECTIONS),
+            user_agent,
         };
 
         // Nothing to fetch: answer without starting Chrome
@@ -308,6 +322,7 @@ impl RefMcpServer {
         Parameters(params): Parameters<CheckLinksParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let concurrency = parallelism(params.concurrency, 5, "concurrency")?;
+        let agent = declared_agent(params.user_agent.as_deref())?;
         let report = if params.urls.is_empty() {
             check_links::LinkReport::default()
         } else {
@@ -318,6 +333,7 @@ impl RefMcpServer {
                 concurrency,
                 params.timeout.unwrap_or(15000),
                 params.retries.unwrap_or(1),
+                agent.as_deref(),
             )
             .await
             .map_err(browser_err)?
@@ -690,6 +706,7 @@ mod tests {
                 selector: None,
                 max_chars: None,
                 max_sections: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -701,6 +718,7 @@ mod tests {
                 concurrency: None,
                 timeout: None,
                 retries: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -750,6 +768,7 @@ mod tests {
                 concurrency: None,
                 timeout: None,
                 retries: None,
+                user_agent: None,
             }))
             .await
             .unwrap_err();
@@ -775,6 +794,7 @@ mod tests {
             concurrency: None,
             timeout: Some(5000),
             retries: Some(0),
+            user_agent: None,
         };
 
         server.ref_check_links(Parameters(check())).await.unwrap();
@@ -790,6 +810,37 @@ mod tests {
         let second = server.pool.lock().await.clone().unwrap();
         assert!(!Arc::ptr_eq(&first, &second), "no new Chrome was started");
         assert!(second.is_alive().await);
+    }
+
+    #[tokio::test]
+    async fn each_call_declares_its_own_user_agent_on_the_shared_chrome() {
+        // Needs Chrome (ADR-004): /needs-declared-agent refuses an agent without an email
+        let url = format!("{}/needs-declared-agent", crate::test_server::serve());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = RefMcpServer::new(root, Some(ProfileChoice::Fresh));
+        let fetch = |agent: Option<&str>| FetchParams {
+            user_agent: agent.map(String::from),
+            ..fetch_params(vec![url.clone()], None)
+        };
+
+        let declared = server.ref_fetch(Parameters(fetch(Some("Jane jane@example.com"))));
+        let page = text(&declared.await.unwrap());
+        assert_eq!(page["http"], 200, "{page}");
+        // The agent was that call's: the next one, on the same Chrome, sends Chrome's own
+        let plain = text(&server.ref_fetch(Parameters(fetch(None))).await.unwrap());
+        assert_eq!(plain["http"], 403, "{plain}");
+
+        let check = CheckLinksParams {
+            urls: vec![url.clone()],
+            concurrency: None,
+            timeout: Some(5000),
+            retries: Some(0),
+            user_agent: Some("Jane jane@example.com".into()),
+        };
+        let report = text(&server.ref_check_links(Parameters(check)).await.unwrap());
+        assert_eq!(report["results"][0]["status"], 200, "{report}");
+        server.pool.lock().await.clone().unwrap().stop().await;
     }
 
     #[test]
@@ -818,6 +869,7 @@ mod tests {
             concurrency: None,
             timeout: Some(5000),
             retries: Some(0),
+            user_agent: None,
         };
         server.ref_check_links(Parameters(check)).await.unwrap();
         let pool = server.pool.lock().await.clone().unwrap();
@@ -845,6 +897,7 @@ mod tests {
             selector: None,
             max_chars: None,
             max_sections: None,
+            user_agent: None,
         };
 
         let site = crate::browser::tests::serve_cookie_jar();
@@ -905,6 +958,7 @@ mod tests {
                 selector: None,
                 max_chars: None,
                 max_sections: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -926,6 +980,7 @@ mod tests {
                 concurrency: None,
                 timeout: Some(5000),
                 retries: Some(0),
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -1005,6 +1060,7 @@ mod tests {
             selector: None,
             max_chars: None,
             max_sections: None,
+            user_agent: None,
         }
     }
 
@@ -1033,6 +1089,23 @@ mod tests {
             let expected = format!("`parallel` must be between 1 and 20 (got {parallel})");
             assert_eq!(err.message, expected);
         }
+
+        // A user agent that cannot go into a header
+        let mut bad_agent = fetch_params(url(), None);
+        bad_agent.user_agent = Some("a\r\nX-Evil: 1".into());
+        let err = server.ref_fetch(Parameters(bad_agent)).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.starts_with("`user_agent`:"), "{}", err.message);
+        let check = CheckLinksParams {
+            urls: url(),
+            concurrency: None,
+            timeout: None,
+            retries: None,
+            user_agent: Some("   ".into()),
+        };
+        let err = server.ref_check_links(Parameters(check)).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.starts_with("`user_agent`:"), "{}", err.message);
 
         let neither = refresh_params(None, None);
         let err = server

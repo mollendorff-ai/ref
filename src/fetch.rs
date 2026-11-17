@@ -4,7 +4,7 @@
 //! JSON compact output only. No YAML, no pretty printing.
 
 use crate::access::{self, Access};
-use crate::browser::BrowserPool;
+use crate::browser::{validate_user_agent, BrowserPool};
 pub use crate::content::Section;
 use crate::content::{self, DEFAULT_MAX_SECTIONS};
 use crate::text::{cut_at_word, truncate};
@@ -82,6 +82,9 @@ pub struct FetchOptions {
     pub max_chars: usize,
     /// Sections per page (0 = no limit)
     pub max_sections: usize,
+    /// User agent for this request's pages and downloads instead of the
+    /// browser's own; checked with [`validate_user_agent`] first
+    pub user_agent: Option<String>,
 }
 
 impl Default for FetchOptions {
@@ -92,6 +95,7 @@ impl Default for FetchOptions {
             selector: None,
             max_chars: DEFAULT_MAX_CHARS,
             max_sections: DEFAULT_MAX_SECTIONS,
+            user_agent: None,
         }
     }
 }
@@ -173,10 +177,13 @@ pub async fn run_fetch(args: FetchArgs, out: &mut dyn std::io::Write) -> Result<
         parallel
     );
 
+    // Checked before Chrome starts
+    let user_agent = args
+        .user_agent
+        .as_deref()
+        .map(validate_user_agent)
+        .transpose()?;
     let mut pool = BrowserPool::new(parallel, args.profile.choice()?.as_ref()).await?;
-    if let Some(ua) = &args.user_agent {
-        pool.set_user_agent(ua)?;
-    }
     if let Some(path) = &args.cookies {
         let text = tokio::fs::read_to_string(path)
             .await
@@ -192,6 +199,7 @@ pub async fn run_fetch(args: FetchArgs, out: &mut dyn std::io::Write) -> Result<
         selector: args.selector,
         max_chars: args.max_chars,
         max_sections: args.max_sections,
+        user_agent,
     });
 
     // Spawn parallel fetch tasks
@@ -256,7 +264,7 @@ pub(crate) async fn fetch_one(
 async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Result<Page> {
     crate::guard::check_web_url(url).map_err(|e| anyhow!(e))?;
 
-    let page = pool.new_page().await?;
+    let page = pool.new_page_as(options.user_agent.as_deref()).await?;
     let nav = page.goto(url, options.timeout).await?;
 
     if let Some(error) = nav.error {
@@ -273,7 +281,7 @@ async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Re
         // and any --cookies file), so a signed-in PDF downloads too
         let cookie = page.cookie_header(url).await?;
         drop(page);
-        let mut headers = pool.download_headers(url);
+        let mut headers = pool.download_headers(url, options.user_agent.as_deref());
         headers.cookie = cookie.or(headers.cookie);
         let mut pdf = crate::pdf::extract_pdf_from_url_with(url, &headers)
             .await
@@ -300,7 +308,7 @@ async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Re
     let html = page.content().await?;
     let mut parsed = parse_page(&html, url, options);
     apply_http_status(&mut parsed, nav.status);
-    if nav.status == Some(403) && !pool.has_custom_user_agent() {
+    if nav.status == Some(403) && options.user_agent.is_none() {
         parsed.alerts.insert(1, USER_AGENT_HINT.to_string());
     }
     Ok(parsed)

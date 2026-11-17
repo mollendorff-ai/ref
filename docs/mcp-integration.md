@@ -104,6 +104,7 @@ Each page reports `status`, `http` and, when content was cut, `"truncated": true
 | `selector` | string | - | CSS selector to extract a specific element, skipping content heuristics |
 | `max_chars` | number | 5000 | Characters per section before it is cut and marked truncated (0 = no limit) |
 | `max_sections` | number | 50 | Sections per page before the rest are dropped and the page is marked truncated (0 = no limit) |
+| `user_agent` | string | Chrome's own | User agent for this call's pages and PDF downloads; SEC EDGAR, for one, answers 403 without a name and email |
 
 ```json
 {
@@ -111,6 +112,9 @@ Each page reports `status`, `http` and, when content was cut, `"truncated": true
   "timeout": 15000
 }
 ```
+
+A `user_agent` belongs to its call: calls running at the same time on the server's one Chrome each send their own, and a call without one sends Chrome's.
+A `user_agent` that is empty or holds a line break is refused before Chrome starts.
 
 ### ref_pdf
 
@@ -136,6 +140,7 @@ Validate URL health using headless Chrome.
 | `concurrency` | number | 5 | Parallel tabs (1-20) |
 | `timeout` | number | 15000 | Timeout per URL in ms |
 | `retries` | number | 1 | Retry count on failure |
+| `user_agent` | string | Chrome's own | User agent for this call's pages |
 
 ```json
 {
