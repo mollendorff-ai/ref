@@ -79,7 +79,7 @@ upcoming:
     deliverables:
       - "The CI test-count badge reads about four too high: the profile.rs tests start child test runs, and their \"test result:\" lines are counted too"
       - "ref check-links --stdin at a terminal can swallow Ctrl-C while it waits for input (older than this branch)"
-      - "Clippy 1.100 (pedantic) flags code that 1.99.1, the version CI's lint job pins, accepts: src/cli.rs:139 (must_use with no message), src/test_server.rs:387 (map then unwrap_or_default; the one in fetch.rs went with main_content), src/scan.rs:395 and :449 and src/test_server.rs:410 (unused ExitCode in a tuple); fix them before moving the pin"
+      - "Clippy 1.100 (pedantic) flags code that 1.99.1, the version CI's lint job pins, accepts: src/cli.rs:139 (must_use with no message), src/test_server.rs:393 (map then unwrap_or_default; the one in fetch.rs went with main_content), src/scan.rs:395 and :449 and src/test_server.rs:416 (unused ExitCode in a tuple); fix them before moving the pin"
       - "CI's coverage job runs on the stable toolchain, which moves with each Rust release and changes which lines the gate counts (Rust 1.100 showed 8 untaken branches that 1.97 and 1.99.1 did not); run the gate on the same version CI uses, or pin it"
   - summary: "Content detection on GitHub pages (done 2026-11-17, Unreleased)"
     goal: "GITHUB_CONTENT"
@@ -95,13 +95,13 @@ upcoming:
       - "Done 2026-11-17. README: one line on sites' terms of service for signed-in browsing (Security)"
       - "Done 2026-11-17. README: ref pdf does not use the saved profile. The roadmap's claim that ref fetch of a PDF URL is signed in was wrong: tested on 2026-11-17, with a saved profile it fails with HTTP 403 (Chrome has the cookie, the download does not); only --cookies works. The sentence under First time, step 4, says so"
       - "Done 2026-11-17 for the repository: one description, \"Renders web pages and PDFs into compact JSON for LLM agents\" (README, Cargo.toml, CLAUDE.md, --help, MCP instructions, crate docs, project.yaml). Not done, outside the repository: the GitHub About says 'token-optimized JSON' and mollendorff.ai says 'clean JSON'"
-  - summary: "Signed-in PDFs with the saved profile"
+  - summary: "Signed-in PDFs with the saved profile (done 2026-11-17, Unreleased)"
     goal: "PDF_COOKIES"
     source: "Tested on 2026-11-17: sign in with a saved profile, then ref fetch a PDF URL that needs the cookie: HTTP 403, status dead; the same with --cookies works"
     deliverables:
-      - "ref fetch of a page that is a PDF downloads it with the cookies Chrome has for that address (read them from the page, Network.getCookies), not only the --cookies file; BrowserPool::download_headers builds the Cookie header from the cookie jar alone today"
-      - "ref pdf <url> has no profile or cookie option; decide whether it needs one, or whether ref fetch is the command for signed-in PDFs (then the README says so)"
-      - "A test with a PDF that needs a cookie the saved profile holds (the test server has /signed-in.pdf, which needs sid=letmein)"
+      - "Done 2026-11-17. ref fetch of a page that is a PDF downloads it with the cookies Chrome has for that address (BrowserPage::cookie_header, Network.getCookies through Chrome::ask and the page's read budget); the --cookies file is the fallback when Chrome cannot say, and a Chrome failure still ends the command (ADR-005 rule 3)"
+      - "Decided 2026-11-17: ref pdf stays without Chrome (it works where Chrome is not installed, as the README's requirements say); ref fetch is the command for signed-in PDFs, and the README and MCP guide say so"
+      - "Done 2026-11-17. Test: sign in at /pdf-sign-in with a saved profile, then /signed-in.pdf is ok (it was dead before); it fails without the fix"
   - summary: "--user-agent in the MCP server"
     goal: "MCP_USER_AGENT"
     deliverables:

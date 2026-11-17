@@ -290,6 +290,12 @@ fn route(path: &str) -> (&'static str, String, String) {
             "Set-Cookie: session=kept-between-runs; Max-Age=3600; Path=/\r\n".to_string(),
             page("Signed in", "<p>You are now signed in to this test site.</p>"),
         ),
+        // Signs in for /signed-in.pdf, like a members' area that hands out PDFs
+        "/pdf-sign-in" => (
+            "200 OK",
+            "Set-Cookie: sid=letmein; Max-Age=3600; Path=/\r\n".to_string(),
+            page("Signed in", "<p>You can now read the members' PDF.</p>"),
+        ),
         "/moved" => ("301 Moved Permanently", "Location: /report\r\n".to_string(), String::new()),
         "/broken" => ("500 Internal Server Error", String::new(), page("Oops", "<p>Server error page.</p>")),
         _ => ("404 Not Found", String::new(), page("Not found", "<p>Nothing here.</p>")),

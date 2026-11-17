@@ -144,8 +144,8 @@ ref reads them with your own sessions, which you set up once in a normal Chrome 
    Chrome writes cookies to disk every few seconds and on quit; quitting makes sure everything is saved and frees the profile for ref.
 4. Use ref as usual. `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and the MCP browser tools now run headless Chrome with that profile and see those sites signed in.
    ref prints `Using saved profile <folder>` on stderr, so you can tell which profile a run used.
-   `ref pdf` does not use the profile: it downloads a PDF URL itself, without Chrome or its cookies.
-   So does `ref fetch` when a page turns out to be a PDF, so a PDF behind a sign-in comes back as `dead` (HTTP 403 or a login page); give `ref fetch` a cookie file with `--cookies` for that.
+   `ref pdf` does not use the profile: it downloads a PDF URL itself, without Chrome or its cookies, so it also works where Chrome is not installed.
+   For a PDF behind a sign-in, use `ref fetch` on its URL: when a page turns out to be a PDF, ref downloads it with the cookies Chrome has for that address (the saved profile's sessions and any `--cookies` file).
 
 ### Later
 

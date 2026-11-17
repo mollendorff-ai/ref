@@ -2,7 +2,9 @@
 
 use super::{page_failure, Chrome, ChromeFailed, CLOSE_ACK_LIMIT};
 use anyhow::{Context, Result};
-use chromiumoxide::cdp::browser_protocol::network::{EventResponseReceived, ResourceType};
+use chromiumoxide::cdp::browser_protocol::network::{
+    Cookie, EventResponseReceived, GetCookiesParams, ResourceType,
+};
 use chromiumoxide::cdp::browser_protocol::page::EventLifecycleEvent;
 use chromiumoxide::Page;
 use futures::{FutureExt, StreamExt};
@@ -211,6 +213,23 @@ impl BrowserPage {
             .context("Failed to get page content")
     }
 
+    /// The `Cookie` header Chrome would send to `url`: the saved profile's
+    /// sessions and any `--cookies` file. `None` when Chrome has none for it,
+    /// or cannot say (the page's failure, not Chrome's).
+    ///
+    /// # Errors
+    /// Returns [`ChromeFailed`] when Chrome failed.
+    pub async fn cookie_header(&self, url: &str) -> Result<Option<String>> {
+        let request = self
+            .page
+            .execute(GetCookiesParams::builder().url(url).build());
+        let answer = self
+            .chrome
+            .ask(self.read_deadline(), "reading cookies", request);
+        let cookies = page_failure(answer.await)?.ok();
+        Ok(cookies.and_then(|answer| cookie_line(&answer.result.cookies)))
+    }
+
     /// Get current URL (after redirects); `None` when Chrome does not say
     ///
     /// # Errors
@@ -221,6 +240,15 @@ impl BrowserPage {
             .ask(self.read_deadline(), "reading the address", self.page.url());
         Ok(page_failure(address.await)?.ok().flatten())
     }
+}
+
+/// Cookies as one `Cookie` header value (`a=1; b=2`); `None` when there are none
+fn cookie_line(cookies: &[Cookie]) -> Option<String> {
+    let pairs: Vec<String> = cookies
+        .iter()
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect();
+    (!pairs.is_empty()).then(|| pairs.join("; "))
 }
 
 /// A `Document` response seen during navigation
