@@ -65,6 +65,9 @@ A failed pool stays failed: every later request on it fails at once with `Chrome
 | `ref fetch`, `check-links`, `refresh-data` | no report is printed; the error is on stderr; exit code 2 |
 | MCP tools | the call returns a tool error saying Chrome failed and will be started again on the next call |
 
+In `ref verify-refs`, a tab that cannot be opened or set up while Chrome still answers ends the run the same way (decided 2026-11-17): it says nothing about the URL, and the file is the record.
+The other commands only print a report, so there it stays that URL's error.
+
 This is the README's existing meaning of exit code 2, "the command itself failed".
 Results gathered before the failure are discarded: an agent that sees `status: dead` treats it as a dead link, so a report that mixes real results with Chrome failures would mislead.
 

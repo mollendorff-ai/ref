@@ -28,8 +28,8 @@ pub(crate) use process::{
     detect_chrome_path, prepare_saved_profile, running_as_root, want_sandbox,
 };
 use process::{
-    honest_user_agent, kill_process, launch, sweep_orphans, to_cookie_param, track_profile,
-    unique_profile_dir,
+    honest_user_agent, kill_process, launch, remove_dir_retrying, sweep_orphans, to_cookie_param,
+    track_profile, unique_profile_dir,
 };
 pub use process::{remove_open_profiles, validate_user_agent};
 
@@ -129,12 +129,25 @@ impl Chrome {
         if self.has_failed() {
             return Err(Self::failure(what));
         }
-        let error = match tokio::time::timeout_at(until, request).await {
-            Ok(Ok(answer)) => return Ok(answer),
-            Ok(Err(e)) => e.into(),
-            Err(_) => anyhow::anyhow!("Chrome did not answer in time ({what})"),
-        };
-        Err(self.judge(error, what).await)
+        match Self::attempt(until, what, request).await {
+            Ok(answer) => Ok(answer),
+            Err(error) => Err(self.judge(error, what).await),
+        }
+    }
+
+    /// One request with a deadline, not yet judged. Callers that hold the
+    /// browser lock for the request drop it before [`judge`](Self::judge),
+    /// which takes the lock again (a writer queued in between would otherwise
+    /// wait for the first guard, and the second for the writer).
+    async fn attempt<T, E: Into<anyhow::Error>>(
+        until: tokio::time::Instant,
+        what: &str,
+        request: impl std::future::Future<Output = std::result::Result<T, E>>,
+    ) -> Result<T> {
+        match tokio::time::timeout_at(until, request).await {
+            Ok(answer) => answer.map_err(Into::into),
+            Err(_) => Err(anyhow::anyhow!("Chrome did not answer in time ({what})")),
+        }
     }
 
     /// After a failed request or navigation: Chrome's failure when it no
@@ -258,10 +271,19 @@ impl BrowserPool {
             let browser = chrome.browser.read().await;
             tokio::time::timeout(request_timeout, browser.version()).await
         };
-        let chrome_ua = version
-            .map_err(|_| anyhow::anyhow!("Chrome started but did not answer"))?
-            .map(|v| v.user_agent)
-            .unwrap_or_default();
+        let Ok(version) = version else {
+            // Dropping the browser kills this Chrome (chromiumoxide kills on
+            // drop); its fresh profile goes with it
+            drop(chrome);
+            if let Profile::Fresh(dir) = &chosen {
+                remove_profile(dir, true).await;
+            }
+            anyhow::bail!(
+                "Chrome started but did not answer (profile {})",
+                profile_dir.display()
+            );
+        };
+        let chrome_ua = version.map(|v| v.user_agent).unwrap_or_default();
 
         // With a saved profile, sites see the same browser you signed in with
         // (sessions and "I am human" passes are often tied to the user agent)
@@ -339,10 +361,13 @@ impl BrowserPool {
         let permit = self.semaphore.clone().acquire_owned().await?;
         // One budget for opening the tab and setting it up (rule 6)
         let until = tokio::time::Instant::now() + self.chrome.request_timeout;
-        let page = {
+        let opened = {
             let browser = self.chrome.browser.read().await;
-            let opening = browser.new_page("about:blank");
-            self.chrome.ask(until, "opening a tab", opening).await?
+            Chrome::attempt(until, "opening a tab", browser.new_page("about:blank")).await
+        };
+        let page = match opened {
+            Ok(page) => page,
+            Err(error) => return Err(self.chrome.judge(error, "opening a tab").await),
         };
         // Closed before the error is returned, however set-up ends, so a
         // long-lived browser does not collect half-made tabs
@@ -394,17 +419,15 @@ impl BrowserPool {
     /// a failed one, or one that does not close, is killed. Then the process is
     /// collected and a fresh profile folder removed. Works while others still
     /// hold the pool; stopping again does nothing.
-    ///
-    /// # Errors
-    /// Never fails today; the `Result` keeps room for a close that must report.
-    pub async fn stop(&self) -> Result<()> {
+    /// It cannot fail, so a run's own error is never replaced by one from here.
+    pub async fn stop(&self) {
         let mut pid = self.chrome.pid.lock().await;
         if self
             .chrome
             .stopped
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Ok(());
+            return;
         }
         let failed = self.chrome.has_failed();
         if failed {
@@ -424,23 +447,22 @@ impl BrowserPool {
                 eprintln!("Sign-ins from this run may not have been saved.");
             }
         }
+        // Only a Chrome killed here may still be writing to its profile; one
+        // that was collected already has exited
+        let killed_running = !closed && pid.is_some();
         *pid = None;
         self.chrome
             .stopped
             .store(true, std::sync::atomic::Ordering::SeqCst);
         drop(browser);
         if let Profile::Fresh(dir) = &self.profile {
-            remove_profile(dir, !closed).await;
+            remove_profile(dir, killed_running).await;
         }
-        Ok(())
     }
 
     /// [`stop`](Self::stop), taking the pool
-    ///
-    /// # Errors
-    /// See [`stop`](Self::stop).
-    pub async fn close(self) -> Result<()> {
-        self.stop().await
+    pub async fn close(self) {
+        self.stop().await;
     }
 }
 
@@ -455,16 +477,12 @@ async fn close_gracefully(browser: &mut Browser) -> bool {
             .is_ok()
 }
 
-/// Remove a fresh profile folder. After a kill, Chrome's helper processes can
-/// still write to it for a moment, so remove, wait and remove again; the
-/// folder stays on the list for the final clean-up until it is gone.
+/// Remove a fresh profile folder, waiting and retrying after a kill (see
+/// [`remove_dir_retrying`]); it stays on the list for the final clean-up until
+/// it is gone.
 async fn remove_profile(dir: &Path, killed: bool) {
-    for _ in 0..if killed { 3 } else { 1 } {
-        let _ = std::fs::remove_dir_all(dir);
-        if killed {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
-    }
+    let owned = dir.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || remove_dir_retrying(&owned, killed)).await;
     if !dir.exists() {
         track_profile(dir, false);
     }
@@ -476,6 +494,9 @@ async fn remove_profile(dir: &Path, killed: bool) {
 fn listen(mut handler: chromiumoxide::Handler, chrome: std::sync::Weak<Chrome>) {
     tokio::spawn(async move {
         while let Some(Ok(())) = handler.next().await {}
+        // Dropping the handler fails every request still waiting for an
+        // answer at once; collecting may have to wait for them
+        drop(handler);
         if let Some(chrome) = chrome.upgrade() {
             chrome.collect_exited().await;
         }
@@ -608,7 +629,7 @@ pub(crate) mod tests {
             page.goto(&url, 10_000).await.unwrap();
             seen.push(page.content().await.unwrap());
         }
-        pool.close().await.unwrap();
+        pool.close().await;
         // Chrome may also ask for /favicon.ico, which counts as a visit too
         assert!(seen[0].contains("visit 0"), "{}", seen[0]);
         assert!(
@@ -628,12 +649,12 @@ pub(crate) mod tests {
 
         // Collected at once, so the profile is free for the next Chrome
         let later = BrowserPool::new(1, Some(&saved)).await.unwrap();
-        crashed.stop().await.unwrap();
+        crashed.stop().await;
         assert!(
             later.is_alive().await,
             "stopping the crashed pool hit the later Chrome"
         );
-        later.stop().await.unwrap();
+        later.stop().await;
     }
 
     #[tokio::test]
@@ -653,7 +674,7 @@ pub(crate) mod tests {
         assert!(!frozen.is_alive().await);
         let took = started.elapsed();
         assert!(took >= ALIVE_LIMIT && took < ALIVE_LIMIT * 2, "{took:?}");
-        frozen.stop().await.unwrap();
+        frozen.stop().await;
     }
 
     #[tokio::test]
@@ -670,7 +691,89 @@ pub(crate) mod tests {
         let next = pool.new_page().await.err().expect("refused");
         assert!(next.is::<ChromeFailed>(), "{next:#}");
         assert!(started.elapsed() < Duration::from_millis(500));
-        pool.stop().await.unwrap();
+        pool.stop().await;
+    }
+
+    #[tokio::test]
+    async fn rule_3_requests_waiting_on_chrome_fail_at_once_when_it_dies() {
+        // Needs Chrome (ADR-004). Before, they waited for their 30 s budget.
+        let pool = Arc::new(BrowserPool::new(1, FRESH).await.unwrap());
+        pool.freeze_chrome().await;
+        let waiting = Arc::clone(&pool);
+        let opening = tokio::spawn(async move { waiting.new_page().await.err() });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let started = std::time::Instant::now();
+        signal_chrome(&pool, "-KILL").await;
+        let err = opening.await.unwrap().expect("opening a tab failed");
+        assert!(err.is::<ChromeFailed>(), "{err:#}");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        pool.stop().await;
+    }
+
+    #[tokio::test]
+    async fn rule_4_stopping_while_a_tab_opens_on_a_frozen_chrome_ends() {
+        // Needs Chrome (ADR-004). Before, the tab opening and the stop could
+        // wait for each other forever.
+        let budget = Duration::from_secs(2);
+        let pool = Arc::new(
+            BrowserPool::with_request_timeout(1, FRESH, budget)
+                .await
+                .unwrap(),
+        );
+        pool.freeze_chrome().await;
+        let waiting = Arc::clone(&pool);
+        let opening = tokio::spawn(async move { waiting.new_page().await.err() });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let both = async {
+            pool.stop().await;
+            opening.await.unwrap()
+        };
+        let err = tokio::time::timeout(Duration::from_secs(20), both).await;
+        let err = err.expect("stop and the opening tab waited for each other");
+        assert!(err.expect("opening a tab failed").is::<ChromeFailed>());
+    }
+
+    #[tokio::test]
+    async fn rule_6_a_chrome_that_does_not_answer_at_start_leaves_no_profile() {
+        // Needs Chrome (ADR-004). A zero budget: the first answer cannot come in time.
+        let err = BrowserPool::with_request_timeout(1, FRESH, Duration::ZERO).await;
+        let err = err.err().expect("start failed").to_string();
+        assert!(
+            err.starts_with("Chrome started but did not answer"),
+            "{err}"
+        );
+        let dir = err.split("(profile ").nth(1).unwrap().trim_end_matches(')');
+        assert!(!Path::new(dir).exists(), "{dir} was left behind");
+
+        // A saved profile is the user's: it stays
+        let home = tempfile::tempdir().unwrap();
+        let saved = ProfileChoice::Folder(home.path().join("saved"));
+        let err = BrowserPool::with_request_timeout(1, Some(&saved), Duration::ZERO).await;
+        assert!(err.is_err());
+        assert!(
+            home.path().join("saved").is_dir(),
+            "the saved profile was removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_6_every_navigation_has_its_own_read_budget() {
+        // Needs Chrome (ADR-004). Before, a second navigation on the same tab
+        // read against the first one's budget, long spent.
+        let budget = Duration::from_secs(2);
+        let pool = BrowserPool::with_request_timeout(1, FRESH, budget)
+            .await
+            .unwrap();
+        let page = pool.new_page().await.unwrap();
+        let url = "data:text/html,<title>Twice</title><p>here</p>";
+        page.goto(url, 10_000).await.unwrap();
+        tokio::time::sleep(budget + Duration::from_millis(500)).await;
+        let again = page.goto(url, 10_000).await.unwrap();
+        assert_eq!(again.title.as_deref(), Some("Twice"));
+        assert!(page.current_url().await.unwrap().is_some());
+        drop(page);
+        pool.stop().await;
     }
 
     #[tokio::test]
@@ -682,7 +785,7 @@ pub(crate) mod tests {
         let err = page.goto(&trap, 2_000).await.unwrap_err();
         assert!(err.is::<ChromeFailed>(), "{err:#}");
         drop(page);
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[tokio::test]
@@ -704,7 +807,7 @@ pub(crate) mod tests {
         assert!(error.starts_with("CONNECTION_REFUSED"), "{error}");
         assert!(pool.is_alive().await);
         drop(page);
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     /// Serve `/set`, which sets a cookie for an hour, and `/show`, which shows
@@ -753,7 +856,7 @@ pub(crate) mod tests {
         let page = first.new_page().await.unwrap();
         page.goto(&format!("{site}/set"), 10_000).await.unwrap();
         drop(page);
-        first.stop().await.unwrap();
+        first.stop().await;
 
         let second = BrowserPool::new(1, Some(&saved)).await.unwrap();
         let page = second.new_page().await.unwrap();
@@ -761,7 +864,7 @@ pub(crate) mod tests {
         let html = page.content().await.unwrap();
         assert!(html.contains("kept=yes"), "the sign-in was lost: {html}");
         drop(page);
-        second.stop().await.unwrap();
+        second.stop().await;
     }
 
     #[tokio::test]
@@ -774,7 +877,7 @@ pub(crate) mod tests {
         );
         pool.freeze_chrome().await;
         let started = std::time::Instant::now();
-        pool.stop().await.unwrap();
+        pool.stop().await;
         let took = started.elapsed();
         assert!(
             took < CLOSE_ACK_LIMIT + COLLECT_LIMIT + Duration::from_secs(3),
@@ -793,7 +896,7 @@ pub(crate) mod tests {
         let pool = BrowserPool::new(1, Some(&saved)).await.unwrap();
         let pid = pool.chrome_pid().await.unwrap();
         pool.freeze_chrome().await;
-        pool.stop().await.unwrap();
+        pool.stop().await;
         assert!(!process_alive(pid), "the frozen Chrome still runs");
         assert!(dir.path().join("saved").is_dir(), "a saved profile is kept");
     }
@@ -812,12 +915,12 @@ pub(crate) mod tests {
         // Needs Chrome (ADR-004)
         let pool = Arc::new(BrowserPool::new(1, FRESH).await.unwrap());
         let other = Arc::clone(&pool);
-        pool.stop().await.unwrap();
+        pool.stop().await;
         assert!(
             !other.is_alive().await,
             "still running while another holder has it"
         );
-        other.stop().await.unwrap();
+        other.stop().await;
         let refused = other
             .new_page()
             .await
@@ -850,7 +953,7 @@ pub(crate) mod tests {
             "{took:?}"
         );
         drop(page);
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     /// A pool whose tabs Chrome refuses to set up (a cookie with ';' in its
@@ -901,7 +1004,7 @@ pub(crate) mod tests {
         assert!(!err.is::<ChromeFailed>(), "Chrome is fine: {err:#}");
         // Chrome acknowledges the close before its list of tabs catches up
         wait_for(|| async { open_tabs(&pool).await == tabs_before }).await;
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[test]
@@ -925,14 +1028,14 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(pool.profile, Profile::Saved(saved.clone()));
-        pool.close().await.unwrap();
+        pool.close().await;
         assert!(saved.is_dir(), "a saved profile is kept after close");
 
         let pool = BrowserPool::new(1, FRESH).await.unwrap();
         assert!(!pool.profile.is_saved(), "{:?}", pool.profile);
         let temp = pool.profile.path().to_path_buf();
         assert_ne!(temp, saved);
-        pool.close().await.unwrap();
+        pool.close().await;
         assert!(!temp.exists(), "a fresh profile is removed on close");
     }
 }

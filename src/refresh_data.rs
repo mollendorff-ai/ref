@@ -129,7 +129,7 @@ async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
 pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<RefreshReport> {
     let pool = Arc::new(BrowserPool::new(1, config.profile.as_ref()).await?);
     let report = refresh_data_with(&pool, urls, config.timeout_ms).await;
-    pool.stop().await?;
+    pool.stop().await;
     report
 }
 
@@ -246,7 +246,7 @@ mod tests {
         let report = refresh_data_with(&pool, &["http://127.0.0.1:9/".to_string()], 5000).await;
         let error = report.unwrap().results[0].error.clone().unwrap_or_default();
         assert!(error.starts_with("Browser error"), "{error}");
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[tokio::test]
@@ -278,7 +278,7 @@ mod tests {
         let urls = [trap, "http://127.0.0.1:9/".to_string()];
         let err = refresh_data_with(&pool, &urls, 10_000).await.unwrap_err();
         assert!(err.is::<crate::browser::ChromeFailed>(), "{err:#}");
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[tokio::test]

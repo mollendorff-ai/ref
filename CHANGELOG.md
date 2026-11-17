@@ -14,7 +14,7 @@ All notable changes to Möllendorff Ref.
 - Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does).
   The `run_*` command functions write their JSON to a writer they are given.
   New `check_links_with` and `refresh_data_with` run in a browser the caller already has (`Arc<BrowserPool>`, with plain values).
-  `BrowserPool::stop` stops Chrome through a shared reference; `fetch_one`, `check_links_with`, `refresh_data_with` and `BrowserPage::current_url` return `Result`, whose error is `ChromeFailed` when Chrome itself failed.
+  `BrowserPool::stop` stops Chrome through a shared reference and cannot fail, so it returns nothing (`close` too); `fetch_one`, `check_links_with`, `refresh_data_with` and `BrowserPage::current_url` return `Result`, whose error is `ChromeFailed` when Chrome itself failed.
 - `ref check-links`, `ref verify-refs` and `ref refresh-data` check each URL on a task of its own, at most `--concurrency` / `--parallel` at once; a panic on one URL becomes that URL's error ("Internal error in ref") instead of ending the run.
 - Pages run with Chrome's cache off, so a saved profile or the MCP server's long-lived browser never answers from an old copy.
 - **What ref does when Chrome crashes or hangs** is now one design, [ADR-005](docs/adr/ADR-005-CHROME-LIFECYCLE.md):
@@ -25,6 +25,8 @@ All notable changes to Möllendorff Ref.
   - Every request to Chrome has a limit, also while Chrome is frozen: 30 seconds to open and set up a tab, and 30 seconds for everything read from a page after navigation.
   - A crashed Chrome is noticed and collected at once, so it never seems to hold the profile's lock.
   - A tab whose set-up fails is closed before the error is returned, and a run that stops early cancels its remaining checks.
+  - `ref mcp` stops its Chrome the same way when the server ends, so a saved profile keeps the sign-ins of the session's last seconds.
+  - A Chrome that starts but does not answer leaves no temporary profile behind, and the error names the profile.
 - `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
 - `ref login --profile fresh` is refused, since a fresh profile's sign-ins would be deleted; before, it signed in to a folder named `fresh`.
   `REF_CHROME_PROFILE=fresh` is still ignored by `ref login`, which then uses the default folder.
@@ -38,6 +40,7 @@ All notable changes to Möllendorff Ref.
 - **MCP after a Chrome crash or hang**: the call that meets the failure gets a tool error saying so, and the next call starts a new Chrome, instead of every later call failing.
 - **`verify-refs` with a failing Chrome** wrote every reference as `dead`, also when Chrome died in the middle of loading a page.
   Now it stops at the first Chrome failure with an error naming the URL, and leaves `references.yaml` as it was.
+  The same holds when Chrome still answers but a tab cannot be opened: that says nothing about the URL either.
 - MCP calls with nothing to do (no URLs, nothing chosen, a missing file) answer without starting Chrome, so the real error is reported.
 - MCP `concurrency` / `parallel` values of 17 to 20 were quietly capped at 16 tabs; the shared browser now has 20.
 

@@ -71,15 +71,23 @@ pub fn remove_open_profiles() {
         if dirs.is_empty() {
             return;
         }
-        // A killed Chrome can still write to its profile for a moment
-        // while it exits, so remove, wait, and remove again.
-        for _ in 0..3 {
-            for dir in dirs.iter() {
-                let _ = std::fs::remove_dir_all(dir);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(300));
+        // Their Chrome was killed when ref was interrupted
+        for dir in dirs.iter() {
+            remove_dir_retrying(dir, true);
         }
         dirs.retain(|d| d.exists());
+    }
+}
+
+/// Remove a profile folder. After a kill, Chrome's helper processes can still
+/// write to it for a moment while they exit, so remove, wait and remove again;
+/// otherwise once is enough.
+pub(super) fn remove_dir_retrying(dir: &Path, killed: bool) {
+    for _ in 0..if killed { 3 } else { 1 } {
+        let _ = std::fs::remove_dir_all(dir);
+        if killed {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
     }
 }
 
@@ -255,13 +263,7 @@ pub(super) fn sweep_orphans() {
         }
         let dir = entry.path();
         let killed = kill_chrome_using(&dir);
-        // A killed Chrome can still write to its profile while it exits
-        for _ in 0..if killed { 3 } else { 1 } {
-            let _ = std::fs::remove_dir_all(&dir);
-            if killed {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            }
-        }
+        remove_dir_retrying(&dir, killed);
     }
 }
 

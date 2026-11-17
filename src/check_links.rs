@@ -178,7 +178,7 @@ pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<L
         config.retries,
     )
     .await;
-    pool.stop().await?;
+    pool.stop().await;
     report
 }
 
@@ -308,7 +308,7 @@ mod tests {
         let report = check_links_with(&pool, &urls, 1, 5000, 0).await.unwrap();
         let error = report.results[0].error.clone().unwrap_or_default();
         assert!(error.contains("cookies"), "{error}");
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[tokio::test]
@@ -325,7 +325,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is::<crate::browser::ChromeFailed>(), "{err:#}");
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[test]

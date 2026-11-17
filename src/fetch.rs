@@ -212,7 +212,7 @@ pub async fn run_fetch(args: FetchArgs, out: &mut impl std::io::Write) -> Result
         .filter_map(std::result::Result::ok)
         .collect();
 
-    pool.stop().await?;
+    pool.stop().await;
     // A Chrome failure ends the command with no report (ADR-005 rule 3)
     let results: Vec<Page> = results.into_iter().collect::<Result<_>>()?;
 
@@ -703,7 +703,7 @@ mod tests {
         let pool = crate::browser::tests::pool_that_cannot_set_up_tabs().await;
         let page = fetch_one(&pool, "http://127.0.0.1:9/", &FetchOptions::default()).await;
         assert_eq!(page.unwrap().status, PageStatus::Dead);
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[tokio::test]
@@ -717,7 +717,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is::<crate::browser::ChromeFailed>(), "{err:#}");
-        pool.stop().await.unwrap();
+        pool.stop().await;
     }
 
     #[test]

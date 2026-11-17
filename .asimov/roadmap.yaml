@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: null
+current: CHROME_LIFECYCLE
 
 shipped:
   - version: "1.5.1"
@@ -41,7 +41,7 @@ upcoming:
       - "ref_check_links, ref_refresh_data and ref_verify_refs reuse the server's shared browser instead of starting a second Chrome on the same profile"
       - "The lock error names the real holder (here the MCP server's own Chrome), not only ref login"
       - "Test with a saved profile: ref_fetch, then each other browser tool, all succeed"
-  - summary: "Chrome lifecycle: implement ADR-005 in one pass (done 2026-11-17, Unreleased)"
+  - summary: "Chrome lifecycle: implement ADR-005 in one pass (implemented 2026-11-17; fixing the review against the ADR)"
     goal: "CHROME_LIFECYCLE"
     source: "Third review on 2026-11-17 (range 8b9cd7c..18a7b16): ten findings, all in how ref handles a Chrome that crashes or hangs; ADR-005 replaces patching"
     deliverables:
@@ -55,6 +55,9 @@ upcoming:
       - "Rule 7: task::isolated cancels its task when the caller stops waiting"
       - "The seven tests in the ADR, with a real Chrome frozen (SIGSTOP) or killed; one kill_process helper"
       - "README, MCP guide and CHANGELOG say what a Chrome failure does"
+      - "Done 2026-11-17. Review against ADR-005 (5ac18a2..fe2d1a7, 2026-11-17): drop the message handler before collecting an exited Chrome; never ask whether Chrome is alive while holding the browser lock; keep ChromeFailed typed in verify-refs; stop the shared Chrome gracefully when the MCP server ends; remove the profile when Chrome does not answer at start; a new navigation gets a new read budget; no new #[allow] in mcp.rs; one remove-and-retry helper, waiting only after a kill; stop returns ()"
+      - "Done 2026-11-17. Decided 2026-11-17 (ADR-005 rule 3): in verify-refs, a tab that cannot be opened or set up while Chrome answers ends the run and writes nothing; the other commands keep it as that URL's error"
+      - "Stopping rule (2026-11-17): after these fixes, one more review; then anything that is not a real bug goes to the roadmap and work moves to STRICT_RULES step 4"
   - summary: "Content detection on GitHub pages"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"

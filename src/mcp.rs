@@ -149,7 +149,7 @@ impl RefMcpServer {
             info!("Chrome failed; starting a new one");
             // Calls still running on it end with ChromeFailed; stopping works
             // while they hold it, and frees the profile for the new Chrome
-            let _ = pool.stop().await;
+            pool.stop().await;
         }
         *slot = None;
         let pool = BrowserPool::new(MCP_POOL_TABS, self.profile.as_ref())
@@ -203,12 +203,19 @@ fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
 
 /// A browser tool's error: for a Chrome failure, also that the next call
 /// starts a new Chrome (ADR-005 rule 3)
-#[allow(clippy::needless_pass_by_value)] // used as map_err callback
-fn browser_err(e: anyhow::Error) -> ErrorData {
+fn browser_err(e: &anyhow::Error) -> ErrorData {
     if e.is::<crate::browser::ChromeFailed>() {
-        ErrorData::internal_error(format!("{e}; the next call starts a new Chrome"), None)
+        ErrorData::internal_error(format!("{e:#}; the next call starts a new Chrome"), None)
     } else {
         to_mcp_err(e)
+    }
+}
+
+/// Stop the shared Chrome gracefully, so it can save a saved profile before
+/// the server ends (ADR-005 rule 4: the end of every command)
+async fn stop_browser(slot: &Mutex<Option<Arc<BrowserPool>>>) {
+    if let Some(pool) = slot.lock().await.take() {
+        pool.stop().await;
     }
 }
 
@@ -249,7 +256,7 @@ impl RefMcpServer {
             .buffered(parallel)
             .try_collect()
             .await
-            .map_err(browser_err)?;
+            .map_err(|e| browser_err(&e))?;
 
         let json = if pages.len() == 1 {
             serde_json::to_string(&pages[0])
@@ -308,7 +315,7 @@ impl RefMcpServer {
                 params.retries.unwrap_or(1),
             )
             .await
-            .map_err(browser_err)?
+            .map_err(|e| browser_err(&e))?
         };
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
@@ -375,7 +382,7 @@ impl RefMcpServer {
             let timeout = params.timeout.unwrap_or(30000);
             plan.run(&pool, parallel, timeout, params.dry_run.unwrap_or(false))
                 .await
-                .map_err(browser_err)?
+                .map_err(|e| browser_err(&e))?
         };
         let json = serde_json::to_string(&output).map_err(json_err)?;
 
@@ -416,7 +423,7 @@ impl RefMcpServer {
             let pool = self.browser().await?;
             refresh_data_with(&pool, &urls, timeout_ms)
                 .await
-                .map_err(browser_err)?
+                .map_err(|e| browser_err(&e))?
         };
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
@@ -471,8 +478,11 @@ pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> R
     info!("Workspace for file tools: {}", root.display());
 
     let server = RefMcpServer::new(root, profile);
+    let browser = Arc::clone(&server.pool);
     let service = server.serve(rmcp::transport::io::stdio()).await?;
-    service.waiting().await?;
+    let outcome = service.waiting().await;
+    stop_browser(&browser).await;
+    outcome?;
 
     info!("MCP server stopped");
     Ok(())
@@ -770,15 +780,38 @@ mod tests {
 
     #[test]
     fn only_a_chrome_failure_promises_a_new_chrome() {
-        let page = browser_err(anyhow::anyhow!("Failed to write references.yaml"));
+        let page = browser_err(&anyhow::anyhow!("Failed to write references.yaml"));
         assert_eq!(page.message, "Failed to write references.yaml");
-        let chrome = browser_err(anyhow::Error::new(crate::browser::ChromeFailed(
+        let chrome = browser_err(&anyhow::Error::new(crate::browser::ChromeFailed(
             "gone".into(),
         )));
         assert_eq!(
             chrome.message,
             "Chrome failed: gone; the next call starts a new Chrome"
         );
+    }
+
+    #[tokio::test]
+    async fn the_shared_chrome_is_stopped_gracefully_when_the_server_ends() {
+        // Needs Chrome (ADR-004). Before, it was killed when the server dropped it.
+        let dir = tempfile::tempdir().unwrap();
+        let server = RefMcpServer::new(
+            dir.path().canonicalize().unwrap(),
+            Some(ProfileChoice::Fresh),
+        );
+        let check = CheckLinksParams {
+            urls: vec!["http://127.0.0.1:9/".into()],
+            concurrency: None,
+            timeout: Some(5000),
+            retries: Some(0),
+        };
+        server.ref_check_links(Parameters(check)).await.unwrap();
+        let pool = server.pool.lock().await.clone().unwrap();
+        stop_browser(&server.pool).await;
+        assert!(server.pool.lock().await.is_none());
+        assert!(!pool.is_alive().await, "Chrome still runs");
+        // Nothing started: nothing to stop
+        stop_browser(&server.pool).await;
     }
 
     #[tokio::test]
@@ -829,7 +862,7 @@ mod tests {
         assert_eq!(text(&again)["status"], "ok");
         let second = server.pool.lock().await.clone().unwrap();
         assert!(!Arc::ptr_eq(&first, &second));
-        second.stop().await.unwrap();
+        second.stop().await;
     }
 
     #[tokio::test]

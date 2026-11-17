@@ -57,14 +57,25 @@ impl Drop for BrowserPage {
 }
 
 impl BrowserPage {
-    /// The deadline for reading this page: the read budget once navigation
-    /// ended, else a fresh one
+    /// The deadline for reading this page: the read budget of the last
+    /// navigation, else a fresh one
     fn read_deadline(&self) -> tokio::time::Instant {
-        let mut until = self
-            .reads_until
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut until = self.reads_until();
         *until.get_or_insert_with(|| tokio::time::Instant::now() + self.chrome.request_timeout)
+    }
+
+    /// Start the read budget of a navigation that just ended: a second
+    /// navigation on the same tab (a retry) gets a budget of its own
+    fn start_reads(&self) -> tokio::time::Instant {
+        let until = tokio::time::Instant::now() + self.chrome.request_timeout;
+        *self.reads_until() = Some(until);
+        until
+    }
+
+    fn reads_until(&self) -> std::sync::MutexGuard<'_, Option<tokio::time::Instant>> {
+        self.reads_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Navigate to URL and wait for network idle (SPA support)
@@ -129,7 +140,7 @@ impl BrowserPage {
         // Navigation succeeded, now wait for networkIdle
         self.wait_for_network_idle(&mut lifecycle).await;
 
-        let reads = self.read_deadline();
+        let reads = self.start_reads();
         let frame = self
             .chrome
             .ask(reads, "reading the main frame", self.page.mainframe());
