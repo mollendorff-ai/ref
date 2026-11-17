@@ -25,6 +25,8 @@ upcoming:
     source: "Measured on 2026-11-16 over all code, every test run: 78.03% line coverage (5,125 lines, 1,126 not covered)"
     deliverables:
       - "Rules written down: CLAUDE.md, .asimov/project.yaml coding_standards, ADR-004 (supersedes ADR-003)"
+      - "Seam 1, output: each run_* command writes its JSON to a writer it is given (main passes stdout), so inline tests read the output in-process; internal only"
+      - "Seam 2, profile: global option ref --profile <folder|fresh>, read from REF_CHROME_PROFILE when not given (clap env), passed to the five places that start Chrome (fetch, check_links, verify_refs, refresh_data, mcp) and to login; every Chrome test passes --profile fresh, so tests never touch a saved profile and run in parallel; README and CHANGELOG updated; ships in 1.10.0"
       - "main becomes a thin wrapper over cli::run(args) -> ExitCode; tests/cli_tests.rs moves inline and calls it in-process"
       - "tests/e2e_local.rs moves inline into fetch, browser and pdf; no #[ignore], Chrome tests run in plain cargo test"
       - "Cover update, check_links, verify_refs, refresh_data (injected base URL, local server), init and scan (temporary folders), mcp (in-process), login (headless seam)"
