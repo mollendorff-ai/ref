@@ -40,6 +40,11 @@ If one fails, fix the cause; never weaken the check.
 The repo does not meet rules 1 and 3 yet (78% coverage over all code, two files in `tests/`).
 The work to get there is the first item in `.asimov/roadmap.yaml` (`STRICT_RULES`); remove this section when it is done.
 
+## Proposing work
+
+Every step you propose names the model and effort level it needs, with a one-line reason.
+Use the most capable model only where the step's difficulty or risk earns it.
+
 ## Docs
 
 One sentence per line in Markdown, for clean diffs.
