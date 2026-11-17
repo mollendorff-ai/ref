@@ -4,7 +4,7 @@
 //! JSON compact output only. No YAML, no pretty printing.
 
 use crate::access::{self, Access};
-use crate::browser::BrowserPool;
+use crate::browser::{page_failure, BrowserPool};
 pub use crate::content::Section;
 use crate::content::{self, DEFAULT_MAX_SECTIONS};
 use crate::text::{cut_at_word, truncate};
@@ -205,17 +205,16 @@ pub async fn run_fetch(args: FetchArgs, out: &mut impl std::io::Write) -> Result
         })
         .collect();
 
-    // Await all tasks
-    let results: Vec<Page> = join_all(tasks)
+    // Await all tasks (a task that panicked is left out, and the run fails)
+    let results: Vec<Result<Page>> = join_all(tasks)
         .await
         .into_iter()
         .filter_map(std::result::Result::ok)
         .collect();
 
-    // Close browser
-    if let Ok(pool) = Arc::try_unwrap(pool) {
-        pool.close().await?;
-    }
+    pool.stop().await?;
+    // A Chrome failure ends the command with no report (ADR-005 rule 3)
+    let results: Vec<Page> = results.into_iter().collect::<Result<_>>()?;
 
     let ok_count = results
         .iter()
@@ -236,16 +235,25 @@ pub async fn run_fetch(args: FetchArgs, out: &mut impl std::io::Write) -> Result
     Ok(none_dead && results.len() == url_count)
 }
 
-pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Page {
+/// Fetch one URL.
+///
+/// # Errors
+/// Returns [`ChromeFailed`](crate::browser::ChromeFailed) when Chrome failed;
+/// every failure of the page itself is in the returned [`Page`].
+pub(crate) async fn fetch_one(
+    pool: &BrowserPool,
+    url: &str,
+    options: &FetchOptions,
+) -> Result<Page> {
     eprintln!("  -> {}", truncate(url, 60));
 
     if let Err(e) = crate::guard::check_web_url(url) {
-        return error_page(url, &e);
+        return Ok(error_page(url, &e));
     }
 
-    let page = match pool.new_page().await {
+    let page = match page_failure(pool.new_page().await)? {
         Ok(p) => p,
-        Err(e) => return error_page(url, &e.to_string()),
+        Err(e) => return Ok(error_page(url, &e)),
     };
 
     // Parse original URL for redirect detection
@@ -253,13 +261,13 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOpti
         .ok()
         .and_then(|u| u.host_str().map(String::from));
 
-    let nav = match page.goto(url, options.timeout).await {
+    let nav = match page_failure(page.goto(url, options.timeout).await)? {
         Ok(n) => n,
-        Err(e) => return error_page(url, &e.to_string()),
+        Err(e) => return Ok(error_page(url, &e)),
     };
 
     if nav.error.is_some() {
-        return Page {
+        return Ok(Page {
             url: url.to_string(),
             status: PageStatus::Dead,
             http: None,
@@ -274,7 +282,7 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOpti
             alerts: vec![nav.error.unwrap_or_default()],
             chars: 0,
             truncated: false,
-        };
+        });
     }
 
     // A PDF opens in Chrome's viewer, which has no readable HTML: extract it instead
@@ -290,18 +298,18 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOpti
         if pdf.status != PageStatus::Dead {
             pdf.http = nav.status;
         }
-        return pdf;
+        return Ok(pdf);
     }
 
     // Check for redirect
-    let final_url = page.current_url().await;
+    let final_url = page.current_url().await?;
     if let (Some(orig), Some(final_u)) = (&original_host, &final_url) {
         if let Ok(parsed) = Url::parse(final_u) {
             if let Some(final_host) = parsed.host_str() {
                 let orig_norm = orig.trim_start_matches("www.");
                 let final_norm = final_host.trim_start_matches("www.");
                 if orig_norm != final_norm {
-                    return Page {
+                    return Ok(Page {
                         url: url.to_string(),
                         status: PageStatus::Redirect,
                         http: nav.status,
@@ -316,15 +324,15 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOpti
                         alerts: vec![format!("Redirected to: {}", final_u)],
                         chars: 0,
                         truncated: false,
-                    };
+                    });
                 }
             }
         }
     }
 
-    let html = match page.content().await {
+    let html = match page_failure(page.content().await)? {
         Ok(h) => h,
-        Err(e) => return error_page(url, &e.to_string()),
+        Err(e) => return Ok(error_page(url, &e)),
     };
 
     let mut parsed = parse_page(&html, url, options);
@@ -332,7 +340,7 @@ pub(crate) async fn fetch_one(pool: &BrowserPool, url: &str, options: &FetchOpti
     if nav.status == Some(403) && !pool.has_custom_user_agent() {
         parsed.alerts.insert(1, USER_AGENT_HINT.to_string());
     }
-    parsed
+    Ok(parsed)
 }
 
 /// Added after "HTTP 403" when ref used its own user agent
@@ -688,6 +696,29 @@ fn select_attr(doc: &Html, sel: &str, attr: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::text::floor_char_boundary;
+
+    #[tokio::test]
+    async fn a_tab_chrome_refuses_is_a_dead_page() {
+        // Needs Chrome (ADR-004)
+        let pool = crate::browser::tests::pool_that_cannot_set_up_tabs().await;
+        let page = fetch_one(&pool, "http://127.0.0.1:9/", &FetchOptions::default()).await;
+        assert_eq!(page.unwrap().status, PageStatus::Dead);
+        pool.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_chrome_failure_is_not_a_page() {
+        // Needs Chrome (ADR-004). Before, it came back as a dead page.
+        let pool = BrowserPool::new(1, Some(&crate::profile::ProfileChoice::Fresh))
+            .await
+            .unwrap();
+        let trap = crate::browser::tests::serve_trap(&pool, "-KILL").await;
+        let err = fetch_one(&pool, &trap, &FetchOptions::default())
+            .await
+            .unwrap_err();
+        assert!(err.is::<crate::browser::ChromeFailed>(), "{err:#}");
+        pool.stop().await.unwrap();
+    }
 
     #[test]
     fn test_parse_basic() {

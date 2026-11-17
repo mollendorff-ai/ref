@@ -4,7 +4,7 @@
 //! Numbers are taken from the page's main content (the same content `fetch`
 //! returns), so ads and navigation do not leak in.
 
-use crate::browser::{BrowserPage, BrowserPool};
+use crate::browser::{page_failure, BrowserPage, BrowserPool};
 use crate::content;
 use crate::extract::{extract_amounts, extract_percentages, extract_urls, AmountMatch};
 use crate::fetch::extract_main_content;
@@ -124,22 +124,27 @@ async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
 /// with a one-second pause
 ///
 /// # Errors
-/// Returns an error if the browser pool cannot be created or closed.
+/// Returns an error if the browser pool cannot be created, or
+/// [`ChromeFailed`](crate::browser::ChromeFailed) when Chrome fails.
 pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<RefreshReport> {
     let pool = Arc::new(BrowserPool::new(1, config.profile.as_ref()).await?);
     let report = refresh_data_with(&pool, urls, config.timeout_ms).await;
-    BrowserPool::close_shared(pool).await?;
-    Ok(report)
+    pool.stop().await?;
+    report
 }
 
 /// Extract data from multiple URLs in a browser the caller already has, such
 /// as the MCP server's shared one, one at a time with a one-second pause, each
 /// on a task of its own so a panic on one URL becomes that URL's failure
+///
+/// # Errors
+/// Returns [`ChromeFailed`](crate::browser::ChromeFailed) when Chrome fails,
+/// and stops then.
 pub async fn refresh_data_with(
     pool: &Arc<BrowserPool>,
     urls: &[String],
     timeout_ms: u64,
-) -> RefreshReport {
+) -> Result<RefreshReport> {
     let mut results = Vec::with_capacity(urls.len());
 
     for (i, url) in urls.iter().enumerate() {
@@ -149,23 +154,22 @@ pub async fn refresh_data_with(
         }
         let (pool, owned) = (Arc::clone(pool), url.clone());
         let result = crate::task::isolated(async move {
-            match pool.new_page().await {
+            match page_failure(pool.new_page().await)? {
                 Ok(page) => extract_from_page(&page, &owned, timeout_ms).await,
-                Err(e) => failure(&owned, None, format!("Browser error: {e}")),
+                Err(e) => Ok(failure(&owned, None, format!("Browser error: {e}"))),
             }
         })
         .await;
-        results.push(
-            result.unwrap_or_else(|e| failure(url, None, format!("Internal error in ref: {e}"))),
-        );
+        let internal = |e| Ok(failure(url, None, format!("Internal error in ref: {e}")));
+        results.push(result.unwrap_or_else(internal)?);
     }
 
     let ok = results.iter().filter(|r| r.success).count();
-    RefreshReport {
+    Ok(RefreshReport {
         ok,
         failed: results.len() - ok,
         results,
-    }
+    })
 }
 
 fn failure(url: &str, http: Option<u16>, error: String) -> ExtractedData {
@@ -180,25 +184,30 @@ fn failure(url: &str, http: Option<u16>, error: String) -> ExtractedData {
     }
 }
 
-/// Extract data from a single page; navigation errors and 4xx/5xx are failures
-async fn extract_from_page(page: &BrowserPage, url: &str, timeout_ms: u64) -> ExtractedData {
+/// Extract data from a single page; navigation errors and 4xx/5xx are
+/// failures of the page, and `Err` is a Chrome failure
+async fn extract_from_page(
+    page: &BrowserPage,
+    url: &str,
+    timeout_ms: u64,
+) -> Result<ExtractedData> {
     if let Err(e) = crate::guard::check_web_url(url) {
-        return failure(url, None, e);
+        return Ok(failure(url, None, e));
     }
-    let nav = match page.goto(url, timeout_ms).await {
+    let nav = match page_failure(page.goto(url, timeout_ms).await)? {
         Ok(nav) => nav,
-        Err(e) => return failure(url, None, e.to_string()),
+        Err(e) => return Ok(failure(url, None, e)),
     };
     if let Some(error) = nav.error {
-        return failure(url, nav.status, error);
+        return Ok(failure(url, nav.status, error));
     }
     if let Some(code) = nav.status.filter(|c| *c >= 400) {
-        return failure(url, Some(code), format!("HTTP {code}"));
+        return Ok(failure(url, Some(code), format!("HTTP {code}")));
     }
-    match page.content().await {
+    Ok(match page_failure(page.content().await)? {
         Ok(html) => extract_numbers(url, nav.status, &html),
-        Err(e) => failure(url, nav.status, e.to_string()),
-    }
+        Err(e) => failure(url, nav.status, e),
+    })
 }
 
 /// Amounts and percentages from the main content of a rendered page
@@ -231,6 +240,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_tab_chrome_refuses_is_that_urls_failure() {
+        // Needs Chrome (ADR-004)
+        let pool = crate::browser::tests::pool_that_cannot_set_up_tabs().await;
+        let report = refresh_data_with(&pool, &["http://127.0.0.1:9/".to_string()], 5000).await;
+        let error = report.unwrap().results[0].error.clone().unwrap_or_default();
+        assert!(error.starts_with("Browser error"), "{error}");
+        pool.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn the_command_writes_its_report() {
         // Needs Chrome (ADR-004)
         let args = RefreshDataArgs {
@@ -248,17 +267,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dead_chrome_is_reported_per_url() {
-        // Needs Chrome (ADR-004)
+    async fn a_chrome_failure_ends_the_run() {
+        // Needs Chrome (ADR-004). Before, it was reported as that URL's failure.
         let pool = Arc::new(
             BrowserPool::new(1, Some(&crate::profile::ProfileChoice::Fresh))
                 .await
                 .unwrap(),
         );
-        pool.kill_chrome().await;
-        let report = refresh_data_with(&pool, &["http://127.0.0.1:9/".to_string()], 5000).await;
-        let error = report.results[0].error.as_deref().unwrap_or_default();
-        assert!(error.starts_with("Browser error"), "{error}");
+        let trap = crate::browser::tests::serve_trap(&pool, "-KILL").await;
+        let urls = [trap, "http://127.0.0.1:9/".to_string()];
+        let err = refresh_data_with(&pool, &urls, 10_000).await.unwrap_err();
+        assert!(err.is::<crate::browser::ChromeFailed>(), "{err:#}");
+        pool.stop().await.unwrap();
     }
 
     #[tokio::test]

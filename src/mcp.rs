@@ -15,7 +15,7 @@ use crate::refresh_data::refresh_data_with;
 use crate::scan::{self, ScanArgs};
 use crate::verify_refs::Plan;
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -137,21 +137,20 @@ impl RefMcpServer {
         }
     }
 
-    /// The shared browser: started on first use, and started again when Chrome
-    /// no longer answers (it crashed or was killed), so one dead Chrome does
-    /// not fail every later call.
+    /// The shared browser: started on first use, and started again between
+    /// calls when Chrome has failed (ADR-005 rule 5), so one crash or hang
+    /// does not end the agent's web access.
     async fn browser(&self) -> std::result::Result<Arc<BrowserPool>, ErrorData> {
         let mut slot = self.pool.lock().await;
         if let Some(pool) = slot.as_ref() {
             if pool.is_alive().await {
                 return Ok(Arc::clone(pool));
             }
-            info!("Chrome stopped answering; starting a new one");
-            // Calls still running may hold the old pool: stop its Chrome
-            // anyway, so the new one can take the profile
-            pool.stop_chrome().await;
+            info!("Chrome failed; starting a new one");
+            // Calls still running on it end with ChromeFailed; stopping works
+            // while they hold it, and frees the profile for the new Chrome
+            let _ = pool.stop().await;
         }
-        // Dropping the old pool lets its profile go once its last call ends
         *slot = None;
         let pool = BrowserPool::new(MCP_POOL_TABS, self.profile.as_ref())
             .await
@@ -202,6 +201,17 @@ fn to_mcp_err(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(format!("{e:#}"), None)
 }
 
+/// A browser tool's error: for a Chrome failure, also that the next call
+/// starts a new Chrome (ADR-005 rule 3)
+#[allow(clippy::needless_pass_by_value)] // used as map_err callback
+fn browser_err(e: anyhow::Error) -> ErrorData {
+    if e.is::<crate::browser::ChromeFailed>() {
+        ErrorData::internal_error(format!("{e}; the next call starts a new Chrome"), None)
+    } else {
+        to_mcp_err(e)
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)] // used as map_err callback
 fn json_err(e: serde_json::Error) -> ErrorData {
     ErrorData::internal_error(format!("JSON serialization failed: {e}"), None)
@@ -237,8 +247,9 @@ impl RefMcpServer {
         let pages: Vec<fetch::Page> = futures::stream::iter(params.urls)
             .map(|url| async move { fetch::fetch_one(pool, &url, options).await })
             .buffered(parallel)
-            .collect()
-            .await;
+            .try_collect()
+            .await
+            .map_err(browser_err)?;
 
         let json = if pages.len() == 1 {
             serde_json::to_string(&pages[0])
@@ -297,6 +308,7 @@ impl RefMcpServer {
                 params.retries.unwrap_or(1),
             )
             .await
+            .map_err(browser_err)?
         };
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
@@ -363,7 +375,7 @@ impl RefMcpServer {
             let timeout = params.timeout.unwrap_or(30000);
             plan.run(&pool, parallel, timeout, params.dry_run.unwrap_or(false))
                 .await
-                .map_err(to_mcp_err)?
+                .map_err(browser_err)?
         };
         let json = serde_json::to_string(&output).map_err(json_err)?;
 
@@ -402,7 +414,9 @@ impl RefMcpServer {
             crate::refresh_data::RefreshReport::default()
         } else {
             let pool = self.browser().await?;
-            refresh_data_with(&pool, &urls, timeout_ms).await
+            refresh_data_with(&pool, &urls, timeout_ms)
+                .await
+                .map_err(browser_err)?
         };
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
@@ -752,6 +766,70 @@ mod tests {
         let second = server.pool.lock().await.clone().unwrap();
         assert!(!Arc::ptr_eq(&first, &second), "no new Chrome was started");
         assert!(second.is_alive().await);
+    }
+
+    #[test]
+    fn only_a_chrome_failure_promises_a_new_chrome() {
+        let page = browser_err(anyhow::anyhow!("Failed to write references.yaml"));
+        assert_eq!(page.message, "Failed to write references.yaml");
+        let chrome = browser_err(anyhow::Error::new(crate::browser::ChromeFailed(
+            "gone".into(),
+        )));
+        assert_eq!(
+            chrome.message,
+            "Chrome failed: gone; the next call starts a new Chrome"
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_5_a_frozen_chrome_is_replaced_and_the_call_on_it_says_so() {
+        // Needs Chrome (ADR-004)
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = RefMcpServer::new(
+            root.clone(),
+            Some(ProfileChoice::Folder(root.join("saved"))),
+        );
+        let fetch = |url: String| FetchParams {
+            urls: vec![url],
+            parallel: None,
+            timeout: Some(2000),
+            raw: None,
+            selector: None,
+            max_chars: None,
+            max_sections: None,
+        };
+
+        let site = crate::browser::tests::serve_cookie_jar();
+        server
+            .ref_fetch(Parameters(fetch(format!("{site}/show"))))
+            .await
+            .unwrap();
+        let first = server.pool.lock().await.clone().unwrap();
+        let trap = crate::browser::tests::serve_trap(&first, "-STOP").await;
+
+        // The call during the failure gets the tool error
+        let failed = server.ref_fetch(Parameters(fetch(trap))).await.unwrap_err();
+        assert!(
+            failed.message.contains("Chrome failed"),
+            "{}",
+            failed.message
+        );
+        assert!(
+            failed.message.contains("next call starts a new Chrome"),
+            "{}",
+            failed.message
+        );
+
+        // The next call starts a new Chrome on the same saved profile
+        let again = server
+            .ref_fetch(Parameters(fetch(format!("{site}/show"))))
+            .await;
+        let again = again.unwrap();
+        assert_eq!(text(&again)["status"], "ok");
+        let second = server.pool.lock().await.clone().unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        second.stop().await.unwrap();
     }
 
     #[tokio::test]

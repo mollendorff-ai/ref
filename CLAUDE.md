@@ -37,7 +37,7 @@ If one fails, fix the cause; never weaken the check.
 
 ## Status
 
-The repo does not meet rules 1 and 3 yet (78% coverage over all code, two files in `tests/`).
+The repo does not meet rules 1 and 3 yet (87.5% coverage over all code on 2026-11-17, two files in `tests/`).
 The work to get there is the first item in `.asimov/roadmap.yaml` (`STRICT_RULES`); remove this section when it is done.
 
 ## Proposing work

@@ -1,6 +1,6 @@
 # ADR-005: Chrome Lifecycle
 
-**Status:** Proposed
+**Status:** Accepted (2026-11-17)
 **Date:** 2026-11-17
 **Author:** Claude (AI assistant, under the maintainer's direction)
 
@@ -82,6 +82,7 @@ The browser handle sits behind a read-write lock: requests share it, stopping ta
 **Forced stop** (a pool that has failed): kill it at once, since a Chrome that does not answer is not saving anything.
 
 Both end by collecting the process, with a 5-second limit.
+A Chrome that exits on its own (a crash, or killed from outside) is collected as soon as ref notices the connection is gone, and the pool is marked failed; so it never lingers as a zombie that seems to hold the profile's lock.
 Dropping a pool that was never stopped still kills its Chrome, as today; that is the backstop, not the normal path.
 After that the pool is stopped: it signals nothing, and the process is gone on every platform, so the profile's lock check needs no special case.
 

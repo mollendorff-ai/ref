@@ -8,7 +8,7 @@
 //! - login: 200 but login required
 
 use crate::access::{self, Access};
-use crate::browser::BrowserPool;
+use crate::browser::{page_failure, BrowserPool};
 use crate::schema::{ReferencesFile, Status};
 use crate::text::truncate;
 use anyhow::{Context, Result};
@@ -95,17 +95,9 @@ pub(crate) async fn verify_refs_core(args: &VerifyRefsArgs) -> Result<VerifyOutp
     let output = plan
         .run(&pool, args.parallel, args.timeout, args.dry_run)
         .await;
-    let closed = BrowserPool::close_shared(pool).await;
-    run_error_first(output, closed)
-}
-
-/// The run's result, with its own error before a close error: it says which
-/// URL failed and that the file is unchanged, and a failure to close a dead
-/// Chrome would only hide that
-fn run_error_first<T>(run: Result<T>, closed: Result<()>) -> Result<T> {
-    let output = run?;
-    closed?;
-    Ok(output)
+    // Stopping never fails, so the run's own error is the one reported
+    pool.stop().await?;
+    output
 }
 
 /// The references file and the entries chosen to verify
@@ -201,8 +193,8 @@ impl Plan {
                         async move { verify_url(&pool, &url, timeout).await }
                     })
                     .await;
-                    let checked =
-                        checked.unwrap_or_else(|e| Err(format!("Internal error in ref: {e}")));
+                    let checked = checked
+                        .unwrap_or_else(|e| Err(anyhow::anyhow!("Internal error in ref: {e}")));
                     checked.map(|result| (idx, result)).map_err(|e| {
                         anyhow::anyhow!("{url}: {e}. {} was not changed.", file.display())
                     })
@@ -268,28 +260,26 @@ struct VerifyResult {
     notes: Option<String>,
 }
 
-/// Verify one URL. `Err` means Chrome itself failed (no page, no navigation),
-/// which says nothing about the URL, so nothing may be recorded for it.
-async fn verify_url(
-    pool: &BrowserPool,
-    url: &str,
-    timeout: u64,
-) -> std::result::Result<VerifyResult, String> {
+/// Verify one URL. `Err` means Chrome itself failed
+/// ([`ChromeFailed`](crate::browser::ChromeFailed)), which says nothing about
+/// the URL, so nothing may be recorded for it (ADR-005 rule 3).
+async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> Result<VerifyResult> {
+    let dead = |notes: String| VerifyResult {
+        status: Status::Dead,
+        notes: Some(notes),
+    };
     if let Err(e) = crate::guard::check_web_url(url) {
-        return Ok(VerifyResult {
-            status: Status::Dead,
-            notes: Some(e),
-        });
+        return Ok(dead(e));
     }
-    let page = pool
-        .new_page()
-        .await
-        .map_err(|e| format!("Chrome failed: {e:#}"))?;
-    let nav = page
-        .goto(url, timeout)
-        .await
-        .map_err(|e| format!("Chrome failed: {e:#}"))?;
-    Ok(judge(&page, url, nav).await)
+    let page = match page_failure(pool.new_page().await)? {
+        Ok(page) => page,
+        Err(e) => return Ok(dead(format!("Browser error: {e}"))),
+    };
+    let nav = match page_failure(page.goto(url, timeout).await)? {
+        Ok(nav) => nav,
+        Err(e) => return Ok(dead(format!("Navigation error: {e}"))),
+    };
+    judge(&page, url, nav).await
 }
 
 /// The status of a page Chrome loaded
@@ -297,29 +287,29 @@ async fn judge(
     page: &crate::browser::BrowserPage,
     url: &str,
     nav: crate::browser::PageResult,
-) -> VerifyResult {
+) -> Result<VerifyResult> {
     let original_host = Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(std::string::ToString::to_string));
 
     // Check for navigation errors (DNS, connection, etc.)
     if nav.error.is_some() {
-        return VerifyResult {
+        return Ok(VerifyResult {
             status: Status::Dead,
             notes: nav.error,
-        };
+        });
     }
 
     // Any 4xx or 5xx response means the reference is dead
     if let Some(code) = nav.status.filter(|c| *c >= 400) {
-        return VerifyResult {
+        return Ok(VerifyResult {
             status: Status::Dead,
             notes: Some(format!("HTTP {code}")),
-        };
+        });
     }
 
     // Get final URL to check for cross-domain redirect
-    let final_url = page.current_url().await;
+    let final_url = page.current_url().await?;
     if let (Some(orig), Some(final_u)) = (&original_host, &final_url) {
         if let Ok(parsed) = Url::parse(final_u) {
             if let Some(final_host) = parsed.host_str() {
@@ -327,48 +317,59 @@ async fn judge(
                 let orig_norm = orig.trim_start_matches("www.");
                 let final_norm = final_host.trim_start_matches("www.");
                 if orig_norm != final_norm {
-                    return VerifyResult {
+                    return Ok(VerifyResult {
                         status: Status::Redirect,
                         notes: Some(final_u.clone()),
-                    };
+                    });
                 }
             }
         }
     }
 
     // Get page content to detect paywall/login
-    let Ok(html) = page.content().await else {
-        return VerifyResult {
+    let Ok(html) = page_failure(page.content().await)? else {
+        return Ok(VerifyResult {
             status: Status::Ok,
             notes: None,
-        };
+        });
     };
 
     match access::detect(&html) {
         Access::Paywall => {
-            return VerifyResult {
+            return Ok(VerifyResult {
                 status: Status::Paywall,
                 notes: Some("Paywall detected".to_string()),
-            }
+            })
         }
         Access::Login => {
-            return VerifyResult {
+            return Ok(VerifyResult {
                 status: Status::Login,
                 notes: Some("Login required".to_string()),
-            }
+            })
         }
         Access::Open => {}
     }
 
-    VerifyResult {
+    Ok(VerifyResult {
         status: Status::Ok,
         notes: None,
-    }
+    })
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_tab_chrome_refuses_is_recorded_for_that_url() {
+        // Needs Chrome (ADR-004). Chrome itself is fine, so this is the page's failure.
+        let (_dir, file) = one_reference();
+        let pool = crate::browser::tests::pool_that_cannot_set_up_tabs().await;
+        let plan = Plan::load(&file, None).await.unwrap();
+        let output = plan.run(&pool, 1, 5000, true).await.unwrap();
+        assert_eq!(output.summary.dead, 1);
+        pool.stop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn verify_starts_its_own_browser_when_none_is_shared() {
@@ -464,27 +465,28 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }
 
-    #[test]
-    fn the_run_error_comes_before_a_close_error() {
-        let run = |ok: bool| {
-            if ok {
-                Ok(1)
-            } else {
-                Err(anyhow::anyhow!("run failed"))
-            }
-        };
-        let closed = |ok: bool| {
-            if ok {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("close failed"))
-            }
-        };
-        let err = run_error_first(run(false), closed(false)).unwrap_err();
-        assert_eq!(err.to_string(), "run failed");
-        let err = run_error_first(run(true), closed(false)).unwrap_err();
-        assert_eq!(err.to_string(), "close failed");
-        assert_eq!(run_error_first(run(true), closed(true)).unwrap(), 1);
+    #[tokio::test]
+    async fn chrome_killed_mid_navigation_changes_nothing_in_the_file() {
+        // Needs Chrome (ADR-004). Before, the page's failure was written as dead.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("references.yaml");
+        let pool = Arc::new(
+            BrowserPool::new(1, Some(&crate::profile::ProfileChoice::Fresh))
+                .await
+                .unwrap(),
+        );
+        write_reference(
+            &file,
+            &crate::browser::tests::serve_trap(&pool, "-KILL").await,
+        );
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        let plan = Plan::load(&file, None).await.unwrap();
+        let err = plan.run(&pool, 1, 10_000, false).await.unwrap_err();
+        assert!(err.to_string().contains("Chrome failed"), "{err:#}");
+        assert!(err.to_string().contains("was not changed"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        pool.stop().await.unwrap();
     }
 
     #[tokio::test]

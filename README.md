@@ -120,6 +120,7 @@ Detected tables are in a `tables` array; section text keeps their cells on singl
 | `ref mcp` | Start MCP server (JSON-RPC 2.0 over stdio) |
 
 Exit codes: `0` when everything succeeded, `1` when any URL or file failed, `2` when the command itself failed.
+A Chrome that crashes or stops answering counts as the command failing (exit code `2`, no report), never as a failed URL.
 Progress goes to stderr; JSON goes to stdout.
 
 ## Signed-in pages: your saved profile
