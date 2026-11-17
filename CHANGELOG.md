@@ -2,6 +2,61 @@
 
 All notable changes to Möllendorff Ref.
 
+## [Unreleased]
+
+### Added
+
+- **`--profile <folder|fresh>`** on `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and `ref mcp`: chooses the Chrome profile for that run.
+  Without it, `REF_CHROME_PROFILE` gives the value, as before.
+
+### Changed
+
+- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does).
+  The `run_*` command functions write their JSON to a writer they are given.
+  New `check_links_with` and `refresh_data_with` run in a browser the caller already has (`Arc<BrowserPool>`, with plain values).
+  `BrowserPool::stop` stops Chrome through a shared reference and cannot fail, so it returns nothing (`close` too); `fetch_one`, `check_links_with`, `refresh_data_with` and `BrowserPage::current_url` return `Result`, whose error is `ChromeFailed` when Chrome itself failed.
+- `ref check-links`, `ref verify-refs` and `ref refresh-data` check each URL on a task of its own, at most `--concurrency` / `--parallel` at once; a panic on one URL becomes that URL's error ("Internal error in ref") instead of ending the run.
+- Pages run with Chrome's cache off, so a saved profile or the MCP server's long-lived browser never answers from an old copy.
+- **What ref does when Chrome crashes or hangs** is now one design, [ADR-005](docs/adr/ADR-005-CHROME-LIFECYCLE.md):
+  - A Chrome failure ends the command (exit code 2, no report; a tool error under MCP) and is never reported as a fact about a URL.
+    When a page fails, ref first asks whether Chrome still answers (at most 5 seconds); only a Chrome that answers makes it the page's failure, as before.
+  - ref signals only the Chrome it started, never a process named in a profile's lock file.
+  - Stopping asks Chrome to close and gives it 30 seconds to save a saved profile; only a Chrome that does not answer, or does not exit, is killed, with a warning.
+  - Every request to Chrome has a limit, also while Chrome is frozen: 30 seconds to open and set up a tab, and 30 seconds for everything read from a page after navigation.
+  - A crashed Chrome is noticed and collected at once, so it never seems to hold the profile's lock.
+  - A tab whose set-up fails is closed before the error is returned, and a run that stops early cancels its remaining checks.
+  - `ref mcp` stops its Chrome the same way when the server ends because its input closes, so a saved profile keeps the sign-ins of the session's last seconds.
+    A server ended by a signal (Ctrl-C, SIGTERM) still kills its Chrome at once.
+  - A Chrome that starts but does not answer leaves no temporary profile behind, and the error names the profile.
+  - So does a Chrome that cannot start at all, also after ref retries without the sandbox: the error begins "Chrome did not start (profile ...)".
+    A Chrome that exits before its first answer is an error, not a browser with an empty user agent.
+- `ref check-links` and `ref refresh-data` no longer end the program from inside (`process::exit`): a file without URLs still exits with code 1, and missing arguments still exit with code 2, now with the usage text after `Error:`.
+- The command line lives in the library (`ref::cli`), and `main` only calls it, so every exit code is tested in-process.
+- `ref fetch`, `ref verify-refs` and `ref check-links` share one cross-host redirect check (`www.` does not count); `ref verify-refs` also treats a page whose text cannot be read as having neither a paywall nor a login.
+- `ref refresh-data`, `ref fetch` and the PDF reader report every failure of one URL as that URL's failure; a PDF library panic or error is reported as "PDF extraction failed".
+- A PDF locked with a real user password is an error that names the password ("PDF extraction failed: PDF error: decryption error: the supplied password is incorrect"), not "PDF contains no extractable text". The PDF library opens a file locked with the empty password while loading it; for any other lock, `ref pdf` tries the empty password so the error comes back.
+- `ref check-links` reads URLs from the standard input it is given, so `--stdin` is tested with real input; its redirect check is one small function.
+- All tests are inline and none is skipped: the tests that need Chrome run in plain `cargo test` (ADR-004), and CI's separate job for them is gone.
+- The clean-up at exit removes only the temporary profiles of browsers that are gone, never one still in use.
+- `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
+- `ref update` removes its download folder however the update ends; before, a failed download, checksum entry, extraction or install left it in the temporary folder.
+- 100% line coverage of all code (ADR-004): CI's coverage gate and `make coverage` no longer leave any file out, and the README badge is a plain coverage badge.
+- `ref login --profile fresh` is refused, since a fresh profile's sign-ins would be deleted; before, it signed in to a folder named `fresh`.
+  `REF_CHROME_PROFILE=fresh` is still ignored by `ref login`, which then uses the default folder.
+- An empty `REF_CHROME_PROFILE` still counts as not set.
+
+### Fixed
+
+- **MCP with a saved profile**: `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` failed once `ref_fetch` had run, because each started a second Chrome on the profile the server's browser already held.
+  They now share the server's browser.
+- The "profile is open in another Chrome" error names the possible holders (`ref login`, a running `ref mcp`, another ref command) instead of only `ref login`.
+- **MCP after a Chrome crash or hang**: the call that meets the failure gets a tool error saying so, and the next call starts a new Chrome, instead of every later call failing.
+- **`verify-refs` with a failing Chrome** wrote every reference as `dead`, also when Chrome died in the middle of loading a page.
+  Now it stops at the first Chrome failure with an error naming the URL, and leaves `references.yaml` as it was.
+  The same holds when Chrome still answers but a tab cannot be opened: that says nothing about the URL either.
+- MCP calls with nothing to do (no URLs, nothing chosen, a missing file) answer without starting Chrome, so the real error is reported.
+- MCP `concurrency` / `parallel` values of 17 to 20 were quietly capped at 16 tabs; the shared browser now has 20.
+
 ## [1.9.0] - 2026-11-15
 
 Set the user agent, for sites such as SEC EDGAR.

@@ -45,7 +45,7 @@ fn is_url(path: &str) -> bool {
 ///
 /// Returns an error if JSON serialization or network request fails.
 /// Returns `Ok(false)` when any file could not be read or downloaded.
-pub async fn run_pdf(args: &PdfArgs) -> Result<bool> {
+pub async fn run_pdf(args: &PdfArgs, out: &mut dyn std::io::Write) -> Result<bool> {
     let file_count = args.files.len();
     eprintln!(
         "Extracting {} PDF{}...",
@@ -72,10 +72,10 @@ pub async fn run_pdf(args: &PdfArgs) -> Result<bool> {
 
     // Output compact JSON (one line per page for multiple, or single object)
     if results.len() == 1 {
-        println!("{}", serde_json::to_string(&results[0])?);
+        writeln!(out, "{}", serde_json::to_string(&results[0])?)?;
     } else {
         for page in &results {
-            println!("{}", serde_json::to_string(page)?);
+            writeln!(out, "{}", serde_json::to_string(page)?)?;
         }
     }
 
@@ -93,14 +93,35 @@ pub struct PdfPage {
     pub tables: Vec<Table>,
 }
 
-/// Largest PDF downloaded from a URL (bytes)
-const MAX_PDF_DOWNLOAD: usize = 100 * 1024 * 1024;
+/// What a PDF download may take: time to connect, time in all, and bytes
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DownloadLimits {
+    pub connect: std::time::Duration,
+    pub total: std::time::Duration,
+    pub max_bytes: usize,
+}
 
-/// Connect timeout for PDF downloads
-const PDF_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+impl Default for DownloadLimits {
+    fn default() -> Self {
+        Self {
+            connect: std::time::Duration::from_secs(15),
+            total: std::time::Duration::from_mins(1),
+            max_bytes: 100 * 1024 * 1024,
+        }
+    }
+}
 
-/// Total time allowed for one PDF download
-const PDF_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
+impl DownloadLimits {
+    /// What a timed-out download says
+    fn timed_out(&self) -> String {
+        format!("Download timed out (limit {} s)", self.total.as_secs())
+    }
+
+    /// What a download that is too large says
+    fn too_big(&self) -> String {
+        format!("PDF is larger than {} MB", self.max_bytes / 1024 / 1024)
+    }
+}
 
 pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
     extract_pdf_from_url_with(url, &crate::browser::DownloadHeaders::default()).await
@@ -111,10 +132,19 @@ pub(crate) async fn extract_pdf_from_url_with(
     url: &str,
     headers: &crate::browser::DownloadHeaders,
 ) -> PdfPage {
+    extract_pdf_from_url_within(url, headers, &DownloadLimits::default()).await
+}
+
+/// [`extract_pdf_from_url_with`] with other limits on the download
+pub(crate) async fn extract_pdf_from_url_within(
+    url: &str,
+    headers: &crate::browser::DownloadHeaders,
+    limits: &DownloadLimits,
+) -> PdfPage {
     if let Err(e) = crate::guard::check_web_url(url) {
         return error_page(url, &e);
     }
-    match download_pdf(url, headers).await {
+    match download_pdf(url, headers, limits).await {
         Ok(bytes) => {
             let name = url
                 .split(['?', '#'])
@@ -132,16 +162,16 @@ pub(crate) async fn extract_pdf_from_url_with(
 async fn download_pdf(
     url: &str,
     headers: &crate::browser::DownloadHeaders,
+    limits: &DownloadLimits,
 ) -> Result<Vec<u8>, String> {
-    let too_big = || format!("PDF is larger than {} MB", MAX_PDF_DOWNLOAD / 1024 / 1024);
     let user_agent = if headers.user_agent.is_empty() {
         concat!("mollendorff-ref/", env!("CARGO_PKG_VERSION")).to_string()
     } else {
         headers.user_agent.clone()
     };
     let client = reqwest::Client::builder()
-        .connect_timeout(PDF_CONNECT_TIMEOUT)
-        .timeout(PDF_DOWNLOAD_TIMEOUT)
+        .connect_timeout(limits.connect)
+        .timeout(limits.total)
         .user_agent(user_agent)
         .build()
         .map_err(|e| format!("Download failed: {e}"))?;
@@ -151,10 +181,7 @@ async fn download_pdf(
     }
     let mut resp = request.send().await.map_err(|e| {
         if e.is_timeout() {
-            format!(
-                "Download timed out (limit {} s)",
-                PDF_DOWNLOAD_TIMEOUT.as_secs()
-            )
+            limits.timed_out()
         } else {
             format!("Download failed: {e}")
         }
@@ -164,23 +191,20 @@ async fn download_pdf(
     }
     if resp
         .content_length()
-        .is_some_and(|n| n > MAX_PDF_DOWNLOAD as u64)
+        .is_some_and(|n| n > limits.max_bytes as u64)
     {
-        return Err(too_big());
+        return Err(limits.too_big());
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| {
         if e.is_timeout() {
-            format!(
-                "Download timed out (limit {} s)",
-                PDF_DOWNLOAD_TIMEOUT.as_secs()
-            )
+            limits.timed_out()
         } else {
             format!("Failed to read response: {e}")
         }
     })? {
-        if bytes.len() + chunk.len() > MAX_PDF_DOWNLOAD {
-            return Err(too_big());
+        if bytes.len() + chunk.len() > limits.max_bytes {
+            return Err(limits.too_big());
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -201,16 +225,20 @@ pub(crate) fn extract_pdf(path: &PathBuf) -> PdfPage {
     extract_pdf_bytes(&bytes, file_url, path)
 }
 
+/// Run `work`, whose error is the PDF's failure to be read. pdf-extract can
+/// also panic on malformed files; that is reported as an error too, so it
+/// cannot take down the whole command or the MCP server.
+fn guarded<T>(
+    work: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe,
+) -> Result<T, String> {
+    std::panic::catch_unwind(work).unwrap_or_else(|_| Err("malformed PDF".to_string()))
+}
+
 /// Extract a PDF held in memory; `name` gives the fallback title.
 fn extract_pdf_bytes(bytes: &[u8], file_url: String, name: &Path) -> PdfPage {
-    // pdf-extract can panic on malformed files; keep that from taking down
-    // the whole command or the MCP server.
-    let (text, info) = match std::panic::catch_unwind(|| extract_layout_text(bytes)) {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            return error_page(&file_url, &format!("PDF extraction failed: {e}"));
-        }
-        Err(_) => return error_page(&file_url, "PDF extraction failed: malformed PDF"),
+    let (text, info) = match guarded(|| extract_layout_text(bytes).map_err(|e| e.to_string())) {
+        Ok(extracted) => extracted,
+        Err(why) => return error_page(&file_url, &format!("PDF extraction failed: {why}")),
     };
 
     if text.is_empty() {
@@ -286,7 +314,143 @@ fn error_page(url: &str, error: &str) -> PdfPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{pdf_with_lines, ref_cmd, serve};
     use crate::text::truncate;
+    use std::process::ExitCode;
+
+    #[test]
+    fn a_reader_that_fails_or_panics_gives_an_error_not_a_crash() {
+        assert_eq!(guarded(|| Ok::<_, String>(7)), Ok(7));
+        assert_eq!(
+            guarded(|| Err::<u8, _>("bad xref".to_string())),
+            Err("bad xref".to_string())
+        );
+        let panicked = guarded(|| -> Result<u8, String> { panic!("lopdf gave up") });
+        assert_eq!(panicked, Err("malformed PDF".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_download_client_that_cannot_be_built_is_a_failed_download() {
+        // A user agent with a line break is not a valid header value
+        let headers = crate::browser::DownloadHeaders {
+            user_agent: "bad\nagent".into(),
+            cookie: None,
+        };
+        let page = extract_pdf_from_url_within("http://127.0.0.1:9/a.pdf", &headers, &SHORT).await;
+        assert!(alert_of(&page).contains("Download failed"), "{page:?}");
+    }
+
+    const SHORT: DownloadLimits = DownloadLimits {
+        connect: std::time::Duration::from_secs(5),
+        total: std::time::Duration::from_millis(700),
+        max_bytes: 2000,
+    };
+
+    async fn download(url: &str) -> PdfPage {
+        let headers = crate::browser::DownloadHeaders::default();
+        extract_pdf_from_url_within(url, &headers, &SHORT).await
+    }
+
+    fn alert_of(page: &PdfPage) -> String {
+        assert_eq!(page.base.status, PageStatus::Dead);
+        page.base.alerts.join(" ")
+    }
+
+    #[tokio::test]
+    async fn a_download_that_goes_wrong_says_how() {
+        let base = serve();
+        let cases = [
+            ("/slow.pdf", "Download timed out"),
+            ("/stall.pdf", "Download timed out"),
+            ("/big.pdf", "larger than"),
+            ("/chunked.pdf", "larger than"),
+            ("/cut.pdf", "Failed to read response"),
+            ("/text.pdf", "PDF extraction failed"),
+            ("/signed-in.pdf", "HTTP 403"),
+        ];
+        for (path, expected) in cases {
+            let page = download(&format!("{base}{path}")).await;
+            let alert = alert_of(&page);
+            assert!(alert.contains(expected), "{path}: {alert}");
+        }
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let alert = alert_of(&download(&format!("http://{closed}/a.pdf")).await);
+        assert!(alert.contains("Download failed"), "{alert}");
+        let alert = alert_of(&download("file:///etc/hostname").await);
+        assert!(alert.contains("Only http and https"), "{alert}");
+    }
+
+    #[tokio::test]
+    async fn a_pdf_from_a_url_is_downloaded_and_extracted() {
+        let base = serve();
+        let page = extract_pdf_from_url(&format!("{base}/report.pdf")).await;
+        assert_eq!(page.base.status, PageStatus::Ok);
+        assert_eq!(page.base.title.as_deref(), Some("Regional report"));
+    }
+
+    #[tokio::test]
+    async fn several_files_and_urls_give_one_json_line_each() {
+        let base = serve();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/report.pdf");
+        let url = format!("{base}/report.pdf");
+        let (code, out, _) = ref_cmd(&["pdf", fixture, &url, "/no/such/file.pdf"]).await;
+        assert_eq!(code, ExitCode::from(1));
+        let pages: Vec<serde_json::Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(pages.len(), 3, "{out}");
+        assert_eq!(
+            (pages[0]["status"].as_str(), pages[1]["status"].as_str()),
+            (Some("ok"), Some("ok"))
+        );
+        assert_eq!(pages[2]["status"], "dead");
+
+        let (code, out, _) = ref_cmd(&["pdf", fixture]).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(out.starts_with("{\"url\":\"file://"), "{out}");
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_used_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let alert = |path: &Path| alert_of(&extract_pdf(&path.to_path_buf()));
+        assert_eq!(alert(&dir.path().join("missing.pdf")), "File not found");
+        // The empty path has no absolute form
+        assert_eq!(alert(Path::new("")), "File not found");
+        // A folder cannot be read as a file
+        assert!(alert(dir.path()).contains("Failed to read file"));
+
+        let garbage = dir.path().join("garbage.pdf");
+        std::fs::write(&garbage, b"%PDF-1.4 this is not really a pdf").unwrap();
+        assert!(alert(&garbage).contains("PDF extraction failed"));
+
+        // Not even the start of a PDF: reading fails instead of panicking
+        let text = dir.path().join("text.pdf");
+        std::fs::write(&text, b"hello").unwrap();
+        assert!(alert(&text).contains("PDF extraction failed"));
+
+        let blank = dir.path().join("blank.pdf");
+        std::fs::write(&blank, pdf_with_lines(&[])).unwrap();
+        assert_eq!(alert(&blank), "PDF contains no extractable text");
+    }
+
+    #[test]
+    fn a_long_section_is_cut_and_the_page_says_so() {
+        let long = "word ".repeat(2500);
+        let bytes = pdf_with_lines(&["1. Introduction", &long]);
+        let page = extract_pdf_bytes(&bytes, "file:///long.pdf".into(), Path::new("long.pdf"));
+        assert_eq!(page.base.status, PageStatus::Ok);
+        assert!(page.base.truncated);
+        assert!(
+            page.base.alerts[0].starts_with("Content truncated"),
+            "{:?}",
+            page.base.alerts
+        );
+    }
 
     /// The fixture made by `tests/fixtures/make_report_pdf.py`: a first-line
     /// heading, a table drawn cell by cell with right-aligned numbers and

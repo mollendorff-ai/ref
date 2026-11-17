@@ -54,19 +54,20 @@ Add to `.vscode/mcp.json`:
 
 The MCP server uses ref's saved profile (`~/.ref/chrome-profile`) when it exists, so tools see the sites you signed in to with `ref login`.
 Stop the server before running `ref login`, since only one Chrome can use the profile at a time.
-To use another profile, set `REF_CHROME_PROFILE` in the server's environment:
+To use another profile, pass `--profile` (or set `REF_CHROME_PROFILE` in the server's environment); `--profile fresh` gives an empty, temporary profile:
 
 ```json
 {
   "mcpServers": {
     "ref": {
       "command": "ref",
-      "args": ["mcp"],
-      "env": { "REF_CHROME_PROFILE": "/Users/me/.ref/work-profile" }
+      "args": ["mcp", "--profile", "/Users/me/.ref/work-profile"]
     }
   }
 }
 ```
+
+All browser tools of one server share a single Chrome, so they never lock each other out of the profile.
 
 An agent using these tools browses those sites as you.
 
@@ -80,7 +81,10 @@ Absolute paths elsewhere, `..`, symlinks that lead outside (including files matc
 When the workspace is the filesystem root, file tools are refused.
 
 `parallel` and `concurrency` must be between 1 and 20.
-The server keeps one browser with up to 16 tabs; each call uses at most its own `parallel` value, and every tab is closed when its page is done.
+The server keeps one browser with up to 20 tabs, shared by every browser tool; each call uses at most its own `parallel` / `concurrency` value, calls running at the same time share the tabs, and every tab is closed when its page is done.
+Chrome starts on the first call that has pages to open.
+If Chrome crashes or hangs, the call that meets it gets a tool error saying "Chrome failed", and the next call starts a new Chrome on the same profile (see [ADR-005](adr/ADR-005-CHROME-LIFECYCLE.md)).
+Pages run with Chrome's cache off, so every call asks the sites again.
 Only `http` and `https` URLs are fetched.
 
 ### ref_fetch

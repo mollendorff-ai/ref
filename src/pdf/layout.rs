@@ -12,13 +12,14 @@ pub(super) fn extract_layout_text(
     bytes: &[u8],
 ) -> Result<(String, PdfInfo), pdf_extract::OutputError> {
     let mut doc = pdf_extract::Document::load_mem(bytes)?;
-    let mut out = LayoutText::default();
+    // lopdf opens a PDF locked with the empty password while loading it. One
+    // that needs a real password stays locked; trying the empty password here
+    // makes the error say so, instead of the text just coming out empty.
     if doc.is_encrypted() {
-        // restrictions only); pdf-extract's own functions try the same.
-        pdf_extract::output_doc_encrypted(&mut doc, &mut out, "")?;
-    } else {
-        pdf_extract::output_doc(&doc, &mut out)?;
+        doc.decrypt("")?;
     }
+    let mut out = LayoutText::default();
+    pdf_extract::output_doc(&doc, &mut out)?;
     let info = PdfInfo {
         title: info_string(&doc, b"Title").filter(|t| usable_title(t)),
         author: info_string(&doc, b"Author").filter(|a| usable_author(a)),
@@ -147,12 +148,9 @@ impl LayoutText {
             Some(origin) if gap >= font_size * COLUMN_GAP_EM && font_size > 0.0 => {
                 // Pad to the column of `x`, so cells in the same column line
                 // up across rows; at least two spaces mark a column gap.
+                // (a float cast gives 0 for a negative or missing number)
                 let column = ((x - origin) / (font_size * CHAR_WIDTH_EM)).round();
-                let column = if column.is_finite() && column > 0.0 {
-                    column.min(10_000.0) as usize
-                } else {
-                    0
-                };
+                let column = column.clamp(0.0, 10_000.0) as usize;
                 column.saturating_sub(self.line_chars).max(2)
             }
             _ => 1,
@@ -233,6 +231,45 @@ impl pdf_extract::OutputDev for LayoutText {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{pdf_with_lines, pdf_with_text};
+
+    #[test]
+    fn text_left_of_where_the_line_began_is_placed_at_the_start() {
+        // The second text is drawn left of the first: no negative column
+        let bytes = pdf_with_text(&[(100.0, 700.0, "Right"), (20.0, 700.0, "Left")]);
+        let (text, _) = extract_layout_text(&bytes).unwrap();
+        assert!(text.contains("Right") && text.contains("Left"), "{text:?}");
+    }
+
+    /// A PDF with one line of text, locked with these passwords
+    fn locked_pdf(user_password: &str) -> Vec<u8> {
+        use pdf_extract::{Document, EncryptionState, EncryptionVersion, Permissions};
+        let plain = pdf_with_lines(&["Confidential report text"]);
+        let mut doc = Document::load_mem(&plain).unwrap();
+        let version = EncryptionVersion::V1 {
+            document: &doc,
+            owner_password: "owner",
+            user_password,
+            permissions: Permissions::all(),
+        };
+        let state = EncryptionState::try_from(version).unwrap();
+        doc.encrypt(&state).unwrap();
+        let mut locked = Vec::new();
+        doc.save_to(&mut locked).unwrap();
+        locked
+    }
+
+    #[test]
+    fn a_pdf_locked_with_an_empty_user_password_is_still_read() {
+        let (text, _) = extract_layout_text(&locked_pdf("")).unwrap();
+        assert!(text.contains("Confidential report text"), "{text:?}");
+    }
+
+    #[test]
+    fn a_pdf_locked_with_a_user_password_is_an_error_naming_the_password() {
+        let err = extract_layout_text(&locked_pdf("secret")).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("password"), "{err}");
+    }
 
     #[test]
     fn layout_gap_spaces_line_up_columns() {

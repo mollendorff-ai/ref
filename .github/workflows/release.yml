@@ -31,14 +31,11 @@ jobs:
       - name: Clippy (pedantic, all targets)
         run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
 
-      - name: Run unit tests
-        run: cargo test
-
       - name: Verify Chrome
         run: google-chrome-stable --version
 
-      - name: Run e2e tests
-        run: cargo test -- --ignored
+      - name: Run tests
+        run: cargo test
 
   build:
     name: Build ${{ matrix.target }}

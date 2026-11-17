@@ -13,6 +13,8 @@ readme = "README.md"
 [[bin]]
 name = "ref"
 path = "src/main.rs"
+# main.rs only calls mollendorff_ref::cli::main, whose tests are in the library
+test = false
 
 [dependencies]
 # CLI
@@ -60,8 +62,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-assert_cmd = "2.1"
-predicates = "3.1"
 tempfile = "3.25"
 wiremock = "0.6"
 

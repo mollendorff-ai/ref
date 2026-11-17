@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: null
+current: CHROME_LIFECYCLE
 
 shipped:
   - version: "1.5.1"
@@ -19,7 +19,93 @@ shipped:
     date: "2026-03-07"
     summary: "PDF from URL and --selector for fetch"
 
-upcoming: []
+upcoming:
+  - summary: "Meet the strict quality rules (ADR-004, CLAUDE.md) (done 2026-11-17: 100% line coverage of all code, 9,173 lines)"
+    goal: "STRICT_RULES"
+    source: "Measured on 2026-11-16 over all code, every test run: 78.03% line coverage (5,125 lines, 1,126 not covered)"
+    deliverables:
+      - "Rules written down: CLAUDE.md, .asimov/project.yaml coding_standards, ADR-004 (supersedes ADR-003)"
+      - "Done 2026-11-17. Seam 1, output: each run_* command writes its JSON to a writer it is given (main passes stdout), so inline tests read the output in-process; internal only"
+      - "Done 2026-11-17. Seam 2, profile: global option ref --profile <folder|fresh>, read from REF_CHROME_PROFILE when not given (clap env), passed to the five places that start Chrome (fetch, check_links, verify_refs, refresh_data, mcp); ref login keeps its own --profile <folder> with the same parsing and refuses fresh; every Chrome test passes --profile fresh, so tests never touch a saved profile and run in parallel; README and CHANGELOG updated; ships in 1.10.0"
+      - "Done 2026-11-17. main becomes a thin wrapper over cli::execute(args, out, err, stop) -> ExitCode; tests/cli_tests.rs is gone, its 12 tests are 14 inline tests in src/cli.rs; check_links and refresh_data no longer call process::exit"
+      - "Done 2026-11-17. tests/e2e_local.rs moved inline (fetch, check_links, scan; the test web server is src/test_server.rs); no #[ignore] anywhere; CI's e2e job removed, the test job runs the Chrome tests; the bin target has test = false (main.rs only calls cli::main); the CI gate's exclusion follows the browser/ split"
+      - "Done 2026-11-17: fetch, verify_refs, refresh_data, pdf/ (100%); the CI gate now excludes only browser/, login, main, mcp, update"
+      - "Done 2026-11-17: init, scan, check_links (100%; --stdin input injected into cli::execute)"
+      - "Done 2026-11-17: update (a fake GitHub, the binary and scratch folder injected), login (the Chrome program injected; true and false stand in for it), mcp (a whole session on an in-memory pipe, through the body of run_mcp), browser/ (start-up options injected: Chrome program, sandbox, request budget; the orphan sweep takes its folder)"
+      - "Done 2026-11-17: the cross-host redirect check is one function, fetch::redirect_target"
+      - "Done 2026-11-17. Remove the coverage exclusions from the Makefile and CI; gate is cargo llvm-cov --fail-under-lines 100 over everything; README badge renamed from Logic coverage"
+      - "Split any file that passes 1,500 lines (on 2026-11-17 the largest are fetch.rs, 1,353, and browser/mod.rs, 1,206)"
+      - "Done 2026-11-17. Real tests for the clean-up after killed runs (sweep_orphans, kill_chrome_using: plant a profile folder named for a dead ref process) and for navigation timeouts; before, they were covered only by leftovers of earlier runs"
+      - "Done 2026-11-17: browser.rs split into browser/mod.rs (pool and lifecycle), page.rs (tabs) and process.rs (starting Chrome, processes, profile folders)"
+  - summary: "MCP tools lock each other out of a saved profile (done 2026-11-17, Unreleased)"
+    goal: "MCP_SHARED_PROFILE"
+    source: "Probe on 2026-11-17: after ref_fetch, ref_check_links on a saved profile fails with 'profile is open in another Chrome'"
+    deliverables:
+      - "ref_check_links, ref_refresh_data and ref_verify_refs reuse the server's shared browser instead of starting a second Chrome on the same profile"
+      - "The lock error names the real holder (here the MCP server's own Chrome), not only ref login"
+      - "Test with a saved profile: ref_fetch, then each other browser tool, all succeed"
+  - summary: "Chrome lifecycle: implement ADR-005 in one pass (implemented 2026-11-17; fixing the review against the ADR)"
+    goal: "CHROME_LIFECYCLE"
+    source: "Third review on 2026-11-17 (range 8b9cd7c..18a7b16): ten findings, all in how ref handles a Chrome that crashes or hangs; ADR-005 replaces patching"
+    deliverables:
+      - "ADR-005 accepted by the maintainer (2026-11-17)"
+      - "Rule 1: the pool records its Chrome's process id at start and signals nothing else; remove stop_chrome (kill by lock file)"
+      - "Rule 2: is_alive with a 5 s limit"
+      - "Rule 3: typed ChromeFailed error, failed pools stay failed, a Chrome failure ends the command (exit 2, MCP tool error); verify-refs never writes after one, also mid-navigation"
+      - "Rule 4: stop through &self (browser handle behind a read-write lock): ask, wait 30 s after an acknowledged close, then kill; collect the process; remove close_shared, is_zombie and the unconditional kill after 5 s"
+      - "Rule 5: the MCP server replaces a failed Chrome between calls"
+      - "Rule 6: one helper and one table of time limits; one 30 s budget for a tab's set-up and one for a page's reads; a tab is closed whichever way set-up ends"
+      - "Rule 7: task::isolated cancels its task when the caller stops waiting"
+      - "The seven tests in the ADR, with a real Chrome frozen (SIGSTOP) or killed; one kill_process helper"
+      - "README, MCP guide and CHANGELOG say what a Chrome failure does"
+      - "Done 2026-11-17. Review against ADR-005 (5ac18a2..fe2d1a7, 2026-11-17): drop the message handler before collecting an exited Chrome; never ask whether Chrome is alive while holding the browser lock; keep ChromeFailed typed in verify-refs; stop the shared Chrome gracefully when the MCP server ends; remove the profile when Chrome does not answer at start; a new navigation gets a new read budget; no new #[allow] in mcp.rs; one remove-and-retry helper, waiting only after a kill; stop returns ()"
+      - "Done 2026-11-17. Decided 2026-11-17 (ADR-005 rule 3): in verify-refs, a tab that cannot be opened or set up while Chrome answers ends the run and writes nothing; the other commands keep it as that URL's error"
+      - "Done 2026-11-17. Last review (fe2d1a7..06650a5), to fix here: new_page checks for a failed pool again after waiting for a tab slot; remove_dir_retrying stops as soon as the folder is gone and retries whenever it is not (a crashed Chrome's helpers may still write), so the final clean-up no longer waits per folder; goto clears the read budget when it starts"
+      - "Stopping rule (2026-11-17): after these fixes, one more review; then anything that is not a real bug goes to the roadmap and work moves to STRICT_RULES step 4"
+  - summary: "Chrome lifecycle: what the last review left (not regressions)"
+    goal: "CHROME_LIFECYCLE_FOLLOWUP"
+    source: "Final review on 2026-11-17 (fe2d1a7..06650a5), sorted under the stopping rule: three small regressions are fixed in CHROME_LIFECYCLE, the rest is here"
+    deliverables:
+      - "ref mcp ended by a signal (Ctrl-C, SIGTERM) stops its Chrome gracefully, within a limit, instead of killing it; today only a closed input does (main.rs drops the command on a signal)"
+      - "After the server ends, a tool call still running must not start a new Chrome (a 'server ended' state in the pool slot)"
+      - "Done 2026-11-17. One guard for start-up failures: every way BrowserPool::new fails (the retry without the sandbox too) ends its Chrome and removes a fresh profile; a Chrome that dies right after launch is an error, not a pool with an empty user agent"
+      - "One Chrome method for requests on the browser itself (read lock, attempt, drop the lock, then judge, with the failed-pool check), so the lock order cannot be got wrong at a new call site"
+      - "Done 2026-11-17. A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
+      - "verify-refs: a test for a tab that dies between opening and navigation, and an error message that says it was the tab"
+      - "\"Chrome started but did not answer\" also covers a Chrome that answered with an error, and the reason is not shown (BrowserPool::start in src/browser/mod.rs); show it"
+  - summary: "Small findings from the last review (not bugs of this branch)"
+    goal: "REVIEW_LEFTOVERS"
+    source: "Review of ec2e81e on 2026-11-17"
+    deliverables:
+      - "The CI test-count badge reads about four too high: the profile.rs tests start child test runs, and their \"test result:\" lines are counted too"
+      - "ref check-links --stdin at a terminal can swallow Ctrl-C while it waits for input (older than this branch)"
+      - "Clippy 1.100 (pedantic) flags code that 1.99.1, the version CI's lint job pins, accepts: src/cli.rs:139 (must_use with no message), src/fetch.rs:530 and src/test_server.rs:387 (map then unwrap_or_default), src/scan.rs:395 and :449 and src/test_server.rs:410 (unused ExitCode in a tuple); fix them before moving the pin"
+      - "CI's coverage job runs on the stable toolchain, which moves with each Rust release and changes which lines the gate counts (Rust 1.100 showed 8 untaken branches that 1.97 and 1.99.1 did not); run the gate on the same version CI uses, or pin it"
+  - summary: "Content detection on GitHub pages"
+    goal: "GITHUB_CONTENT"
+    source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
+    deliverables:
+      - "No false paywall: a public repo page (13,046 readable chars) comes back as status paywall, likely from GitHub's 'You must be signed in to...' button wording"
+      - "Main content: the README (article.markdown-body) should win over repository navigation, About, Stars, Forks and other sidebar sections, which come first and repeat after it"
+  - summary: "Evaluation fixes (Ref Evaluation, 2026-11-16, grade A-)"
+    goal: "EVAL_FIXES"
+    deliverables:
+      - "Create the saved-profile folder readable by the owner only (0700); today src/browser.rs creates it with default permissions"
+      - "README: say that ref fetch opens localhost and private addresses"
+      - "README: one line on sites' terms of service for signed-in browsing"
+      - "README: 'ref pdf' does not use the saved profile (URLs are downloaded without Chrome or its cookies); only ref fetch of a PDF URL is signed in. Fix the sentence under First time, step 4, or give ref pdf the profile's cookies"
+      - "One description everywhere: README and Cargo.toml say 'compact JSON', the GitHub About says 'token-optimized JSON', mollendorff.ai says 'clean JSON', .asimov/project.yaml has its own"
+  - summary: "--user-agent in the MCP server"
+    goal: "MCP_USER_AGENT"
+    deliverables:
+      - "user_agent parameter on ref_fetch and ref_check_links (src/mcp.rs passes None today)"
+      - "Try --user-agent against sec.gov (www.sec.gov is allowed in the cloud environment)"
+  - summary: "macOS check (manual, on Luis's Mac)"
+    goal: "MACOS_CHECK"
+    deliverables:
+      - "ref update, ref login, sign in to sites, quit Chrome with Cmd-Q, then check that a signed-in page fetches"
+      - "After CHROME_LIFECYCLE (ADR-005, untested on macOS): with ref mcp running on the saved profile, kill ref's Chrome and make another call; it should start a new Chrome and succeed"
+      - "After CHROME_LIFECYCLE: after such a crash, run ref login, then make an MCP call; the login window must stay open and the call must say the profile is in use"
 
 backlog:
   - summary: "Reference management"

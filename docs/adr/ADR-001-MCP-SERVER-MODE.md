@@ -12,7 +12,8 @@
 The decision stands. Three things below describe the design as first written, not the code today:
 
 - `rmcp` is at 3.9 (see `Cargo.toml`). The 0.14 and 0.16 versions, download counts and star counts below are from when the decision was made.
-- Only `ref_fetch` reuses one shared browser (up to 16 tabs). `ref_check_links`, `ref_verify_refs` and `ref_refresh_data` start their own browser for each call, so the "Shared Browser Pool" box in the diagram applies to `ref_fetch` only.
+- All browser tools (`ref_fetch`, `ref_check_links`, `ref_verify_refs`, `ref_refresh_data`) share one browser of up to 20 tabs (since the Unreleased version after 1.9.0; before, only `ref_fetch` did, and the others started a browser per call, which locked a saved profile).
+  Chrome starts on the first call that has work to do, and again when it stops answering; pages run with Chrome's cache off.
 - When a saved profile exists (`ref login`), the MCP server runs Chrome with it, so tools see the sites you signed in to. See the README.
 
 ## Implementation Notes (v1.5.0)
@@ -21,7 +22,7 @@ Implemented 2026-02-22 using `rmcp` 0.16.0 (up from 0.14.0 evaluated):
 
 - **New file**: `src/mcp.rs` (~430 lines including tests)
 - **6 tools** exposed: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`
-- **Lazy browser pool**: `Arc<OnceCell<BrowserPool>>` — Chrome launches on first fetch, persists across calls
+- **Lazy browser pool**: `Arc<OnceCell<BrowserPool>>` — Chrome launches on first fetch, persists across calls (replaced later by a pool that is started again when Chrome stops answering; see Context above)
 - **Zero duplication**: MCP tools delegate to existing `pub(crate)` core functions
 - **Schema generation**: Parameter structs derive `schemars::JsonSchema` for automatic JSON Schema in `tools/list`
 

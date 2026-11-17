@@ -207,19 +207,12 @@ fn parse_table_region(lines: &[&str], config: &TableConfig) -> Option<Table> {
     } else {
         // Rows with empty cells: find consistent column boundaries across all lines
         let column_positions = find_column_positions(lines, config)?;
-        if column_positions.len() < config.min_columns - 1 {
-            return None;
-        }
         lines
             .iter()
             .map(|line| extract_cells(line, &column_positions))
             .filter(|cells| cells.iter().any(|c| !c.is_empty()))
             .collect()
     };
-
-    if rows.len() < config.min_rows {
-        return None;
-    }
 
     let (headers, data_rows) = detect_header_row(&rows);
 
@@ -449,6 +442,148 @@ fn generate_table_markdown(headers: Option<&Vec<String>>, rows: &[Vec<String>]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rows(text: &str) -> Vec<Vec<String>> {
+        detect_tables(text)
+            .into_iter()
+            .flat_map(|t| t.rows)
+            .collect()
+    }
+
+    #[test]
+    fn rows_whose_gaps_never_line_up_are_no_table() {
+        // Different numbers of cells, and no column position in common
+        assert_eq!(
+            detect_tables("ab  cdefghijkl\nabcdefghijkl  mn  op\n").len(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_empty_line_has_no_cells() {
+        assert_eq!(extract_cells("", &[3]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn rows_with_empty_cells_are_split_on_the_columns_they_share() {
+        let text =
+            "Region    Q2    Q3\nNorth    140   150\nSouth          200\nEast     80    90\n";
+        let tables = detect_tables(text);
+        assert_eq!(tables.len(), 1, "{tables:?}");
+        let all: Vec<_> = tables[0].rows.iter().map(|r| r.join("|")).collect();
+        assert!(all.iter().any(|r| r.contains("200")), "{all:?}");
+        assert_eq!(tables[0].rows.iter().map(Vec::len).max(), Some(3));
+    }
+
+    #[test]
+    fn a_blank_line_between_rows_keeps_the_table_unless_the_next_row_differs() {
+        let spaced = "Item    Price\nTea     3\n\nCoffee  4\n";
+        assert_eq!(detect_tables(spaced).len(), 1);
+        // The header row is not one of the data rows
+        assert_eq!(rows(spaced).len(), 2);
+        // After a blank line a row with another number of cells starts anew
+        let split = "Item    Price\nTea     3\n\nA    B    C\nD    E    F\n";
+        assert_eq!(detect_tables(split).len(), 2);
+    }
+
+    #[test]
+    fn headings_and_prose_are_never_table_rows() {
+        let text = "2.1  Notes on the data\nFigures are unaudited and the East includes two new stores opened in August.\nTea     3\nCoffee  4\n";
+        let all = rows(text);
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert!(!is_potential_table_line("a  b", &TableConfig::default()));
+        assert!(is_prose_line(&"word ".repeat(40)));
+        assert!(is_prose_line("This sentence has six words and ends."));
+        assert!(!is_prose_line("Tea    3    4."));
+        assert!(is_prose_line("Sales of the north rose strongly again"));
+        assert!(!is_prose_line("North   Sales   Rise"));
+    }
+
+    #[test]
+    fn a_single_line_or_columns_that_do_not_line_up_are_no_table() {
+        assert!(detect_tables("Tea     3\n").is_empty());
+        let config = TableConfig::default();
+        assert!(parse_table_region(&["Tea     3"], &config).is_none());
+        // Gaps in different places on every row: no shared column
+        let scattered = ["a   b   c", "abcdefghijkl   m"];
+        assert!(find_column_positions(&scattered, &config).is_none());
+        assert!(parse_table_region(&scattered, &config).is_none());
+        assert!(find_column_positions(&["one two three"], &config).is_none());
+    }
+
+    #[test]
+    fn at_most_twenty_tables_are_kept() {
+        let one = "Item    Price\nTea     3\ntext line without gaps\n";
+        assert_eq!(detect_tables(&one.repeat(30)).len(), 20);
+    }
+
+    #[test]
+    fn cells_are_cut_at_the_column_positions() {
+        assert_eq!(extract_cells("ab  cd  ef", &[3, 7]), ["ab", "cd", "ef"]);
+        // A position past the end of the line is skipped, text after the last one is kept
+        assert_eq!(extract_cells("ab  cd", &[3, 40]), ["ab", "cd"]);
+        assert_eq!(extract_cells("ab", &[3]), ["ab"]);
+    }
+
+    #[test]
+    fn the_first_row_is_a_header_when_it_reads_like_one() {
+        let row = |cells: &[&str]| cells.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(detect_header_row(&[]).0, None);
+        let single = detect_header_row(&[row(&["a", "b"])]);
+        assert_eq!((single.0, single.1.len()), (None, 1));
+
+        // Words over numbers
+        let words_over_numbers = [row(&["Region", "Q3"]), row(&["North", "150"])];
+        assert_eq!(
+            detect_header_row(&words_over_numbers).0,
+            Some(row(&["Region", "Q3"]))
+        );
+        // ALL CAPS over Title Case
+        let caps = [
+            row(&["REGION", "TOTAL"]),
+            row(&["North Region", "East Total"]),
+            row(&["South Region", "West Total"]),
+        ];
+        assert!(detect_header_row(&caps).0.is_some());
+        // Rows styled alike say nothing
+        let alike = [row(&["north", "east"]), row(&["south", "west"])];
+        assert_eq!(detect_header_row(&alike).0, None);
+        // Numbers over words are not a header
+        let numbers_first = [row(&["150", "140"]), row(&["North", "East"])];
+        assert_eq!(detect_header_row(&numbers_first).0, None);
+    }
+
+    #[test]
+    fn numbers_and_capitals_are_told_apart() {
+        for yes in ["150", "$1,200", "(45)", "12%", "-3", ".5", "+7"] {
+            assert!(has_numeric_value(yes), "{yes}");
+        }
+        for no in ["Q3", "FY2026", "north", "", "."] {
+            assert!(!has_numeric_value(no), "{no}");
+        }
+        let row = |cells: &[&str]| cells.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(caps_style(&row(&["ABC", "DEF"])), 2);
+        assert_eq!(caps_style(&row(&["Abc", "def"])), 1);
+        assert_eq!(caps_style(&row(&["abc", "def"])), 0);
+        assert_eq!(caps_style(&row(&["123", "45"])), 0);
+        assert!(!is_title_case_word("  "));
+        assert!(!is_title_case_word("ABC"));
+        assert!(is_title_case_word("Abc"));
+    }
+
+    #[test]
+    fn markdown_has_a_header_row_even_when_none_was_detected() {
+        let row = |cells: &[&str]| cells.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(generate_table_markdown(None, &[]), "");
+        assert_eq!(
+            generate_table_markdown(Some(&Vec::new()), &[row(&["a"])]),
+            ""
+        );
+        let md = generate_table_markdown(None, &[row(&["a", "b"]), row(&["c"])]);
+        assert_eq!(md, "| | |\n|---|---|\n|a|b|\n|c| |\n");
+        let with = generate_table_markdown(Some(&row(&["H1", ""])), &[row(&["x", "y"])]);
+        assert_eq!(with, "|H1| |\n|---|---|\n|x|y|\n");
+    }
 
     #[test]
     fn test_find_gaps() {

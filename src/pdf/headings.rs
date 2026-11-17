@@ -193,6 +193,31 @@ static ROMAN_RE: LazyLock<Regex> = LazyLock::new(|| {
 mod tests {
     use super::*;
 
+    fn heading(line: &str) -> Option<(u8, String)> {
+        detect_heading(line, &HeadingConfig::default()).map(|h| (h.level, h.text))
+    }
+
+    #[test]
+    fn what_looks_like_a_heading_but_is_not() {
+        // Only a page reference, once that is taken off nothing is left
+        assert!(heading("....... 12").is_none());
+        assert_eq!(
+            heading("1. Introduction"),
+            Some((1, "1. Introduction".to_string()))
+        );
+        // An empty Roman numeral is not one
+        assert!(heading(". Something follows").is_none());
+        // ALL CAPS with fewer than three letters
+        assert!(heading("A1 23").is_none());
+    }
+
+    #[test]
+    fn mostly_capitals_make_a_weak_heading() {
+        let weak = detect_heading("NASA Reports DATA", &HeadingConfig::default()).unwrap();
+        assert_eq!((weak.level, weak.text.as_str()), (2, "NASA Reports DATA"));
+        assert!((weak.confidence - 0.40).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn test_numbered_sections() {
         let config = HeadingConfig::default();

@@ -1,6 +1,6 @@
 # ADR-003: Test Strategy — Unit vs E2E Coverage
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-004](ADR-004-STRICT-QUALITY-RULES.md) (2026-11-16)
 **Date:** 2026-02-16
 **Author:** Claude Opus 4.6 (AI assistant, under the maintainer's direction)
 
