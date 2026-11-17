@@ -9,10 +9,12 @@
 use crate::cookies::Cookie;
 use crate::profile::{self, Profile, ProfileChoice};
 use anyhow::{Context, Result};
+use chromiumoxide::cdp::browser_protocol::browser::GetVersionReturns;
 use chromiumoxide::cdp::browser_protocol::network::{
     CookieParam, SetCacheDisabledParams, SetCookiesParams, SetUserAgentOverrideParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::SetLifecycleEventsEnabledParams;
+use chromiumoxide::error::CdpError;
 use chromiumoxide::{Browser, Page};
 use futures::StreamExt;
 use std::path::{Path, PathBuf};
@@ -157,10 +159,33 @@ impl Chrome {
         }
     }
 
-    /// One request with a deadline, not yet judged. Callers that hold the
-    /// browser lock for the request drop it before [`judge`](Self::judge),
-    /// which takes the lock again (a writer queued in between would otherwise
-    /// wait for the first guard, and the second for the writer).
+    /// A request on the browser itself rather than a tab (opening a tab,
+    /// listing tabs): the one way to make one, so the lock order cannot be
+    /// got wrong at a new call site. Like [`ask`](Self::ask), a failed pool asks
+    /// nothing and the answer is judged (rules 3 and 6); the read lock is held
+    /// for the request only and dropped before judging, which takes it again
+    /// (a writer queued in between would otherwise wait for the first guard,
+    /// and the second for the writer).
+    async fn ask_browser<T, E: Into<anyhow::Error>>(
+        &self,
+        until: tokio::time::Instant,
+        what: &str,
+        request: impl for<'b> FnOnce(
+            &'b Browser,
+        )
+            -> futures::future::BoxFuture<'b, std::result::Result<T, E>>,
+    ) -> Result<T> {
+        // Generic, like `ask`: no branches here, so every copy is covered whole
+        self.refuse_if_failed(what)?;
+        let answer = {
+            let browser = self.browser.read().await;
+            Self::attempt(until, what, request(&browser)).await
+        };
+        let failure = self.failure_behind(answer.as_ref().err(), what).await;
+        failure.map_or(answer, Err)
+    }
+
+    /// One request with a deadline, not yet judged.
     async fn attempt<T, E: Into<anyhow::Error>>(
         until: tokio::time::Instant,
         what: &str,
@@ -208,7 +233,6 @@ pub struct BrowserPool {
     pub(crate) profile: Profile,
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
-    custom_user_agent: bool,
     /// While the pool lives, the final clean-up leaves its fresh profile alone
     _owner: Arc<()>,
 }
@@ -299,16 +323,19 @@ impl BrowserPool {
             let browser = chrome.browser.read().await;
             tokio::time::timeout(request_timeout, browser.version()).await
         };
-        // Not answering, or gone before answering: no pool
-        let Ok(Ok(version)) = version else {
-            // Dropping the browser kills this Chrome (chromiumoxide kills on
-            // drop); its fresh profile goes with it
-            drop(chrome);
-            start_failed(&chosen).await;
-            anyhow::bail!(
-                "Chrome started but did not answer (profile {})",
-                profile_dir.display()
-            );
+        // Not answering, or answering with an error (gone before answering): no pool
+        let version = match first_answer(version, request_timeout) {
+            Ok(version) => version,
+            Err(reason) => {
+                // Dropping the browser kills this Chrome (chromiumoxide kills on
+                // drop); its fresh profile goes with it
+                drop(chrome);
+                start_failed(&chosen).await;
+                anyhow::bail!(
+                    "Chrome started but {reason} (profile {})",
+                    profile_dir.display()
+                );
+            }
         };
         let chrome_ua = version.user_agent;
 
@@ -327,26 +354,8 @@ impl BrowserPool {
             profile: chosen,
             cookies: Vec::new(),
             cookie_jar: Vec::new(),
-            custom_user_agent: false,
             _owner: owner,
         })
-    }
-
-    /// Use this user agent, exactly as given, for every page and every download
-    /// from now on. It replaces Chrome's own label with ref's name added.
-    ///
-    /// # Errors
-    /// Returns an error if the text is empty or contains control characters.
-    pub fn set_user_agent(&mut self, user_agent: &str) -> Result<()> {
-        self.user_agent = validate_user_agent(user_agent)?;
-        self.custom_user_agent = true;
-        Ok(())
-    }
-
-    /// `true` when the user agent was set with [`set_user_agent`](Self::set_user_agent).
-    #[must_use]
-    pub const fn has_custom_user_agent(&self) -> bool {
-        self.custom_user_agent
     }
 
     /// Send these cookies with every page opened from now on.
@@ -356,11 +365,12 @@ impl BrowserPool {
     }
 
     /// Headers for a download outside Chrome that should look like the page
-    /// Chrome just loaded: the same user agent and the cookies that apply.
+    /// Chrome just loaded: the same user agent (`agent`, else the pool's own)
+    /// and the cookies of the cookie file that apply.
     #[must_use]
-    pub fn download_headers(&self, url: &str) -> DownloadHeaders {
+    pub fn download_headers(&self, url: &str, agent: Option<&str>) -> DownloadHeaders {
         DownloadHeaders {
-            user_agent: self.user_agent.clone(),
+            user_agent: agent.unwrap_or(&self.user_agent).to_string(),
             cookie: url::Url::parse(url)
                 .ok()
                 .and_then(|u| crate::cookies::header_for(&self.cookie_jar, &u)),
@@ -382,28 +392,37 @@ impl BrowserPool {
     /// Returns [`ChromeFailed`] when Chrome failed, or an error when the tab
     /// could not be set up (it is closed then).
     pub async fn new_page(&self) -> Result<BrowserPage> {
+        self.new_page_as(None).await
+    }
+
+    /// [`new_page`](Self::new_page) with this user agent instead of the pool's
+    /// own: a request's `--user-agent`, or an MCP call's `user_agent`. The agent
+    /// belongs to the tab, so calls sharing one browser can each declare theirs.
+    /// It must have passed [`validate_user_agent`].
+    ///
+    /// # Errors
+    /// Returns [`ChromeFailed`] when Chrome failed, or an error when the tab
+    /// could not be set up (it is closed then).
+    pub async fn new_page_as(&self, agent: Option<&str>) -> Result<BrowserPage> {
         // A failed pool fails at once, also when every tab slot is taken
         if self.chrome.has_failed() {
             return Err(Chrome::failure("opening a tab"));
         }
         let permit = self.semaphore.clone().acquire_owned().await?;
-        // The pool may have failed while this call waited for a slot
-        if self.chrome.has_failed() {
-            return Err(Chrome::failure("opening a tab"));
-        }
-        // One budget for opening the tab and setting it up (rule 6)
+        // One budget for opening the tab and setting it up (rule 6). The pool
+        // may have failed while this call waited for a slot: then
+        // `ask_browser` asks nothing.
         let until = tokio::time::Instant::now() + self.chrome.request_timeout;
-        let opened = {
-            let browser = self.chrome.browser.read().await;
-            Chrome::attempt(until, "opening a tab", browser.new_page("about:blank")).await
-        };
-        let page = match opened {
-            Ok(page) => page,
-            Err(error) => return Err(self.chrome.judge(error, "opening a tab").await),
-        };
+        let page = self
+            .chrome
+            .ask_browser(until, "opening a tab", |browser| {
+                Box::pin(browser.new_page("about:blank"))
+            })
+            .await?;
         // Closed before the error is returned, however set-up ends, so a
         // long-lived browser does not collect half-made tabs
-        if let Err(e) = self.set_up(&page, until).await {
+        let agent = agent.unwrap_or(&self.user_agent);
+        if let Err(e) = self.set_up(&page, until, agent).await {
             let _ = tokio::time::timeout(CLOSE_ACK_LIMIT, page.close()).await;
             return Err(e);
         }
@@ -415,11 +434,11 @@ impl BrowserPool {
         })
     }
 
-    async fn set_up(&self, page: &Page, until: tokio::time::Instant) -> Result<()> {
+    async fn set_up(&self, page: &Page, until: tokio::time::Instant, agent: &str) -> Result<()> {
         // Each step on one line: a `?` alone on its line counts as a line
         // missed whenever that step happens not to fail
         let chrome = &self.chrome;
-        let agent = page.execute(SetUserAgentOverrideParams::new(&self.user_agent));
+        let agent = page.execute(SetUserAgentOverrideParams::new(agent));
         chrome.ask(until, "setting the user agent", agent).await?;
 
         if !self.cookies.is_empty() {
@@ -525,6 +544,22 @@ impl StartOptions {
 
 /// Clean up after a Chrome that did not start: a fresh profile is removed,
 /// a saved one is the user's and stays
+/// Chrome's first answer at start (rule 6): its version, or why there is none
+/// (no answer within `budget`, or an error, as from a Chrome that went away)
+fn first_answer(
+    answer: std::result::Result<
+        std::result::Result<GetVersionReturns, CdpError>,
+        tokio::time::error::Elapsed,
+    >,
+    budget: Duration,
+) -> std::result::Result<GetVersionReturns, String> {
+    match answer {
+        Ok(Ok(version)) => Ok(version),
+        Ok(Err(e)) => Err(format!("answered with an error: {e}")),
+        Err(_) => Err(format!("did not answer within {} ms", budget.as_millis())),
+    }
+}
+
 async fn start_failed(chosen: &Profile) {
     if let Profile::Fresh(dir) = chosen {
         remove_profile(dir).await;
@@ -589,6 +624,14 @@ pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Write};
 
     pub(crate) const FRESH: Option<&ProfileChoice> = Some(&ProfileChoice::Fresh);
+
+    impl BrowserPage {
+        /// Close this tab in Chrome while ref still holds it, as a tab that
+        /// goes away would
+        pub(crate) async fn close_tab(&self) {
+            self.page.clone().close().await.unwrap();
+        }
+    }
 
     impl BrowserPool {
         /// The process id of this pool's Chrome, until it has been collected
@@ -795,6 +838,26 @@ pub(crate) mod tests {
         let err = tokio::time::timeout(Duration::from_secs(20), both).await;
         let err = err.expect("stop and the opening tab waited for each other");
         assert!(err.expect("opening a tab failed").is::<ChromeFailed>());
+    }
+
+    #[tokio::test]
+    async fn chromes_first_answer_is_its_version_or_the_reason_there_is_none() {
+        let version = GetVersionReturns {
+            protocol_version: "1.3".into(),
+            product: "Chrome/1".into(),
+            revision: "r".into(),
+            user_agent: "Mozilla/5.0 HeadlessChrome/1".into(),
+            js_version: "1".into(),
+        };
+        let budget = Duration::from_secs(30);
+        let answered = first_answer(Ok(Ok(version)), budget).unwrap();
+        assert_eq!(answered.user_agent, "Mozilla/5.0 HeadlessChrome/1");
+        let gone = first_answer(Ok(Err(CdpError::NoResponse)), budget).unwrap_err();
+        let expected = "answered with an error: Received no response from the chromium instance.";
+        assert_eq!(gone, expected);
+        let silent = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>()).await;
+        let late = first_answer(Err(silent.unwrap_err()), budget).unwrap_err();
+        assert_eq!(late, "did not answer within 30000 ms");
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 //!
 //! LLM-optimized output - JSON compact only.
 
-use crate::browser::{page_failure, BrowserPool, PageResult};
+use crate::browser::{page_failure, validate_user_agent, BrowserPool, PageResult};
 use crate::extract::extract_urls;
 use crate::text::truncate;
 use anyhow::{Context, Result};
@@ -179,17 +179,20 @@ async fn get_urls(args: &CheckLinksArgs, input: &mut dyn BufRead) -> Result<Vec<
 /// Returns error if Chrome fails to launch, fails while checking
 /// ([`ChromeFailed`](crate::browser::ChromeFailed)), or the user agent is invalid.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
-    let mut pool = BrowserPool::new(config.concurrency, config.profile.as_ref()).await?;
-    if let Some(ua) = &config.user_agent {
-        pool.set_user_agent(ua)?;
-    }
-    let pool = Arc::new(pool);
+    // Checked before Chrome starts
+    let agent = config
+        .user_agent
+        .as_deref()
+        .map(validate_user_agent)
+        .transpose()?;
+    let pool = Arc::new(BrowserPool::new(config.concurrency, config.profile.as_ref()).await?);
     let report = check_links_with(
         &pool,
         urls,
         config.concurrency,
         config.timeout_ms,
         config.retries,
+        agent.as_deref(),
     )
     .await;
     pool.stop().await;
@@ -209,16 +212,22 @@ pub async fn check_links_with(
     concurrency: usize,
     timeout_ms: u64,
     retries: u8,
+    agent: Option<&str>,
 ) -> Result<LinkReport> {
+    let agent = agent.map(str::to_string);
     let results: Vec<LinkResult> = futures::stream::iter(urls.to_vec())
         .map(|url| {
             let pool = Arc::clone(pool);
+            let agent = agent.clone();
             async move {
-                let checked = crate::task::isolated({
-                    let url = url.clone();
-                    async move { check_one(&pool, &url, timeout_ms, retries).await }
-                })
-                .await;
+                let checked =
+                    crate::task::isolated({
+                        let url = url.clone();
+                        async move {
+                            check_one(&pool, &url, timeout_ms, retries, agent.as_deref()).await
+                        }
+                    })
+                    .await;
                 settled(checked, url)
             }
         })
@@ -242,7 +251,13 @@ pub async fn check_links_with(
 }
 
 /// Check one link; `Err` only for a Chrome failure
-async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> Result<LinkResult> {
+async fn check_one(
+    pool: &BrowserPool,
+    url: &str,
+    timeout: u64,
+    retries: u8,
+    agent: Option<&str>,
+) -> Result<LinkResult> {
     eprintln!("  -> {}", truncate(url, 60));
     let failed = |error: String| LinkResult {
         url: url.to_string(),
@@ -255,7 +270,7 @@ async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> 
         return Ok(failed(e));
     }
 
-    let page = match page_failure(pool.new_page().await)? {
+    let page = match page_failure(pool.new_page_as(agent).await)? {
         Ok(p) => p,
         Err(e) => return Ok(failed(e)),
     };
@@ -438,7 +453,9 @@ mod tests {
         // Needs Chrome (ADR-004)
         let pool = crate::browser::tests::pool_that_cannot_set_up_tabs().await;
         let urls = ["http://127.0.0.1:9/".to_string()];
-        let report = check_links_with(&pool, &urls, 1, 5000, 0).await.unwrap();
+        let report = check_links_with(&pool, &urls, 1, 5000, 0, None)
+            .await
+            .unwrap();
         let error = report.results[0].error.clone().unwrap_or_default();
         assert!(error.contains("cookies"), "{error}");
         pool.stop().await;
@@ -454,7 +471,7 @@ mod tests {
         );
         let trap = crate::browser::tests::serve_trap(&pool, "-KILL").await;
         let urls = [trap, "http://127.0.0.1:9/".to_string()];
-        let err = check_links_with(&pool, &urls, 2, 10_000, 1)
+        let err = check_links_with(&pool, &urls, 2, 10_000, 1, None)
             .await
             .unwrap_err();
         assert!(err.is::<crate::browser::ChromeFailed>(), "{err:#}");

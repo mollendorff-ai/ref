@@ -53,6 +53,9 @@ pub struct FetchParams {
     pub max_chars: Option<usize>,
     /// Maximum sections per page (default: 50, 0 = no limit)
     pub max_sections: Option<usize>,
+    /// User agent to send instead of Chrome's own, for pages and PDF downloads.
+    /// Some sites want a declared name and email (SEC EDGAR answers 403 without one).
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -71,6 +74,9 @@ pub struct CheckLinksParams {
     pub timeout: Option<u64>,
     /// Retry count on failure (default: 1)
     pub retries: Option<u8>,
+    /// User agent to send instead of Chrome's own.
+    /// Some sites want a declared name and email (SEC EDGAR answers 403 without one).
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -122,7 +128,7 @@ const MCP_POOL_TABS: usize = MAX_PARALLEL;
 #[derive(Clone)]
 pub struct RefMcpServer {
     /// The browser every tool shares, started on first use and again when it stops answering
-    pool: Arc<Mutex<Option<Arc<BrowserPool>>>>,
+    pool: Arc<Mutex<PoolSlot>>,
     root: PathBuf,
     /// `--profile` value every browser of this server runs with
     profile: Option<ProfileChoice>,
@@ -132,7 +138,7 @@ pub struct RefMcpServer {
 impl RefMcpServer {
     fn new(root: PathBuf, profile: Option<ProfileChoice>) -> Self {
         Self {
-            pool: Arc::new(Mutex::new(None)),
+            pool: Arc::new(Mutex::new(PoolSlot::default())),
             root,
             profile,
             tool_router: Self::tool_router(),
@@ -144,7 +150,13 @@ impl RefMcpServer {
     /// does not end the agent's web access.
     async fn browser(&self) -> std::result::Result<Arc<BrowserPool>, ErrorData> {
         let mut slot = self.pool.lock().await;
-        if let Some(pool) = slot.as_ref() {
+        // A call still running when the server ended must not start a Chrome
+        // that nobody would stop
+        if slot.ended {
+            let message = "The MCP server is ending: no new Chrome is started";
+            return Err(ErrorData::internal_error(message, None));
+        }
+        if let Some(pool) = slot.pool.as_ref() {
             if pool.is_alive().await {
                 return Ok(Arc::clone(pool));
             }
@@ -153,14 +165,14 @@ impl RefMcpServer {
             // while they hold it, and frees the profile for the new Chrome
             pool.stop().await;
         }
-        *slot = None;
+        slot.pool = None;
         let pool = BrowserPool::new(MCP_POOL_TABS, self.profile.as_ref())
             .await
             .map_err(|e| {
                 ErrorData::internal_error(format!("Browser pool init failed: {e:#}"), None)
             })?;
         let pool = Arc::new(pool);
-        *slot = Some(Arc::clone(&pool));
+        slot.pool = Some(Arc::clone(&pool));
         Ok(pool)
     }
 
@@ -195,6 +207,12 @@ fn parallelism(
 }
 
 #[allow(clippy::needless_pass_by_value)] // used as map_err callback
+/// A `user_agent` parameter, checked before Chrome starts
+fn declared_agent(agent: Option<&str>) -> std::result::Result<Option<String>, ErrorData> {
+    let checked = agent.map(crate::browser::validate_user_agent).transpose();
+    checked.map_err(|e| invalid(format!("`user_agent`: {e}")))
+}
+
 fn invalid(msg: String) -> ErrorData {
     ErrorData::new(ErrorCode::INVALID_PARAMS, msg, None)
 }
@@ -216,10 +234,21 @@ fn browser_err(e: anyhow::Error) -> ErrorData {
     }
 }
 
+/// The server's browser: none yet, the one every tool shares, and whether the
+/// server has ended (then no tool starts one again)
+#[derive(Default)]
+struct PoolSlot {
+    pool: Option<Arc<BrowserPool>>,
+    ended: bool,
+}
+
 /// Stop the shared Chrome gracefully, so it can save a saved profile before
-/// the server ends (ADR-005 rule 4: the end of every command)
-async fn stop_browser(slot: &Mutex<Option<Arc<BrowserPool>>>) {
-    if let Some(pool) = slot.lock().await.take() {
+/// the server ends (ADR-005 rule 4: the end of every command), and end the
+/// slot under the same lock, so a call still running cannot start another
+async fn stop_browser(slot: &Mutex<PoolSlot>) {
+    let mut slot = slot.lock().await;
+    slot.ended = true;
+    if let Some(pool) = slot.pool.take() {
         pool.stop().await;
     }
 }
@@ -244,6 +273,7 @@ impl RefMcpServer {
         Parameters(params): Parameters<FetchParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let parallel = parallelism(params.parallel, 4, "parallel")?;
+        let user_agent = declared_agent(params.user_agent.as_deref())?;
         let options = fetch::FetchOptions {
             timeout: params.timeout.unwrap_or(30_000),
             raw: params.raw.unwrap_or(false),
@@ -252,6 +282,7 @@ impl RefMcpServer {
             max_sections: params
                 .max_sections
                 .unwrap_or(crate::content::DEFAULT_MAX_SECTIONS),
+            user_agent,
         };
 
         // Nothing to fetch: answer without starting Chrome
@@ -308,6 +339,7 @@ impl RefMcpServer {
         Parameters(params): Parameters<CheckLinksParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let concurrency = parallelism(params.concurrency, 5, "concurrency")?;
+        let agent = declared_agent(params.user_agent.as_deref())?;
         let report = if params.urls.is_empty() {
             check_links::LinkReport::default()
         } else {
@@ -318,6 +350,7 @@ impl RefMcpServer {
                 concurrency,
                 params.timeout.unwrap_or(15000),
                 params.retries.unwrap_or(1),
+                agent.as_deref(),
             )
             .await
             .map_err(browser_err)?
@@ -452,7 +485,11 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
 /// # Errors
 ///
 /// Returns an error if the transport fails to initialize or the server exits abnormally.
-pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> Result<()> {
+pub async fn run_mcp(
+    root: Option<PathBuf>,
+    profile: Option<ProfileChoice>,
+    stop: crate::cli::Stop,
+) -> Result<()> {
     // All log output to stderr (stdout reserved for JSON-RPC). A second
     // server in the same process (in tests) keeps the first one's logger.
     let _ = tracing_subscriber::fmt()
@@ -468,6 +505,7 @@ pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> R
         profile,
         Box::pin(tokio::io::stdin()),
         Box::pin(tokio::io::stdout()),
+        stop,
     )
     .await
 }
@@ -479,6 +517,7 @@ async fn serve_mcp(
     profile: Option<ProfileChoice>,
     input: Pin<Box<dyn AsyncRead + Send>>,
     output: Pin<Box<dyn AsyncWrite + Send>>,
+    stop: crate::cli::Stop,
 ) -> Result<()> {
     info!("Starting ref MCP server v{}", env!("CARGO_PKG_VERSION"));
 
@@ -494,10 +533,24 @@ async fn serve_mcp(
     let server = RefMcpServer::new(root, profile);
     let browser = Arc::clone(&server.pool);
     let service = server.serve((input, output)).await?;
-    let outcome = service.waiting().await;
+    let token = service.cancellation_token();
+    let waiting = service.waiting();
+    tokio::pin!(waiting);
+    let (outcome, interrupted) = tokio::select! {
+        outcome = &mut waiting => (outcome, false),
+        // A signal ends the service as a closed input would; Chrome is then
+        // stopped gracefully below, not killed (ADR-005 rule 4)
+        () = stop => {
+            token.cancel();
+            ((&mut waiting).await, true)
+        }
+    };
     stop_browser(&browser).await;
     outcome?;
-
+    if interrupted {
+        info!("MCP server stopped by a signal");
+        return Err(anyhow::Error::new(crate::cli::Interrupted));
+    }
     info!("MCP server stopped");
     Ok(())
 }
@@ -690,6 +743,7 @@ mod tests {
                 selector: None,
                 max_chars: None,
                 max_sections: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -701,6 +755,7 @@ mod tests {
                 concurrency: None,
                 timeout: None,
                 retries: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -741,7 +796,10 @@ mod tests {
             missing.message
         );
 
-        assert!(server.pool.lock().await.is_none(), "Chrome was started");
+        assert!(
+            server.pool.lock().await.pool.is_none(),
+            "Chrome was started"
+        );
 
         // With something to do, the unusable profile is reported as such
         let refused = server
@@ -750,6 +808,7 @@ mod tests {
                 concurrency: None,
                 timeout: None,
                 retries: None,
+                user_agent: None,
             }))
             .await
             .unwrap_err();
@@ -775,10 +834,11 @@ mod tests {
             concurrency: None,
             timeout: Some(5000),
             retries: Some(0),
+            user_agent: None,
         };
 
         server.ref_check_links(Parameters(check())).await.unwrap();
-        let first = server.pool.lock().await.clone().unwrap();
+        let first = server.pool.lock().await.pool.clone().unwrap();
         first.kill_chrome().await;
 
         let again = server.ref_check_links(Parameters(check())).await.unwrap();
@@ -787,9 +847,40 @@ mod tests {
             !error.contains("Browser error"),
             "the dead Chrome was used: {error}"
         );
-        let second = server.pool.lock().await.clone().unwrap();
+        let second = server.pool.lock().await.pool.clone().unwrap();
         assert!(!Arc::ptr_eq(&first, &second), "no new Chrome was started");
         assert!(second.is_alive().await);
+    }
+
+    #[tokio::test]
+    async fn each_call_declares_its_own_user_agent_on_the_shared_chrome() {
+        // Needs Chrome (ADR-004): /needs-declared-agent refuses an agent without an email
+        let url = format!("{}/needs-declared-agent", crate::test_server::serve());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = RefMcpServer::new(root, Some(ProfileChoice::Fresh));
+        let fetch = |agent: Option<&str>| FetchParams {
+            user_agent: agent.map(String::from),
+            ..fetch_params(vec![url.clone()], None)
+        };
+
+        let declared = server.ref_fetch(Parameters(fetch(Some("Jane jane@example.com"))));
+        let page = text(&declared.await.unwrap());
+        assert_eq!(page["http"], 200, "{page}");
+        // The agent was that call's: the next one, on the same Chrome, sends Chrome's own
+        let plain = text(&server.ref_fetch(Parameters(fetch(None))).await.unwrap());
+        assert_eq!(plain["http"], 403, "{plain}");
+
+        let check = CheckLinksParams {
+            urls: vec![url.clone()],
+            concurrency: None,
+            timeout: Some(5000),
+            retries: Some(0),
+            user_agent: Some("Jane jane@example.com".into()),
+        };
+        let report = text(&server.ref_check_links(Parameters(check)).await.unwrap());
+        assert_eq!(report["results"][0]["status"], 200, "{report}");
+        server.pool.lock().await.pool.clone().unwrap().stop().await;
     }
 
     #[test]
@@ -818,11 +909,12 @@ mod tests {
             concurrency: None,
             timeout: Some(5000),
             retries: Some(0),
+            user_agent: None,
         };
         server.ref_check_links(Parameters(check)).await.unwrap();
-        let pool = server.pool.lock().await.clone().unwrap();
+        let pool = server.pool.lock().await.pool.clone().unwrap();
         stop_browser(&server.pool).await;
-        assert!(server.pool.lock().await.is_none());
+        assert!(server.pool.lock().await.pool.is_none());
         assert!(!pool.is_alive().await, "Chrome still runs");
         // Nothing started: nothing to stop
         stop_browser(&server.pool).await;
@@ -845,6 +937,7 @@ mod tests {
             selector: None,
             max_chars: None,
             max_sections: None,
+            user_agent: None,
         };
 
         let site = crate::browser::tests::serve_cookie_jar();
@@ -852,7 +945,7 @@ mod tests {
             .ref_fetch(Parameters(fetch(format!("{site}/show"))))
             .await
             .unwrap();
-        let first = server.pool.lock().await.clone().unwrap();
+        let first = server.pool.lock().await.pool.clone().unwrap();
         let trap = crate::browser::tests::serve_trap(&first, "-STOP").await;
 
         // The call during the failure gets the tool error
@@ -874,7 +967,7 @@ mod tests {
             .await;
         let again = again.unwrap();
         assert_eq!(text(&again)["status"], "ok");
-        let second = server.pool.lock().await.clone().unwrap();
+        let second = server.pool.lock().await.pool.clone().unwrap();
         assert!(!Arc::ptr_eq(&first, &second));
         second.stop().await;
     }
@@ -905,12 +998,13 @@ mod tests {
                 selector: None,
                 max_chars: None,
                 max_sections: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
         assert_eq!(text(fetched)["status"], "dead");
         assert_eq!(
-            server.pool.lock().await.as_ref().unwrap().profile,
+            server.pool.lock().await.pool.as_ref().unwrap().profile,
             crate::profile::Profile::Saved(saved.clone())
         );
         // Several pages come back as a list, in the order given
@@ -926,6 +1020,7 @@ mod tests {
                 concurrency: None,
                 timeout: Some(5000),
                 retries: Some(0),
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -1005,6 +1100,7 @@ mod tests {
             selector: None,
             max_chars: None,
             max_sections: None,
+            user_agent: None,
         }
     }
 
@@ -1033,6 +1129,23 @@ mod tests {
             let expected = format!("`parallel` must be between 1 and 20 (got {parallel})");
             assert_eq!(err.message, expected);
         }
+
+        // A user agent that cannot go into a header
+        let mut bad_agent = fetch_params(url(), None);
+        bad_agent.user_agent = Some("a\r\nX-Evil: 1".into());
+        let err = server.ref_fetch(Parameters(bad_agent)).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.starts_with("`user_agent`:"), "{}", err.message);
+        let check = CheckLinksParams {
+            urls: url(),
+            concurrency: None,
+            timeout: None,
+            retries: None,
+            user_agent: Some("   ".into()),
+        };
+        let err = server.ref_check_links(Parameters(check)).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.starts_with("`user_agent`:"), "{}", err.message);
 
         let neither = refresh_params(None, None);
         let err = server
@@ -1132,6 +1245,86 @@ mod tests {
         serde_json::from_str(&line).unwrap()
     }
 
+    /// Open a session, as a client does first
+    async fn handshake(
+        to_server: &mut (impl tokio::io::AsyncWrite + Unpin),
+        from_server: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    ) {
+        let hello = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "0"}}});
+        send(to_server, &hello).await;
+        let answer = receive(from_server).await;
+        assert_eq!(answer["result"]["serverInfo"]["name"], "ref", "{answer}");
+        let ready = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        send(to_server, &ready).await;
+    }
+
+    #[tokio::test]
+    async fn a_stop_signal_ends_the_server_and_stops_its_chrome_gracefully() {
+        // Needs Chrome (ADR-004). Before, the signal dropped the server and its
+        // Chrome was killed, which can lose a saved profile's newest sign-ins.
+        let base = crate::test_server::serve();
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("saved");
+        let (signal, stop) = tokio::sync::oneshot::channel::<()>();
+        let (client, end) = tokio::io::duplex(1 << 20);
+        let (input, output) = tokio::io::split(end);
+        let served = tokio::spawn(serve_mcp(
+            None,
+            Some(ProfileChoice::Folder(profile.clone())),
+            Box::pin(input),
+            Box::pin(output),
+            Box::pin(async {
+                let _ = stop.await;
+            }),
+        ));
+        let (from_server, mut to_server) = tokio::io::split(client);
+        let mut from_server = tokio::io::BufReader::new(from_server);
+        handshake(&mut to_server, &mut from_server).await;
+
+        // Sign in: the site sets a session cookie in the saved profile
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "ref_fetch", "arguments": {"urls": [format!("{base}/sign-in")]}}});
+        send(&mut to_server, &call).await;
+        let answer = receive(&mut from_server).await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+
+        // The signal, with the input still open
+        signal.send(()).unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_mins(1), served).await;
+        let err = ended.unwrap().unwrap().unwrap_err();
+        assert!(err.is::<crate::cli::Interrupted>(), "{err:#}");
+
+        // Chrome closed gracefully and saved the session for the next run
+        let profile = profile.to_str().unwrap();
+        let whoami = format!("{base}/whoami");
+        let (_, later) = crate::test_server::fetch_with_profile(profile, &[&whoami]).await;
+        let seen = crate::test_server::all_content(&later);
+        assert!(seen.contains("session=kept-between-runs"), "{later}");
+    }
+
+    #[tokio::test]
+    async fn after_the_server_ends_no_call_starts_a_chrome() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let server = RefMcpServer::new(root, Some(ProfileChoice::Fresh));
+        stop_browser(&server.pool).await;
+        let check = CheckLinksParams {
+            urls: vec!["http://127.0.0.1:9/".into()],
+            concurrency: None,
+            timeout: Some(5000),
+            retries: Some(0),
+            user_agent: None,
+        };
+        let err = server.ref_check_links(Parameters(check)).await.unwrap_err();
+        assert!(err.message.contains("no new Chrome"), "{}", err.message);
+        assert!(
+            server.pool.lock().await.pool.is_none(),
+            "a Chrome was started"
+        );
+    }
+
     #[tokio::test]
     async fn the_server_answers_on_its_input_and_stops_chrome_when_it_ends() {
         // Needs Chrome (ADR-004): a whole session, as a client on stdio has it
@@ -1142,18 +1335,11 @@ mod tests {
             Some(ProfileChoice::Fresh),
             Box::pin(input),
             Box::pin(output),
+            Box::pin(std::future::pending()),
         ));
         let (from_server, mut to_server) = tokio::io::split(client);
         let mut from_server = tokio::io::BufReader::new(from_server);
-
-        let hello = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                       "clientInfo": {"name": "test", "version": "0"}}});
-        send(&mut to_server, &hello).await;
-        let answer = receive(&mut from_server).await;
-        assert_eq!(answer["result"]["serverInfo"]["name"], "ref", "{answer}");
-        let ready = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        send(&mut to_server, &ready).await;
+        handshake(&mut to_server, &mut from_server).await;
 
         // A call that starts Chrome
         let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",

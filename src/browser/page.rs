@@ -6,6 +6,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
     Cookie, EventResponseReceived, GetCookiesParams, ResourceType,
 };
 use chromiumoxide::cdp::browser_protocol::page::EventLifecycleEvent;
+use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 use chromiumoxide::Page;
 use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
@@ -134,6 +135,10 @@ impl BrowserPage {
             if error.is::<ChromeFailed>() {
                 return Err(error);
             }
+            // Nor is a tab that closed: it could not load anything (rule 3)
+            if !self.is_open().await? {
+                anyhow::bail!("the tab closed before the page loaded");
+            }
             return Ok(PageResult::failed(error.to_string()));
         }
 
@@ -169,6 +174,24 @@ impl BrowserPage {
             title,
             error: None,
         })
+    }
+
+    /// Whether this tab still exists in Chrome
+    ///
+    /// # Errors
+    /// Returns [`ChromeFailed`] when Chrome failed.
+    async fn is_open(&self) -> Result<bool> {
+        let until = tokio::time::Instant::now() + self.chrome.request_timeout;
+        let listing = self.chrome.ask_browser(until, "listing tabs", |browser| {
+            Box::pin(browser.execute(GetTargetsParams::default()))
+        });
+        let mine = self.page.target_id();
+        Ok(listing
+            .await?
+            .result
+            .target_infos
+            .iter()
+            .any(|t| &t.target_id == mine))
     }
 
     /// Wait for `networkIdle` lifecycle event with timeout

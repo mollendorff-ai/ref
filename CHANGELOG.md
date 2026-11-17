@@ -6,6 +6,9 @@ All notable changes to Möllendorff Ref.
 
 ### Added
 
+- **`user_agent` on the MCP tools `ref_fetch` and `ref_check_links`**: the same as `--user-agent`, for that call only.
+  Calls sharing the server's Chrome each send their own; a call without one sends Chrome's.
+  The user agent now belongs to each tab, not to the browser, and `--user-agent` uses the same path; an invalid one is refused before Chrome starts.
 - **`--profile <folder|fresh>`** on `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and `ref mcp`: chooses the Chrome profile for that run.
   Without it, `REF_CHROME_PROFILE` gives the value, as before.
 
@@ -47,6 +50,12 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- **`ref mcp` stopped by Ctrl-C or SIGTERM** killed its Chrome, which could lose a saved profile's newest sign-ins; only a closed input stopped it gracefully.
+  A signal now ends the server the same way: Chrome is asked to close and given time to save the profile, then the command exits with code 130.
+- After the MCP server ends, a tool call still running gets an error instead of starting a new Chrome that nobody would stop.
+- A tab that closed before its page loaded was reported as the site's "Navigation timeout", so `ref verify-refs` could record a good reference as `dead`.
+  After a failed navigation ref now asks Chrome whether the tab still exists; if not, it is an error ("the tab closed before the page loaded"): `ref verify-refs` ends without writing, as for any tab failure, and `ref fetch` and `ref check-links` report it as that URL's error.
+- A Chrome that starts but answers its first request with an error (it went away) is reported as "Chrome started but answered with an error: <reason>", not as "did not answer"; a Chrome that stays silent says how long ref waited.
 - The saved-profile folder, and `.ref` above it, are created readable by their owner only (mode 0700) on macOS and Linux, not with the default permissions.
   A folder that already exists keeps its permissions.
 - **Signed-in PDFs with the saved profile**: `ref fetch` (and `ref_fetch`) of a PDF behind a sign-in came back as `dead` (HTTP 403): Chrome had the session, but ref downloaded the file without it, sending only a `--cookies` file.

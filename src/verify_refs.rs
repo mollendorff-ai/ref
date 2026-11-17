@@ -277,8 +277,20 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> Result<Verif
         });
     }
     let page = pool.new_page().await.context("Could not open a tab")?;
-    let nav = page.goto(url, timeout).await?;
-    judge(&page, url, nav).await
+    verify_on(&page, url, timeout).await
+}
+
+/// [`verify_url`] on a tab already open. A tab that cannot load anything any
+/// more (it closed) says nothing about the URL, so it is an error, never a
+/// dead reference; a Chrome failure stays a [`ChromeFailed`](crate::browser::ChromeFailed).
+async fn verify_on(
+    page: &crate::browser::BrowserPage,
+    url: &str,
+    timeout: u64,
+) -> Result<VerifyResult> {
+    let loaded = page.goto(url, timeout).await;
+    let nav = loaded.context("The tab was gone before it could load the page")?;
+    judge(page, url, nav).await
 }
 
 /// The status of a page Chrome loaded
@@ -467,6 +479,27 @@ pub(crate) mod tests {
         assert!(err.contains("Could not open a tab"), "{err}");
         assert!(err.contains("was not changed"), "{err}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        pool.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_tab_gone_before_navigation_is_an_error_that_says_so() {
+        // Needs Chrome (ADR-004). Chrome is fine; the closed tab says nothing
+        // about the URL, so the reference must not become dead (ADR-005 rule 3).
+        let pool = BrowserPool::new(1, Some(&crate::profile::ProfileChoice::Fresh))
+            .await
+            .unwrap();
+        let page = pool.new_page().await.unwrap();
+        page.close_tab().await;
+        let err = verify_on(&page, "http://127.0.0.1:9/", 5000).await;
+        let err = err.err().expect("a closed tab is an error, not a status");
+        assert!(!err.is::<crate::browser::ChromeFailed>(), "{err:#}");
+        let err = format!("{err:#}");
+        assert!(
+            err.starts_with("The tab was gone before it could load the page"),
+            "{err}"
+        );
+        drop(page);
         pool.stop().await;
     }
 
