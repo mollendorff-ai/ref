@@ -12,9 +12,26 @@ use crate::update::{run_update, UpdateArgs};
 use crate::verify_refs::{run_verify_refs, VerifyRefsArgs};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use futures::future::{FutureExt, Shared};
 use std::future::Future;
 use std::io::{BufRead, Write};
+use std::pin::Pin;
 use std::process::ExitCode;
+
+/// Ctrl-C or SIGTERM in the real program; any future in tests
+pub type Stop = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// The command was ended by the stop signal (exit code 130)
+#[derive(Debug)]
+pub struct Interrupted;
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
 
 #[derive(Parser)]
 #[command(name = "ref")]
@@ -69,7 +86,14 @@ pub enum Commands {
 ///
 /// # Errors
 /// Returns the command's error (bad arguments, Chrome missing, I/O error).
-pub async fn run(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool> {
+/// Run one command. `stop` is for `ref mcp`, which ends on it by itself so it
+/// can stop its Chrome gracefully; [`execute`] drops every other command on it.
+pub async fn run(
+    cli: Cli,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+    stop: Shared<Stop>,
+) -> Result<bool> {
     match cli.command {
         Commands::Fetch(args) => run_fetch(args, out).await,
         Commands::Pdf(args) => run_pdf(&args, out).await,
@@ -82,7 +106,10 @@ pub async fn run(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write) -> Resu
         Commands::Update(args) => run_update(args, out).await.map(|()| true),
         Commands::Mcp(args) => {
             let profile = args.profile.choice()?;
-            crate::mcp::run_mcp(args.root, profile).await.map(|()| true)
+            let stop: Stop = Box::pin(stop);
+            crate::mcp::run_mcp(args.root, profile, stop)
+                .await
+                .map(|()| true)
         }
     }
 }
@@ -101,7 +128,7 @@ pub async fn execute(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
     err: &mut dyn Write,
-    stop: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    stop: Stop,
 ) -> ExitCode {
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
@@ -116,16 +143,21 @@ pub async fn execute(
             return ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(2));
         }
     };
+    // `ref mcp` ends on the signal itself, stopping its Chrome gracefully;
+    // every other command is dropped, which closes Chrome
+    let serves = matches!(cli.command, Commands::Mcp(_));
+    let stop = stop.shared();
     let result = tokio::select! {
-        r = run(cli, input, out) => r,
-        () = stop => {
-            let _ = writeln!(err, "Interrupted.");
-            return ExitCode::from(130);
-        }
+        r = run(cli, input, out, stop.clone()) => r,
+        () = stop, if !serves => Err(anyhow::Error::new(Interrupted)),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
+        Err(e) if e.is::<Interrupted>() => {
+            let _ = writeln!(err, "{e}.");
+            ExitCode::from(130)
+        }
         Err(e) => {
             let _ = writeln!(err, "Error: {e:#}");
             ExitCode::from(2)

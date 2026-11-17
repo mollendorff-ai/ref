@@ -56,6 +56,7 @@ The MCP server uses ref's saved profile (`~/.ref/chrome-profile`) when it exists
 `ref_pdf` does not: it reads PDF files and downloads PDF URLs without Chrome.
 For a PDF behind a sign-in, call `ref_fetch` on its URL; it downloads the PDF with the cookies Chrome has for that address.
 Stop the server before running `ref login`, since only one Chrome can use the profile at a time.
+However the server ends (its input closes, Ctrl-C or SIGTERM), it asks its Chrome to close and waits for it, so the profile keeps its newest sign-ins; a tool call still running then gets an error and does not start a new Chrome.
 To use another profile, pass `--profile` (or set `REF_CHROME_PROFILE` in the server's environment); `--profile fresh` gives an empty, temporary profile:
 
 ```json
