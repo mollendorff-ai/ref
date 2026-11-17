@@ -41,6 +41,9 @@ pub struct VerifyRefsArgs {
     /// Dry run - don't write changes back to file
     #[arg(long)]
     pub dry_run: bool,
+
+    #[command(flatten)]
+    pub profile: crate::profile::ProfileArgs,
 }
 
 /// Summary of verification results
@@ -123,7 +126,7 @@ pub(crate) async fn verify_refs_core(args: VerifyRefsArgs) -> Result<VerifyOutpu
         to_verify, args.parallel
     );
 
-    let pool = Arc::new(BrowserPool::new(args.parallel).await?);
+    let pool = Arc::new(BrowserPool::new(args.parallel, args.profile.profile.as_deref()).await?);
     let timeout = args.timeout;
     let refs_file = Arc::new(Mutex::new(refs_file));
 

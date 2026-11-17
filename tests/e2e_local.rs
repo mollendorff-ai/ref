@@ -215,15 +215,25 @@ fn route(path: &str) -> (&'static str, String, String) {
     }
 }
 
-/// Run `ref fetch` with extra args and return (exit code, parsed JSON)
+/// Run `ref fetch --profile fresh` with extra args and return (exit code, parsed JSON)
 fn fetch(args: &[&str]) -> (i32, Value) {
-    fetch_with_profile("fresh", args)
+    let mut all = vec!["--profile", "fresh"];
+    all.extend_from_slice(args);
+    run_fetch(None, &all)
 }
 
-/// Same, with `REF_CHROME_PROFILE` set to `profile`
+/// Run `ref fetch` with `REF_CHROME_PROFILE` set to `profile` and no `--profile`
 fn fetch_with_profile(profile: &str, args: &[&str]) -> (i32, Value) {
-    let output = cargo_bin_cmd!("ref")
-        .env("REF_CHROME_PROFILE", profile)
+    run_fetch(Some(profile), args)
+}
+
+fn run_fetch(env_profile: Option<&str>, args: &[&str]) -> (i32, Value) {
+    let mut cmd = cargo_bin_cmd!("ref");
+    match env_profile {
+        Some(profile) => cmd.env("REF_CHROME_PROFILE", profile),
+        None => cmd.env_remove("REF_CHROME_PROFILE"),
+    };
+    let output = cmd
         .arg("fetch")
         .args(args)
         .timeout(std::time::Duration::from_mins(1))
@@ -531,6 +541,22 @@ fn saved_profile_keeps_sign_ins_between_runs() {
     assert!(
         all_content(&fresh).contains("Cookie header: none"),
         "{fresh}"
+    );
+}
+
+#[test]
+#[ignore = "e2e: requires Chrome (ADR-003)"]
+fn profile_option_beats_the_environment_variable() {
+    let base = serve();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let saved = dir.path().join("profile");
+    let saved = saved.to_str().expect("path");
+
+    let (_, page) = fetch_with_profile(saved, &["--profile", "fresh", &format!("{base}/whoami")]);
+    assert_eq!(page["status"], "ok", "{page}");
+    assert!(
+        !std::path::Path::new(saved).exists(),
+        "the profile from REF_CHROME_PROFILE was used"
     );
 }
 

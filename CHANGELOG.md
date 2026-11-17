@@ -2,6 +2,20 @@
 
 All notable changes to Möllendorff Ref.
 
+## [Unreleased]
+
+### Added
+
+- **`--profile <folder|fresh>`** on `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and `ref mcp`: chooses the Chrome profile for that run. Without it, `REF_CHROME_PROFILE` gives the value, as before.
+
+### Changed
+
+- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does). The `run_*` command functions write their JSON to a writer they are given.
+
+### Known issues
+
+- With a saved profile, the MCP tools `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` fail once `ref_fetch` has run: they start a second Chrome on the profile the server's browser already holds, and the error wrongly points at `ref login`.
+
 ## [1.9.0] - 2026-11-15
 
 Set the user agent, for sites such as SEC EDGAR.

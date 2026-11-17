@@ -35,6 +35,9 @@ struct McpArgs {
     /// may read and write in [default: the current directory]
     #[arg(long)]
     root: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    profile: mollendorff_ref::profile::ProfileArgs,
 }
 
 #[derive(Subcommand)]
@@ -93,7 +96,7 @@ async fn run(cli: Cli) -> ExitCode {
             Commands::RefreshData(args) => run_refresh_data(args, &mut out).await,
             Commands::VerifyRefs(args) => run_verify_refs(args, &mut out).await,
             Commands::Update(args) => run_update(args, &mut out).await.map(|()| true),
-            Commands::Mcp(args) => mollendorff_ref::mcp::run_mcp(args.root)
+            Commands::Mcp(args) => mollendorff_ref::mcp::run_mcp(args.root, args.profile.profile)
                 .await
                 .map(|()| true),
         }
@@ -134,5 +137,62 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_that_start_chrome_take_profile() {
+        let cases: [&[&str]; 5] = [
+            &["ref", "fetch", "--profile", "fresh", "https://example.com"],
+            &[
+                "ref",
+                "check-links",
+                "--profile",
+                "fresh",
+                "--url",
+                "https://example.com",
+            ],
+            &[
+                "ref",
+                "verify-refs",
+                "--profile",
+                "fresh",
+                "references.yaml",
+            ],
+            &[
+                "ref",
+                "refresh-data",
+                "--profile",
+                "fresh",
+                "--url",
+                "https://example.com",
+            ],
+            &["ref", "mcp", "--profile", "fresh"],
+        ];
+        for args in cases {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn commands_without_chrome_refuse_profile() {
+        // `ref pdf` downloads URLs without Chrome; `ref login` has its own --profile <folder>
+        let cases: [&[&str]; 3] = [
+            &["ref", "pdf", "--profile", "fresh", "a.pdf"],
+            &["ref", "init", "--profile", "fresh"],
+            &["ref", "scan", "--profile", "fresh", "a.md"],
+        ];
+        for args in cases {
+            let err = Cli::try_parse_from(args).err().expect("refused");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{args:?}"
+            );
+        }
     }
 }

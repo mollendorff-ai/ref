@@ -105,7 +105,7 @@ pub struct BrowserPool {
     browser: Browser,
     semaphore: Arc<Semaphore>,
     user_agent: String,
-    profile: Profile,
+    pub(crate) profile: Profile,
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
     custom_user_agent: bool,
@@ -114,14 +114,16 @@ pub struct BrowserPool {
 impl BrowserPool {
     /// Create a new browser pool with concurrency limit
     ///
-    /// Each pool gets its own Chrome profile folder, removed on [`close`](Self::close),
+    /// `profile` is the `--profile` value: a saved profile folder, `fresh`, or
+    /// `None` for the default (see [`profile::choose`]).
+    /// A fresh profile is a folder of its own, removed on [`close`](Self::close),
     /// so two ref processes never share or lock one profile.
     /// Chrome's sandbox is on unless ref runs as root, [`NO_SANDBOX_ENV`] is set,
     /// or Chrome cannot start with it (then ref retries once without it and says so).
     ///
     /// # Errors
     /// Returns an error if Chrome/Chromium is not found or fails to launch.
-    pub async fn new(concurrency: usize) -> Result<Self> {
+    pub async fn new(concurrency: usize, profile: Option<&str>) -> Result<Self> {
         let chrome_path = detect_chrome_path().ok_or_else(|| {
             anyhow::anyhow!(
                 "Chrome/Chromium not found. Searched paths:\n  \
@@ -135,11 +137,7 @@ impl BrowserPool {
         sweep_orphans();
         let home = profile::home_dir();
         let default_saved = profile::default_saved_dir(home.as_deref());
-        let chosen = profile::choose(
-            std::env::var(profile::PROFILE_ENV).ok().as_deref(),
-            default_saved.as_deref(),
-            unique_profile_dir,
-        );
+        let chosen = profile::choose(profile, default_saved.as_deref(), unique_profile_dir);
         match &chosen {
             Profile::Saved(dir) => {
                 prepare_saved_profile(dir, home.as_deref())?;
@@ -809,6 +807,27 @@ fn describe_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn profile_value_chooses_the_chrome_profile() {
+        // Needs Chrome, like every browser test (ADR-004)
+        let dir = tempfile::tempdir().unwrap();
+        let saved = dir.path().join("saved");
+
+        let pool = BrowserPool::new(1, Some(saved.to_str().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(pool.profile, Profile::Saved(saved.clone()));
+        pool.close().await.unwrap();
+        assert!(saved.is_dir(), "a saved profile is kept after close");
+
+        let pool = BrowserPool::new(1, Some("fresh")).await.unwrap();
+        assert!(!pool.profile.is_saved(), "{:?}", pool.profile);
+        let temp = pool.profile.path().to_path_buf();
+        assert_ne!(temp, saved);
+        pool.close().await.unwrap();
+        assert!(!temp.exists(), "a fresh profile is removed on close");
+    }
 
     #[test]
     fn test_describe_error() {

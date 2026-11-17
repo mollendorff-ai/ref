@@ -28,11 +28,16 @@ pub struct RefreshDataArgs {
     /// Timeout per URL in milliseconds
     #[arg(long, default_value = "20000")]
     timeout: u64,
+
+    #[command(flatten)]
+    profile: crate::profile::ProfileArgs,
 }
 
 /// Configuration for refresh-data
 pub struct RefreshConfig {
     pub timeout_ms: u64,
+    /// `--profile` value: a saved profile folder, `fresh`, or `None` for the default
+    pub profile: Option<String>,
 }
 
 /// Extracted data from a URL (compact)
@@ -82,6 +87,7 @@ pub async fn run_refresh_data(
 
     let config = RefreshConfig {
         timeout_ms: args.timeout,
+        profile: args.profile.profile.clone(),
     };
 
     let report = refresh_data(&urls, &config).await?;
@@ -118,7 +124,7 @@ async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
 /// # Errors
 /// Returns an error if the browser pool cannot be created.
 pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<RefreshReport> {
-    let pool = BrowserPool::new(1).await?;
+    let pool = BrowserPool::new(1, config.profile.as_deref()).await?;
     let mut results = Vec::with_capacity(urls.len());
 
     for (i, url) in urls.iter().enumerate() {

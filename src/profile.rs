@@ -5,14 +5,25 @@
 //!   yourself, and every later run reuses those sessions. ref never deletes it.
 //! - A **fresh profile** is a new empty folder per run, deleted afterwards.
 //!
-//! Choice, in order: `REF_CHROME_PROFILE=fresh` → fresh; `REF_CHROME_PROFILE=<folder>`
-//! → that saved profile; otherwise the default saved profile
-//! (`~/.ref/chrome-profile`) when `ref login` has created it; otherwise fresh.
+//! Choice, in order: `--profile fresh` → fresh; `--profile <folder>` → that
+//! saved profile; otherwise the default saved profile (`~/.ref/chrome-profile`)
+//! when `ref login` has created it; otherwise fresh.
+//! Without `--profile`, the `REF_CHROME_PROFILE` environment variable gives the value.
 
 use std::path::{Path, PathBuf};
 
-/// Environment variable that selects the profile
+/// Environment variable that selects the profile when `--profile` is not given
 pub const PROFILE_ENV: &str = "REF_CHROME_PROFILE";
+
+/// The `--profile` option of the commands that start Chrome
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct ProfileArgs {
+    /// Chrome profile: a folder (a saved profile, kept between runs) or `fresh`
+    /// (an empty temporary one, deleted afterwards)
+    /// [default: ~/.ref/chrome-profile once `ref login` has created it, else fresh]
+    #[arg(long, env = PROFILE_ENV, value_name = "FOLDER|fresh")]
+    pub profile: Option<String>,
+}
 
 /// The profile a run uses
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,16 +66,16 @@ pub fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Pick the profile from the environment value and the default saved folder.
+/// Pick the profile from the `--profile` value and the default saved folder.
 ///
 /// `fresh` makes a new temporary folder name when a fresh profile is chosen.
 #[must_use]
 pub fn choose(
-    env_value: Option<&str>,
+    value: Option<&str>,
     default_saved: Option<&Path>,
     fresh: impl FnOnce() -> PathBuf,
 ) -> Profile {
-    match env_value.map(str::trim).filter(|v| !v.is_empty()) {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
         Some(v) if v.eq_ignore_ascii_case("fresh") => Profile::Fresh(fresh()),
         Some(dir) => Profile::Saved(PathBuf::from(dir)),
         None => match default_saved {
@@ -108,6 +119,33 @@ pub fn lock_owner_pid(lock_target: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[derive(Parser)]
+    struct WithProfile {
+        #[command(flatten)]
+        profile: ProfileArgs,
+    }
+
+    #[test]
+    fn profile_option_takes_a_folder_or_fresh() {
+        let folder = WithProfile::try_parse_from(["ref", "--profile", "/work/p"]).unwrap();
+        assert_eq!(folder.profile.profile.as_deref(), Some("/work/p"));
+        let fresh = WithProfile::try_parse_from(["ref", "--profile", "fresh"]).unwrap();
+        assert_eq!(fresh.profile.profile.as_deref(), Some("fresh"));
+    }
+
+    #[test]
+    fn profile_option_falls_back_to_the_environment_variable() {
+        // Checked on the definition: setting the variable here would race other tests
+        let command = WithProfile::command();
+        let arg = command
+            .get_arguments()
+            .find(|a| a.get_id() == "profile")
+            .unwrap();
+        assert_eq!(arg.get_env(), Some(std::ffi::OsStr::new(PROFILE_ENV)));
+        assert_eq!(arg.get_long(), Some("profile"));
+    }
 
     fn fresh() -> PathBuf {
         PathBuf::from("/tmp/ref-chrome-1-2")

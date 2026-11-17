@@ -54,19 +54,20 @@ Add to `.vscode/mcp.json`:
 
 The MCP server uses ref's saved profile (`~/.ref/chrome-profile`) when it exists, so tools see the sites you signed in to with `ref login`.
 Stop the server before running `ref login`, since only one Chrome can use the profile at a time.
-To use another profile, set `REF_CHROME_PROFILE` in the server's environment:
+To use another profile, pass `--profile` (or set `REF_CHROME_PROFILE` in the server's environment); `--profile fresh` gives an empty, temporary profile:
 
 ```json
 {
   "mcpServers": {
     "ref": {
       "command": "ref",
-      "args": ["mcp"],
-      "env": { "REF_CHROME_PROFILE": "/Users/me/.ref/work-profile" }
+      "args": ["mcp", "--profile", "/Users/me/.ref/work-profile"]
     }
   }
 }
 ```
+
+With a saved profile, `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` fail once `ref_fetch` has run, because they start a second Chrome on the profile the server already holds (a known bug, to be fixed).
 
 An agent using these tools browses those sites as you.
 

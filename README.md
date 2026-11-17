@@ -158,7 +158,8 @@ ref reads them with your own sessions, which you set up once in a normal Chrome 
   Chrome 144 and later let you opt in to remote debugging of your running browser (`chrome://inspect/#remote-debugging`) for tools that attach to it; ref does not do that, and a separate profile also keeps an agent out of your everyday sessions.
 - Only one Chrome can use the profile at a time: quit the `ref login` window before fetching, and stop `ref mcp` before running `ref login`.
   ref says which process holds it if you forget.
-- `REF_CHROME_PROFILE=<folder>` uses another saved profile (for example one per project); `REF_CHROME_PROFILE=fresh` runs with an empty, temporary profile instead, deleted afterwards.
+- `--profile <folder>` uses another saved profile (for example one per project); `--profile fresh` runs with an empty, temporary profile instead, deleted afterwards.
+  `fetch`, `check-links`, `verify-refs`, `refresh-data` and `mcp` take it; without it, the `REF_CHROME_PROFILE` environment variable gives the same choice.
 - With the saved profile, ref sends Chrome's normal user agent, because sessions and human-check passes are often tied to it.
 - Treat the profile folder like a password: it holds your sessions.
   An agent using ref through MCP browses those sites as you, so only connect agents you trust.

@@ -119,21 +119,26 @@ const MAX_PARALLEL: usize = 20;
 pub struct RefMcpServer {
     pool: Arc<OnceCell<BrowserPool>>,
     root: PathBuf,
+    /// `--profile` value every browser of this server runs with
+    profile: Option<String>,
     tool_router: ToolRouter<RefMcpServer>,
 }
 
 impl RefMcpServer {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: PathBuf, profile: Option<String>) -> Self {
         Self {
             pool: Arc::new(OnceCell::new()),
             root,
+            profile,
             tool_router: Self::tool_router(),
         }
     }
 
     async fn get_or_init_pool(&self) -> std::result::Result<&BrowserPool, ErrorData> {
         self.pool
-            .get_or_try_init(|| async { BrowserPool::new(MCP_POOL_TABS).await })
+            .get_or_try_init(|| async {
+                BrowserPool::new(MCP_POOL_TABS, self.profile.as_deref()).await
+            })
             .await
             .map_err(|e| ErrorData::internal_error(format!("Browser pool init failed: {e}"), None))
     }
@@ -260,6 +265,7 @@ impl RefMcpServer {
             timeout_ms: params.timeout.unwrap_or(15000),
             retries: params.retries.unwrap_or(1),
             user_agent: None,
+            profile: self.profile.clone(),
         };
 
         let report = check_links(&params.urls, &config)
@@ -323,6 +329,9 @@ impl RefMcpServer {
             category: params.category,
             timeout: params.timeout.unwrap_or(30000),
             dry_run: params.dry_run.unwrap_or(false),
+            profile: crate::profile::ProfileArgs {
+                profile: self.profile.clone(),
+            },
         };
 
         let output = verify_refs::verify_refs_core(args)
@@ -349,6 +358,7 @@ impl RefMcpServer {
 
         let config = RefreshConfig {
             timeout_ms: params.timeout.unwrap_or(20000),
+            profile: self.profile.clone(),
         };
 
         let urls: Vec<String> = if let Some(url) = params.url {
@@ -389,10 +399,12 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
 
 /// Start the MCP server on stdio.
 ///
+/// `profile` is the `--profile` value its browsers run with (see [`crate::profile`]).
+///
 /// # Errors
 ///
 /// Returns an error if the transport fails to initialize or the server exits abnormally.
-pub async fn run_mcp(root: Option<PathBuf>) -> Result<()> {
+pub async fn run_mcp(root: Option<PathBuf>, profile: Option<String>) -> Result<()> {
     // All log output to stderr (stdout reserved for JSON-RPC)
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -414,7 +426,7 @@ pub async fn run_mcp(root: Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("Workspace folder {} is not available", root.display()))?;
     info!("Workspace for file tools: {}", root.display());
 
-    let server = RefMcpServer::new(root);
+    let server = RefMcpServer::new(root, profile);
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
 
@@ -505,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_server_info() {
-        let server = RefMcpServer::new(std::env::current_dir().unwrap());
+        let server = RefMcpServer::new(std::env::current_dir().unwrap(), None);
         let info = server.get_info();
         assert_eq!(info.server_info.name, "ref");
         assert!(info.capabilities.tools.is_some());
@@ -513,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_tools_list_all_registered() {
-        let server = RefMcpServer::new(std::env::current_dir().unwrap());
+        let server = RefMcpServer::new(std::env::current_dir().unwrap(), None);
         let tools = server.tool_router.list_all();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
 
@@ -528,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_tools_have_descriptions() {
-        let server = RefMcpServer::new(std::env::current_dir().unwrap());
+        let server = RefMcpServer::new(std::env::current_dir().unwrap(), None);
         let tools = server.tool_router.list_all();
 
         for tool in &tools {
@@ -547,7 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ref_pdf_refuses_paths_outside_workdir() {
-        let server = RefMcpServer::new(std::env::current_dir().unwrap());
+        let server = RefMcpServer::new(std::env::current_dir().unwrap(), None);
         for file in ["/etc/hostname", "../outside.pdf"] {
             let params = PdfParams {
                 files: vec![file.to_string()],
@@ -563,7 +575,7 @@ mod tests {
         std::fs::write(dir.path().join("a.md"), "see https://example.com").unwrap();
         std::fs::write(dir.path().join("notes.txt"), "not a references file").unwrap();
         std::fs::write(dir.path().join("other.yaml"), "just: some yaml").unwrap();
-        let server = RefMcpServer::new(dir.path().canonicalize().unwrap());
+        let server = RefMcpServer::new(dir.path().canonicalize().unwrap(), None);
         // not .yaml/.yml, and an existing file that is not a references file
         for output in ["a.md", "notes.txt", "other.yaml"] {
             let params = ScanParams {
@@ -586,8 +598,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_browser_of_the_server_uses_its_profile() {
+        // Needs Chrome (ADR-004). A fresh profile, so calls cannot lock each other out.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("references.yaml"),
+            "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 0\nreferences: []\n",
+        )
+        .unwrap();
+        let server = RefMcpServer::new(dir.path().canonicalize().unwrap(), Some("fresh".into()));
+
+        let fetched = server
+            .ref_fetch(Parameters(FetchParams {
+                urls: vec![],
+                parallel: None,
+                timeout: None,
+                raw: None,
+                selector: None,
+                max_chars: None,
+                max_sections: None,
+            }))
+            .await;
+        assert!(fetched.is_ok());
+        let pool = server.pool.get().expect("shared pool started");
+        assert!(!pool.profile.is_saved(), "{:?}", pool.profile);
+
+        let checked = server
+            .ref_check_links(Parameters(CheckLinksParams {
+                urls: vec![],
+                concurrency: None,
+                timeout: None,
+                retries: None,
+            }))
+            .await;
+        assert!(checked.is_ok(), "{checked:?}");
+
+        let refreshed = server
+            .ref_refresh_data(Parameters(RefreshDataParams {
+                url: Some("file:///etc/hostname".into()),
+                file: None,
+                timeout: None,
+            }))
+            .await;
+        assert!(refreshed.is_ok(), "{refreshed:?}");
+
+        // Filtered to nothing, so no browser starts; the profile is still passed on
+        let verified = server
+            .ref_verify_refs(Parameters(VerifyRefsParams {
+                file: "references.yaml".into(),
+                parallel: None,
+                category: Some(vec!["none".into()]),
+                timeout: None,
+                dry_run: Some(true),
+            }))
+            .await;
+        assert!(verified.is_ok(), "{verified:?}");
+    }
+
+    #[tokio::test]
     async fn test_ref_pdf_tool_call() {
-        let server = RefMcpServer::new(std::env::current_dir().unwrap());
+        let server = RefMcpServer::new(std::env::current_dir().unwrap(), None);
 
         // Call with a non-existent file — should return success with error in JSON body
         // (tool-level errors are returned as JSON in CallToolResult, not MCP errors)

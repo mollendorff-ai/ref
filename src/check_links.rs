@@ -43,6 +43,9 @@ pub struct CheckLinksArgs {
     /// (some sites want a name and an email: --user-agent "Jane Doe jane@example.com")
     #[arg(long, value_name = "TEXT")]
     user_agent: Option<String>,
+
+    #[command(flatten)]
+    profile: crate::profile::ProfileArgs,
 }
 
 /// Configuration for check-links
@@ -51,6 +54,8 @@ pub struct CheckLinksConfig {
     pub timeout_ms: u64,
     pub retries: u8,
     pub user_agent: Option<String>,
+    /// `--profile` value: a saved profile folder, `fresh`, or `None` for the default
+    pub profile: Option<String>,
 }
 
 /// Result for a single link check (compact)
@@ -97,6 +102,7 @@ pub async fn run_check_links(args: CheckLinksArgs, out: &mut impl std::io::Write
         timeout_ms: args.timeout,
         retries: args.retries,
         user_agent: args.user_agent.clone(),
+        profile: args.profile.profile.clone(),
     };
 
     let report = check_links(&urls, &config).await?;
@@ -146,7 +152,7 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
 ///
 /// Returns error if Chrome fails to launch or URLs can't be fetched.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
-    let mut pool = BrowserPool::new(config.concurrency).await?;
+    let mut pool = BrowserPool::new(config.concurrency, config.profile.as_deref()).await?;
     if let Some(ua) = &config.user_agent {
         pool.set_user_agent(ua)?;
     }
@@ -280,6 +286,7 @@ mod tests {
             timeout_ms: 15000,
             retries: 1,
             user_agent: None,
+            profile: None,
         };
         assert_eq!(config.concurrency, 5);
         assert_eq!(config.timeout_ms, 15000);
