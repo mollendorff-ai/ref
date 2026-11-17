@@ -47,6 +47,12 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- The saved-profile folder, and `.ref` above it, are created readable by their owner only (mode 0700) on macOS and Linux, not with the default permissions.
+  A folder that already exists keeps its permissions.
+- The README said `ref pdf` and `ref fetch` see signed-in pages through the saved profile.
+  `ref pdf` does not use the profile, and `ref fetch` of a PDF URL downloads the file without the profile's cookies, so a PDF behind a sign-in comes back as `dead`; only `--cookies` is sent.
+  The README now says so, and says that `localhost` and private addresses are opened and that signed-in browsing is subject to a site's terms of service.
+- One description everywhere in the repository: "Renders web pages and PDFs into compact JSON for LLM agents" (`--help`, the MCP server instructions, the crate docs and `.asimov/project.yaml`).
 - A page that only mentions `isAccessibleForFree: false` is no longer a `paywall`: the signal counts only in the page's JSON-LD or microdata, not in its text or other scripts.
   ref's own GitHub page, whose README explains the signal, came back as a paywall.
 - A `main` element that holds exactly one `article` with at least a third of its text gives just that article as content, for `ref fetch` and `ref refresh-data`.

@@ -20,9 +20,9 @@ use std::process::ExitCode;
 #[command(name = "ref")]
 #[command(author = "Möllendorff AI")]
 #[command(version)]
-#[command(about = "Möllendorff Ref - LLM-optimized reference toolkit")]
+#[command(about = "Renders web pages and PDFs into compact JSON for LLM agents")]
 #[command(
-    long_about = "Reference verification and web fetching for AI agents.\nRenders pages in headless Chrome, including JavaScript-heavy sites.\nAll output is JSON for LLM consumption.\n\nExit codes: 0 = all succeeded, 1 = some URLs or files failed, 2 = command error."
+    long_about = "Renders web pages and PDFs into compact JSON for LLM agents.\nPages are rendered in headless Chrome, including JavaScript-heavy sites.\n\nExit codes: 0 = all succeeded, 1 = some URLs or files failed, 2 = command error."
 )]
 pub struct Cli {
     #[command(subcommand)]

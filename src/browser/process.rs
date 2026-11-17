@@ -216,7 +216,7 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
             dir.display()
         );
     }
-    std::fs::create_dir_all(dir)
+    create_profile_dir(dir)
         .with_context(|| format!("Cannot create the profile folder {}", dir.display()))?;
     if let Some(pid) = profile_in_use(dir) {
         anyhow::bail!(
@@ -227,6 +227,20 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
         );
     }
     Ok(())
+}
+
+/// Create `dir` and any missing parents. On Unix they are for their owner only
+/// (0700), because the folder holds the sessions you signed in with.
+/// A folder that already exists keeps the permissions it has.
+fn create_profile_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 /// The live process holding Chrome's `SingletonLock` in `dir`, if any
@@ -414,6 +428,26 @@ mod tests {
             Some(PathBuf::from("/"))
         );
         assert_eq!(first_existing(&["/no/chrome"]), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_saved_profile_folder_is_for_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".ref").join("chrome-profile");
+        prepare_saved_profile(&dir, None).unwrap();
+        for made in [dir.parent().unwrap(), dir.as_path()] {
+            let mode = std::fs::metadata(made).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", made.display());
+        }
+        // A folder that exists already keeps its permissions
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        prepare_saved_profile(&shared, None).unwrap();
+        let mode = std::fs::metadata(&shared).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
     }
 
     #[test]

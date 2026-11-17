@@ -90,11 +90,18 @@ upcoming:
   - summary: "Evaluation fixes (Ref Evaluation, 2026-11-16, grade A-)"
     goal: "EVAL_FIXES"
     deliverables:
-      - "Create the saved-profile folder readable by the owner only (0700); today src/browser.rs creates it with default permissions"
-      - "README: say that ref fetch opens localhost and private addresses"
-      - "README: one line on sites' terms of service for signed-in browsing"
-      - "README: 'ref pdf' does not use the saved profile (URLs are downloaded without Chrome or its cookies); only ref fetch of a PDF URL is signed in. Fix the sentence under First time, step 4, or give ref pdf the profile's cookies"
-      - "One description everywhere: README and Cargo.toml say 'compact JSON', the GitHub About says 'token-optimized JSON', mollendorff.ai says 'clean JSON', .asimov/project.yaml has its own"
+      - "Done 2026-11-17. Create the saved-profile folder readable by the owner only (0700): process::create_profile_dir; a folder that exists keeps its permissions (a user may point REF_CHROME_PROFILE at a shared folder, so ref never changes one)"
+      - "Done 2026-11-17. README: ref fetch opens localhost and private addresses (Security)"
+      - "Done 2026-11-17. README: one line on sites' terms of service for signed-in browsing (Security)"
+      - "Done 2026-11-17. README: ref pdf does not use the saved profile. The roadmap's claim that ref fetch of a PDF URL is signed in was wrong: tested on 2026-11-17, with a saved profile it fails with HTTP 403 (Chrome has the cookie, the download does not); only --cookies works. The sentence under First time, step 4, says so"
+      - "Done 2026-11-17 for the repository: one description, \"Renders web pages and PDFs into compact JSON for LLM agents\" (README, Cargo.toml, CLAUDE.md, --help, MCP instructions, crate docs, project.yaml). Not done, outside the repository: the GitHub About says 'token-optimized JSON' and mollendorff.ai says 'clean JSON'"
+  - summary: "Signed-in PDFs with the saved profile"
+    goal: "PDF_COOKIES"
+    source: "Tested on 2026-11-17: sign in with a saved profile, then ref fetch a PDF URL that needs the cookie: HTTP 403, status dead; the same with --cookies works"
+    deliverables:
+      - "ref fetch of a page that is a PDF downloads it with the cookies Chrome has for that address (read them from the page, Network.getCookies), not only the --cookies file; BrowserPool::download_headers builds the Cookie header from the cookie jar alone today"
+      - "ref pdf <url> has no profile or cookie option; decide whether it needs one, or whether ref fetch is the command for signed-in PDFs (then the README says so)"
+      - "A test with a PDF that needs a cookie the saved profile holds (the test server has /signed-in.pdf, which needs sid=letmein)"
   - summary: "--user-agent in the MCP server"
     goal: "MCP_USER_AGENT"
     deliverables:
