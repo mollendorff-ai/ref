@@ -66,7 +66,8 @@ ref fetch https://example.com/report 2>/dev/null | jq .
 
 `status` is one of `ok`, `dead`, `redirect`, `paywall` or `login`; `http` is the HTTP status of the main document as Chrome received it.
 Any 4xx or 5xx response is `dead`.
-A page is `paywall` or `login` only when there is a real sign of a wall: `isAccessibleForFree: false` structured data, a wall overlay element, or wall wording or a password field on a page with little readable text.
+A page is `paywall` or `login` only when there is a real sign of a wall: `isAccessibleForFree: false` in the page's JSON-LD or microdata, a wall overlay element, or wall wording or a password field on a page with little readable text.
+A page that only mentions the property, in its text or in other scripts, is not a wall.
 
 ### Size limits are reported, never silent
 
@@ -230,6 +231,7 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 - **Bot walls and CAPTCHAs**: ref does not solve them. With your saved profile, a check you passed in `ref login` usually carries over until it expires; without it, sites that block automated browsers will block ref too, and those pages come back as `dead` or with little content.
 - **Character encoding**: a page that declares no encoding (no `Content-Type` charset and no `<meta charset>`) is decoded the way Chrome guesses, often as Windows-1252, so accented text can come out garbled; ref does not change that.
 - **Content heuristics**: main-content selection (`main`, `article`, then common class names, then `body`) can miss content on unusual layouts; use `--selector` or `--raw`.
+  When `main` holds exactly one `article` with at least a third of its text, only the article is kept (a GitHub repository page gives its README, not the file list and sidebar); `--selector main` keeps all of `main`.
 - **Late rendering**: content that appears only after a timer, with no network activity, can be missed; ref waits for the network to go quiet, not for arbitrary scripts.
   In tests, content added 200 ms after load was kept and content added 2.5 s after load was missed.
 - **Web components**: text in open shadow roots is read; closed shadow roots cannot be.

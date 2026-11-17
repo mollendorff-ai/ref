@@ -7,7 +7,6 @@
 use crate::browser::{page_failure, BrowserPage, BrowserPool, PageResult};
 use crate::content;
 use crate::extract::{extract_amounts, extract_percentages, extract_urls, AmountMatch};
-use crate::fetch::extract_main_content;
 use crate::text::truncate;
 use anyhow::{Context, Result};
 use clap::Args;
@@ -236,7 +235,7 @@ fn settled(
 fn extract_numbers(url: &str, http: Option<u16>, html: &str) -> ExtractedData {
     let doc = Html::parse_document(html);
     let title = crate::fetch::page_title(&doc);
-    let main = Html::parse_document(&extract_main_content(&doc));
+    let main = Html::parse_document(&content::main_content(&doc));
     let text = content::extract_sections(&main, 0, usize::MAX, false)
         .sections
         .iter()
