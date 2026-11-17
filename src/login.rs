@@ -37,7 +37,7 @@ const LOGIN_SWITCHES: [&str; 4] = [
 /// # Errors
 /// Returns an error when no profile folder can be chosen, the profile is in
 /// use or is Chrome's everyday profile, a URL is not http(s), or Chrome cannot start.
-pub fn run_login(args: &LoginArgs) -> Result<()> {
+pub fn run_login(args: &LoginArgs, out: &mut impl std::io::Write) -> Result<()> {
     let home = profile::home_dir();
     let from_env = std::env::var(profile::PROFILE_ENV)
         .ok()
@@ -81,6 +81,6 @@ pub fn run_login(args: &LoginArgs) -> Result<()> {
         "profile": dir.display().to_string(),
         "status": if status.success() { "saved" } else { "chrome_exited_with_error" },
     });
-    println!("{output}");
+    writeln!(out, "{output}")?;
     Ok(())
 }

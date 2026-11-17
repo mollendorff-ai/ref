@@ -67,7 +67,10 @@ pub struct RefreshReport {
 ///
 /// # Errors
 /// Returns an error if URLs cannot be resolved, the browser fails to launch, or JSON serialization fails.
-pub async fn run_refresh_data(args: RefreshDataArgs) -> Result<bool> {
+pub async fn run_refresh_data(
+    args: RefreshDataArgs,
+    out: &mut impl std::io::Write,
+) -> Result<bool> {
     let urls = get_urls(&args).await?;
 
     if urls.is_empty() {
@@ -84,7 +87,7 @@ pub async fn run_refresh_data(args: RefreshDataArgs) -> Result<bool> {
     let report = refresh_data(&urls, &config).await?;
 
     // Output compact JSON to stdout
-    println!("{}", serde_json::to_string(&report)?);
+    writeln!(out, "{}", serde_json::to_string(&report)?)?;
 
     eprintln!("Done: {}/{} OK", report.ok, report.ok + report.failed);
 

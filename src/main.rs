@@ -82,16 +82,17 @@ fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> ExitCode {
     let command = async move {
+        let mut out = std::io::stdout();
         match cli.command {
-            Commands::Fetch(args) => run_fetch(args).await,
-            Commands::Pdf(args) => run_pdf(&args).await,
-            Commands::Init(args) => run_init(&args).map(|()| true),
-            Commands::Login(args) => run_login(&args).map(|()| true),
-            Commands::Scan(args) => run_scan(args).await.map(|()| true),
-            Commands::CheckLinks(args) => run_check_links(args).await,
-            Commands::RefreshData(args) => run_refresh_data(args).await,
-            Commands::VerifyRefs(args) => run_verify_refs(args).await,
-            Commands::Update(args) => run_update(args).await.map(|()| true),
+            Commands::Fetch(args) => run_fetch(args, &mut out).await,
+            Commands::Pdf(args) => run_pdf(&args, &mut out).await,
+            Commands::Init(args) => run_init(&args, &mut out).map(|()| true),
+            Commands::Login(args) => run_login(&args, &mut out).map(|()| true),
+            Commands::Scan(args) => run_scan(args, &mut out).await.map(|()| true),
+            Commands::CheckLinks(args) => run_check_links(args, &mut out).await,
+            Commands::RefreshData(args) => run_refresh_data(args, &mut out).await,
+            Commands::VerifyRefs(args) => run_verify_refs(args, &mut out).await,
+            Commands::Update(args) => run_update(args, &mut out).await.map(|()| true),
             Commands::Mcp(args) => mollendorff_ref::mcp::run_mcp(args.root)
                 .await
                 .map(|()| true),

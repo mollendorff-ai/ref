@@ -50,9 +50,9 @@ struct FoundUrl {
 
 /// # Errors
 /// Returns an error if file patterns cannot be expanded, files cannot be read, or output cannot be written.
-pub async fn run_scan(args: ScanArgs) -> Result<()> {
+pub async fn run_scan(args: ScanArgs, out: &mut impl std::io::Write) -> Result<()> {
     let output = scan_files(args).await?;
-    println!("{}", serde_json::to_string(&output)?);
+    writeln!(out, "{}", serde_json::to_string(&output)?)?;
     Ok(())
 }
 

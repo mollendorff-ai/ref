@@ -159,7 +159,7 @@ pub struct Page {
 ///
 /// Returns an error if the browser pool fails to initialize, pages cannot
 /// be serialized, or the browser cannot be closed cleanly.
-pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
+pub async fn run_fetch(args: FetchArgs, out: &mut impl std::io::Write) -> Result<bool> {
     let url_count = args.urls.len();
     let parallel = usize::from(args.parallel).min(url_count).max(1);
 
@@ -221,10 +221,10 @@ pub async fn run_fetch(args: FetchArgs) -> Result<bool> {
 
     // Output compact JSON (one line per page for multiple, or single object)
     if results.len() == 1 {
-        println!("{}", serde_json::to_string(&results[0])?);
+        writeln!(out, "{}", serde_json::to_string(&results[0])?)?;
     } else {
         for page in &results {
-            println!("{}", serde_json::to_string(page)?);
+            writeln!(out, "{}", serde_json::to_string(page)?)?;
         }
     }
 

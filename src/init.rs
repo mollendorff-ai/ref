@@ -28,7 +28,7 @@ pub struct InitOutput {
 
 /// # Errors
 /// Returns an error if the output file already exists (without `--force`) or cannot be written.
-pub fn run_init(args: &InitArgs) -> Result<()> {
+pub fn run_init(args: &InitArgs, out: &mut impl std::io::Write) -> Result<()> {
     // Check if file exists
     if args.output.exists() && !args.force {
         let error = serde_json::json!({
@@ -36,7 +36,7 @@ pub fn run_init(args: &InitArgs) -> Result<()> {
             "message": format!("{} already exists. Use --force to overwrite.", args.output.display()),
             "file": args.output.display().to_string()
         });
-        println!("{}", serde_json::to_string(&error)?);
+        writeln!(out, "{}", serde_json::to_string(&error)?)?;
         bail!("File exists");
     }
 
@@ -73,7 +73,7 @@ pub fn run_init(args: &InitArgs) -> Result<()> {
         created: Utc::now().to_rfc3339(),
         file: args.output.display().to_string(),
     };
-    println!("{}", serde_json::to_string(&output)?);
+    writeln!(out, "{}", serde_json::to_string(&output)?)?;
 
     Ok(())
 }

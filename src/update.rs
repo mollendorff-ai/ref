@@ -40,7 +40,7 @@ struct Asset {
 
 /// # Errors
 /// Returns an error if the latest release cannot be fetched or the binary cannot be replaced.
-pub async fn run_update(args: UpdateArgs) -> Result<()> {
+pub async fn run_update(args: UpdateArgs, out: &mut impl std::io::Write) -> Result<()> {
     eprintln!("Current version: {CURRENT_VERSION}");
     eprintln!("Checking for updates...");
 
@@ -55,7 +55,7 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
             "current_version": CURRENT_VERSION,
             "latest_version": latest_version
         });
-        println!("{}", serde_json::to_string(&output)?);
+        writeln!(out, "{}", serde_json::to_string(&output)?)?;
         return Ok(());
     }
 
@@ -65,7 +65,7 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
             "current_version": CURRENT_VERSION,
             "latest_version": latest_version
         });
-        println!("{}", serde_json::to_string(&output)?);
+        writeln!(out, "{}", serde_json::to_string(&output)?)?;
         return Ok(());
     }
 
@@ -130,7 +130,7 @@ pub async fn run_update(args: UpdateArgs) -> Result<()> {
         "new_version": latest_version,
         "path": current_exe.display().to_string()
     });
-    println!("{}", serde_json::to_string(&output)?);
+    writeln!(out, "{}", serde_json::to_string(&output)?)?;
 
     eprintln!("Updated successfully! Restart to use v{latest_version}");
 

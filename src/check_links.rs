@@ -78,7 +78,7 @@ pub struct LinkReport {
 ///
 /// Returns error if URLs can't be read or the browser pool fails.
 /// Returns `Ok(false)` when any link failed.
-pub async fn run_check_links(args: CheckLinksArgs) -> Result<bool> {
+pub async fn run_check_links(args: CheckLinksArgs, out: &mut impl std::io::Write) -> Result<bool> {
     let urls = get_urls(&args).await?;
 
     if urls.is_empty() {
@@ -102,7 +102,7 @@ pub async fn run_check_links(args: CheckLinksArgs) -> Result<bool> {
     let report = check_links(&urls, &config).await?;
 
     // Output compact JSON to stdout
-    println!("{}", serde_json::to_string(&report)?);
+    writeln!(out, "{}", serde_json::to_string(&report)?)?;
 
     eprintln!("Done: {}/{} OK", report.ok, report.ok + report.failed);
 

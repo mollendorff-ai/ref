@@ -45,7 +45,7 @@ fn is_url(path: &str) -> bool {
 ///
 /// Returns an error if JSON serialization or network request fails.
 /// Returns `Ok(false)` when any file could not be read or downloaded.
-pub async fn run_pdf(args: &PdfArgs) -> Result<bool> {
+pub async fn run_pdf(args: &PdfArgs, out: &mut impl std::io::Write) -> Result<bool> {
     let file_count = args.files.len();
     eprintln!(
         "Extracting {} PDF{}...",
@@ -72,10 +72,10 @@ pub async fn run_pdf(args: &PdfArgs) -> Result<bool> {
 
     // Output compact JSON (one line per page for multiple, or single object)
     if results.len() == 1 {
-        println!("{}", serde_json::to_string(&results[0])?);
+        writeln!(out, "{}", serde_json::to_string(&results[0])?)?;
     } else {
         for page in &results {
-            println!("{}", serde_json::to_string(page)?);
+            writeln!(out, "{}", serde_json::to_string(page)?)?;
         }
     }
 

@@ -70,9 +70,9 @@ pub struct VerifyOutput {
 ///
 /// Returns error if the references file can't be read, parsed, or written back.
 /// Returns `Ok(false)` when any reference is dead.
-pub async fn run_verify_refs(args: VerifyRefsArgs) -> Result<bool> {
+pub async fn run_verify_refs(args: VerifyRefsArgs, out: &mut impl std::io::Write) -> Result<bool> {
     let output = verify_refs_core(args).await?;
-    println!("{}", serde_json::to_string(&output)?);
+    writeln!(out, "{}", serde_json::to_string(&output)?)?;
     Ok(output.summary.dead == 0)
 }
 
