@@ -34,7 +34,7 @@ All notable changes to Möllendorff Ref.
 - The command line lives in the library (`ref::cli`), and `main` only calls it, so every exit code is tested in-process.
 - `ref fetch`, `ref verify-refs` and `ref check-links` share one cross-host redirect check (`www.` does not count); `ref verify-refs` also treats a page whose text cannot be read as having neither a paywall nor a login.
 - `ref refresh-data`, `ref fetch` and the PDF reader report every failure of one URL as that URL's failure; a PDF library panic or error is reported as "PDF extraction failed".
-- `ref pdf` no longer tries to decrypt a PDF again after it was opened: the PDF library already does that when it loads a file locked with the empty password.
+- A PDF locked with a real user password is an error that names the password ("PDF extraction failed: PDF error: decryption error: the supplied password is incorrect"), not "PDF contains no extractable text". The PDF library opens a file locked with the empty password while loading it; for any other lock, `ref pdf` tries the empty password so the error comes back.
 - `ref check-links` reads URLs from the standard input it is given, so `--stdin` is tested with real input; its redirect check is one small function.
 - All tests are inline and none is skipped: the tests that need Chrome run in plain `cargo test` (ADR-004), and CI's separate job for them is gone.
 - The clean-up at exit removes only the temporary profiles of browsers that are gone, never one still in use.

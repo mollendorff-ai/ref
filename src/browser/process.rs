@@ -313,6 +313,7 @@ fn kill_chrome_using(profile: &Path) {
 }
 
 /// The ref process id in a profile folder name `ref-chrome-<pid>-<nanos>`
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux sweep uses it
 fn profile_owner(name: &str) -> Option<u32> {
     let rest = name.strip_prefix("ref-chrome-")?;
     let (pid, nanos) = rest.split_once('-')?;
@@ -428,6 +429,8 @@ mod tests {
         assert!(err.contains(&open), "{err}");
     }
 
+    // The sweep reads /proc, so it exists on Linux only
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_sweep_ends_the_chrome_and_profile_of_a_dead_ref_only() {
         let temp = tempfile::tempdir().unwrap();

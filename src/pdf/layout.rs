@@ -11,9 +11,13 @@
 pub(super) fn extract_layout_text(
     bytes: &[u8],
 ) -> Result<(String, PdfInfo), pdf_extract::OutputError> {
-    // lopdf decrypts a document it can open with the empty password while
-    // loading it, so there is nothing left to decrypt here
-    let doc = pdf_extract::Document::load_mem(bytes)?;
+    let mut doc = pdf_extract::Document::load_mem(bytes)?;
+    // lopdf opens a PDF locked with the empty password while loading it. One
+    // that needs a real password stays locked; trying the empty password here
+    // makes the error say so, instead of the text just coming out empty.
+    if doc.is_encrypted() {
+        doc.decrypt("")?;
+    }
     let mut out = LayoutText::default();
     pdf_extract::output_doc(&doc, &mut out)?;
     let info = PdfInfo {
@@ -237,24 +241,34 @@ mod tests {
         assert!(text.contains("Right") && text.contains("Left"), "{text:?}");
     }
 
-    #[test]
-    fn a_pdf_locked_with_an_empty_user_password_is_still_read() {
+    /// A PDF with one line of text, locked with these passwords
+    fn locked_pdf(user_password: &str) -> Vec<u8> {
         use pdf_extract::{Document, EncryptionState, EncryptionVersion, Permissions};
         let plain = pdf_with_lines(&["Confidential report text"]);
         let mut doc = Document::load_mem(&plain).unwrap();
         let version = EncryptionVersion::V1 {
             document: &doc,
             owner_password: "owner",
-            user_password: "",
+            user_password,
             permissions: Permissions::all(),
         };
         let state = EncryptionState::try_from(version).unwrap();
         doc.encrypt(&state).unwrap();
         let mut locked = Vec::new();
         doc.save_to(&mut locked).unwrap();
+        locked
+    }
 
-        let (text, _) = extract_layout_text(&locked).unwrap();
+    #[test]
+    fn a_pdf_locked_with_an_empty_user_password_is_still_read() {
+        let (text, _) = extract_layout_text(&locked_pdf("")).unwrap();
         assert!(text.contains("Confidential report text"), "{text:?}");
+    }
+
+    #[test]
+    fn a_pdf_locked_with_a_user_password_is_an_error_naming_the_password() {
+        let err = extract_layout_text(&locked_pdf("secret")).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("password"), "{err}");
     }
 
     #[test]

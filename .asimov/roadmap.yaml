@@ -72,6 +72,13 @@ upcoming:
       - "One Chrome method for requests on the browser itself (read lock, attempt, drop the lock, then judge, with the failed-pool check), so the lock order cannot be got wrong at a new call site"
       - "Done 2026-11-17. A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
       - "verify-refs: a test for a tab that dies between opening and navigation, and an error message that says it was the tab"
+      - "\"Chrome started but did not answer\" also covers a Chrome that answered with an error, and the reason is not shown (BrowserPool::start in src/browser/mod.rs); show it"
+  - summary: "Small findings from the last review (not bugs of this branch)"
+    goal: "REVIEW_LEFTOVERS"
+    source: "Review of ec2e81e on 2026-11-17"
+    deliverables:
+      - "The CI test-count badge reads about four too high: the profile.rs tests start child test runs, and their \"test result:\" lines are counted too"
+      - "ref check-links --stdin at a terminal can swallow Ctrl-C while it waits for input (older than this branch)"
   - summary: "Content detection on GitHub pages"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
