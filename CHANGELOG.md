@@ -10,11 +10,13 @@ All notable changes to Möllendorff Ref.
 
 ### Changed
 
-- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does). The `run_*` command functions write their JSON to a writer they are given.
+- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does). The `run_*` command functions write their JSON to a writer they are given. New `check_links_with` and `refresh_data_with` run in a browser the caller already has.
+- `ref check-links` and `ref verify-refs` run their pages from one task, at most `--concurrency` / `--parallel` at once, instead of one task per URL; results keep the input order as before.
 
-### Known issues
+### Fixed
 
-- With a saved profile, the MCP tools `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` fail once `ref_fetch` has run: they start a second Chrome on the profile the server's browser already holds, and the error wrongly points at `ref login`.
+- **MCP with a saved profile**: `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` failed once `ref_fetch` had run, because each started a second Chrome on the profile the server's browser already held. They now share the server's browser.
+- The "profile is open in another Chrome" error names the possible holders (`ref login`, a running `ref mcp`, another ref command) instead of only `ref login`.
 
 ## [1.9.0] - 2026-11-15
 

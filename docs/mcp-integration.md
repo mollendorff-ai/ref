@@ -67,7 +67,7 @@ To use another profile, pass `--profile` (or set `REF_CHROME_PROFILE` in the ser
 }
 ```
 
-With a saved profile, `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` fail once `ref_fetch` has run, because they start a second Chrome on the profile the server already holds (a known bug, to be fixed).
+All browser tools of one server share a single Chrome, so they never lock each other out of the profile.
 
 An agent using these tools browses those sites as you.
 

@@ -6,11 +6,11 @@
 //! See: ADR-001 for rationale, docs/mcp-integration.md for setup.
 
 use crate::browser::BrowserPool;
-use crate::check_links::{check_links, CheckLinksConfig};
+use crate::check_links::{check_links_with, CheckLinksConfig};
 use crate::fetch;
 use crate::guard;
 use crate::pdf;
-use crate::refresh_data::{refresh_data, RefreshConfig};
+use crate::refresh_data::refresh_data_with;
 use crate::scan::{self, ScanArgs};
 use crate::verify_refs::{self, VerifyRefsArgs};
 use anyhow::{Context, Result};
@@ -264,13 +264,13 @@ impl RefMcpServer {
             concurrency: parallelism(params.concurrency, 5, "concurrency")?,
             timeout_ms: params.timeout.unwrap_or(15000),
             retries: params.retries.unwrap_or(1),
+            // The shared browser has its own user agent and profile
             user_agent: None,
-            profile: self.profile.clone(),
+            profile: None,
         };
 
-        let report = check_links(&params.urls, &config)
-            .await
-            .map_err(to_mcp_err)?;
+        let pool = self.get_or_init_pool().await?;
+        let report = check_links_with(pool, &params.urls, &config).await;
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -329,12 +329,12 @@ impl RefMcpServer {
             category: params.category,
             timeout: params.timeout.unwrap_or(30000),
             dry_run: params.dry_run.unwrap_or(false),
-            profile: crate::profile::ProfileArgs {
-                profile: self.profile.clone(),
-            },
+            // Runs in the shared browser, which has its own profile
+            profile: crate::profile::ProfileArgs::default(),
         };
 
-        let output = verify_refs::verify_refs_core(args)
+        let pool = self.get_or_init_pool().await?;
+        let output = verify_refs::verify_refs_core(args, Some(pool))
             .await
             .map_err(to_mcp_err)?;
         let json = serde_json::to_string(&output).map_err(json_err)?;
@@ -356,10 +356,7 @@ impl RefMcpServer {
             ));
         }
 
-        let config = RefreshConfig {
-            timeout_ms: params.timeout.unwrap_or(20000),
-            profile: self.profile.clone(),
-        };
+        let timeout_ms = params.timeout.unwrap_or(20000);
 
         let urls: Vec<String> = if let Some(url) = params.url {
             vec![url]
@@ -373,7 +370,8 @@ impl RefMcpServer {
             crate::extract::extract_urls(&content)
         };
 
-        let report = refresh_data(&urls, &config).await.map_err(to_mcp_err)?;
+        let pool = self.get_or_init_pool().await?;
+        let report = refresh_data_with(pool, &urls, timeout_ms).await;
         let json = serde_json::to_string(&report).map_err(json_err)?;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
@@ -642,7 +640,7 @@ mod tests {
             .await;
         assert!(refreshed.is_ok(), "{refreshed:?}");
 
-        // Filtered to nothing, so no browser starts; the profile is still passed on
+        // Filtered to nothing: nothing is verified, and the call still succeeds
         let verified = server
             .ref_verify_refs(Parameters(VerifyRefsParams {
                 file: "references.yaml".into(),
@@ -653,6 +651,81 @@ mod tests {
             }))
             .await;
         assert!(verified.is_ok(), "{verified:?}");
+    }
+
+    #[tokio::test]
+    async fn browser_tools_share_one_chrome_on_a_saved_profile() {
+        // Needs Chrome (ADR-004). Before the fix, each of these tools started a
+        // second Chrome on the profile the server's browser already held, and
+        // failed with "The profile ... is open in another Chrome".
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("references.yaml"), "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 1\nreferences:\n- id: closed-port\n  url: http://127.0.0.1:9/\n  title: Nothing listens here\n  categories: [test]\n  cited_in: []\n  status: pending\n").unwrap();
+        std::fs::write(
+            root.join("notes.md"),
+            "See http://127.0.0.1:9/ for nothing.",
+        )
+        .unwrap();
+        let saved = root.join("saved-profile");
+        let server = RefMcpServer::new(root.clone(), Some(saved.to_string_lossy().into()));
+        let text = |r: CallToolResult| {
+            let t = r.content[0].as_text().map(|t| t.text.clone());
+            serde_json::from_str::<serde_json::Value>(&t.unwrap_or_default()).unwrap()
+        };
+
+        let fetched = server
+            .ref_fetch(Parameters(FetchParams {
+                urls: vec!["http://127.0.0.1:9/".into()],
+                parallel: None,
+                timeout: Some(5000),
+                raw: None,
+                selector: None,
+                max_chars: None,
+                max_sections: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(text(fetched)["status"], "dead");
+        assert_eq!(
+            server.pool.get().unwrap().profile,
+            crate::profile::Profile::Saved(saved.clone())
+        );
+
+        let checked = server
+            .ref_check_links(Parameters(CheckLinksParams {
+                urls: vec!["http://127.0.0.1:9/".into()],
+                concurrency: None,
+                timeout: Some(5000),
+                retries: Some(0),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(text(checked)["failed"], 1);
+
+        let refreshed = server
+            .ref_refresh_data(Parameters(RefreshDataParams {
+                url: None,
+                file: Some("notes.md".into()),
+                timeout: Some(5000),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(text(refreshed)["failed"], 1);
+
+        let verified = server
+            .ref_verify_refs(Parameters(VerifyRefsParams {
+                file: "references.yaml".into(),
+                parallel: None,
+                category: None,
+                timeout: Some(5000),
+                dry_run: Some(true),
+            }))
+            .await
+            .unwrap();
+        let verified = text(verified);
+        assert_eq!(verified["summary"]["verified"], 1);
+        assert_eq!(verified["summary"]["dead"], 1);
+        assert!(saved.is_dir(), "the saved profile is kept");
     }
 
     #[tokio::test]

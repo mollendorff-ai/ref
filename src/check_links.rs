@@ -7,10 +7,9 @@ use crate::extract::extract_urls;
 use crate::text::truncate;
 use anyhow::{Context, Result};
 use clap::Args;
-use futures::future::join_all;
+use futures::StreamExt;
 use serde::Serialize;
 use std::io::{self, BufRead};
-use std::sync::Arc;
 use tokio::fs;
 
 #[derive(Args)]
@@ -146,38 +145,36 @@ async fn get_urls(args: &CheckLinksArgs) -> Result<Vec<String>> {
     std::process::exit(2);
 }
 
-/// Check multiple links and generate report.
+/// Check multiple links in a browser of their own and generate a report.
 ///
 /// # Errors
 ///
-/// Returns error if Chrome fails to launch or URLs can't be fetched.
+/// Returns error if Chrome fails to launch or the user agent is invalid.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
     let mut pool = BrowserPool::new(config.concurrency, config.profile.as_deref()).await?;
     if let Some(ua) = &config.user_agent {
         pool.set_user_agent(ua)?;
     }
-    let pool = Arc::new(pool);
-    let timeout = config.timeout_ms;
-    let retries = config.retries;
+    let report = check_links_with(&pool, urls, config).await;
+    pool.close().await?;
+    Ok(report)
+}
 
-    let tasks: Vec<_> = urls
-        .iter()
-        .map(|url| {
-            let pool = Arc::clone(&pool);
-            let url = url.clone();
-            tokio::spawn(async move { check_one(&pool, &url, timeout, retries).await })
-        })
-        .collect();
-
-    let results: Vec<LinkResult> = join_all(tasks)
-        .await
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .collect();
-
-    if let Ok(pool) = Arc::try_unwrap(pool) {
-        pool.close().await?;
-    }
+/// Check links in a browser the caller already has, such as the MCP server's
+/// shared one, at most `config.concurrency` at once.
+/// `config.user_agent` and `config.profile` are not used: the browser has its own.
+pub async fn check_links_with(
+    pool: &BrowserPool,
+    urls: &[String],
+    config: &CheckLinksConfig,
+) -> LinkReport {
+    // Owned items: a stream over borrowed ones is not `Send` (needed by the MCP server)
+    let (timeout, retries) = (config.timeout_ms, config.retries);
+    let results: Vec<LinkResult> = futures::stream::iter(urls.to_vec())
+        .map(|url| async move { check_one(pool, &url, timeout, retries).await })
+        .buffered(config.concurrency.max(1))
+        .collect()
+        .await;
 
     let ok = results
         .iter()
@@ -187,11 +184,11 @@ pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<L
         .count();
     let failed = results.len() - ok;
 
-    Ok(LinkReport {
+    LinkReport {
         ok,
         failed,
         results,
-    })
+    }
 }
 
 async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> LinkResult {

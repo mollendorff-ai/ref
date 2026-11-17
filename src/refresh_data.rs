@@ -119,12 +119,25 @@ async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
     std::process::exit(2);
 }
 
-/// Extract data from multiple URLs, one at a time with a one-second pause
+/// Extract data from multiple URLs in a browser of their own, one at a time
+/// with a one-second pause
 ///
 /// # Errors
-/// Returns an error if the browser pool cannot be created.
+/// Returns an error if the browser pool cannot be created or closed.
 pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<RefreshReport> {
     let pool = BrowserPool::new(1, config.profile.as_deref()).await?;
+    let report = refresh_data_with(&pool, urls, config.timeout_ms).await;
+    pool.close().await?;
+    Ok(report)
+}
+
+/// Extract data from multiple URLs in a browser the caller already has, such
+/// as the MCP server's shared one, one at a time with a one-second pause
+pub async fn refresh_data_with(
+    pool: &BrowserPool,
+    urls: &[String],
+    timeout_ms: u64,
+) -> RefreshReport {
     let mut results = Vec::with_capacity(urls.len());
 
     for (i, url) in urls.iter().enumerate() {
@@ -133,20 +146,18 @@ pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<Ref
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
         let result = match pool.new_page().await {
-            Ok(page) => extract_from_page(&page, url, config.timeout_ms).await,
+            Ok(page) => extract_from_page(&page, url, timeout_ms).await,
             Err(e) => failure(url, None, format!("Browser error: {e}")),
         };
         results.push(result);
     }
 
-    pool.close().await?;
-
     let ok = results.iter().filter(|r| r.success).count();
-    Ok(RefreshReport {
+    RefreshReport {
         ok,
         failed: results.len() - ok,
         results,
-    })
+    }
 }
 
 fn failure(url: &str, http: Option<u16>, error: String) -> ExtractedData {
@@ -210,6 +221,19 @@ fn extract_numbers(url: &str, http: Option<u16>, html: &str) -> ExtractedData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refresh_starts_its_own_browser() {
+        // Needs Chrome (ADR-004)
+        let config = RefreshConfig {
+            timeout_ms: 5000,
+            profile: Some("fresh".into()),
+        };
+        let urls = ["http://127.0.0.1:9/".to_string()];
+        let report = refresh_data(&urls, &config).await.unwrap();
+        assert_eq!(report.failed, 1);
+        assert!(!report.results[0].success);
+    }
 
     #[test]
     fn test_numbers_come_from_main_content_only() {

@@ -397,8 +397,9 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
         .with_context(|| format!("Cannot create the profile folder {}", dir.display()))?;
     if let Some(pid) = profile_in_use(dir) {
         anyhow::bail!(
-            "The profile {} is open in another Chrome (process {pid}). Close that Chrome \
-             window (for example the one `ref login` opened, quitting it fully) and try again.",
+            "The profile {} is open in another Chrome (process {pid}): a `ref login` window, \
+             a running `ref mcp` server or another ref command. Quit it fully (for `ref login`, \
+             close every window) and try again.",
             dir.display()
         );
     }

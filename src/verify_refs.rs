@@ -14,10 +14,9 @@ use crate::text::truncate;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Args;
-use futures::future::join_all;
+use futures::StreamExt;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -74,7 +73,7 @@ pub struct VerifyOutput {
 /// Returns error if the references file can't be read, parsed, or written back.
 /// Returns `Ok(false)` when any reference is dead.
 pub async fn run_verify_refs(args: VerifyRefsArgs, out: &mut impl std::io::Write) -> Result<bool> {
-    let output = verify_refs_core(args).await?;
+    let output = verify_refs_core(args, None).await?;
     writeln!(out, "{}", serde_json::to_string(&output)?)?;
     Ok(output.summary.dead == 0)
 }
@@ -84,7 +83,13 @@ pub async fn run_verify_refs(args: VerifyRefsArgs, out: &mut impl std::io::Write
 /// # Errors
 ///
 /// Returns error if the references file can't be read, parsed, or written back.
-pub(crate) async fn verify_refs_core(args: VerifyRefsArgs) -> Result<VerifyOutput> {
+///
+/// Runs in `shared` when given (the MCP server's browser), else in a browser of
+/// its own, started only when there is something to verify.
+pub(crate) async fn verify_refs_core(
+    args: VerifyRefsArgs,
+    shared: Option<&BrowserPool>,
+) -> Result<VerifyOutput> {
     let content = tokio::fs::read_to_string(&args.file)
         .await
         .with_context(|| format!("Failed to read {}", args.file.display()))?;
@@ -126,45 +131,15 @@ pub(crate) async fn verify_refs_core(args: VerifyRefsArgs) -> Result<VerifyOutpu
         to_verify, args.parallel
     );
 
-    let pool = Arc::new(BrowserPool::new(args.parallel, args.profile.profile.as_deref()).await?);
-    let timeout = args.timeout;
-    let refs_file = Arc::new(Mutex::new(refs_file));
-
-    let tasks: Vec<_> = indices_to_verify
-        .into_iter()
-        .map(|idx| {
-            let pool = Arc::clone(&pool);
-            let refs_file = Arc::clone(&refs_file);
-            tokio::spawn(async move {
-                let url = {
-                    let file = refs_file.lock().await;
-                    file.references[idx].url.clone()
-                };
-
-                eprintln!("  -> {}", truncate(&url, 60));
-                let result = verify_url(&pool, &url, timeout).await;
-
-                {
-                    let mut file = refs_file.lock().await;
-                    file.references[idx].status = result.status;
-                    file.references[idx].verified = Some(Utc::now().to_rfc3339());
-                    file.references[idx].notes = result.notes;
-                }
-
-                result.status
-            })
-        })
-        .collect();
-
-    let statuses: Vec<Status> = join_all(tasks)
-        .await
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .collect();
-
-    if let Ok(pool) = Arc::try_unwrap(pool) {
+    let refs_file = Mutex::new(refs_file);
+    let statuses = if let Some(pool) = shared {
+        verify_all(pool, &refs_file, &indices_to_verify, &args).await
+    } else {
+        let pool = BrowserPool::new(args.parallel, args.profile.profile.as_deref()).await?;
+        let statuses = verify_all(&pool, &refs_file, &indices_to_verify, &args).await;
         pool.close().await?;
-    }
+        statuses
+    };
 
     let summary = compute_summary(total, skipped, &statuses);
 
@@ -189,6 +164,33 @@ pub(crate) async fn verify_refs_core(args: VerifyRefsArgs) -> Result<VerifyOutpu
         file: args.file.display().to_string(),
         timestamp: Utc::now().to_rfc3339(),
     })
+}
+
+/// Verify the chosen references, at most `args.parallel` at once, and record
+/// each result in the file
+async fn verify_all(
+    pool: &BrowserPool,
+    refs_file: &Mutex<ReferencesFile>,
+    indices: &[usize],
+    args: &VerifyRefsArgs,
+) -> Vec<Status> {
+    // Owned items: a stream over borrowed ones is not `Send` (needed by the MCP server)
+    let timeout = args.timeout;
+    futures::stream::iter(indices.to_vec())
+        .map(|idx| async move {
+            let url = refs_file.lock().await.references[idx].url.clone();
+            eprintln!("  -> {}", truncate(&url, 60));
+            let result = verify_url(pool, &url, timeout).await;
+
+            let mut file = refs_file.lock().await;
+            file.references[idx].status = result.status;
+            file.references[idx].verified = Some(Utc::now().to_rfc3339());
+            file.references[idx].notes = result.notes;
+            result.status
+        })
+        .buffered(args.parallel.max(1))
+        .collect()
+        .await
 }
 
 /// Compute a summary from the list of verification statuses.
@@ -324,6 +326,32 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> VerifyResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn verify_starts_its_own_browser_when_none_is_shared() {
+        // Needs Chrome (ADR-004)
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("references.yaml");
+        std::fs::write(&file, "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 1\nreferences:\n- id: closed-port\n  url: http://127.0.0.1:9/\n  title: Nothing listens here\n  categories: [test]\n  cited_in: []\n  status: pending\n").unwrap();
+        let args = VerifyRefsArgs {
+            file: file.clone(),
+            parallel: 2,
+            category: None,
+            timeout: 5000,
+            dry_run: false,
+            profile: crate::profile::ProfileArgs {
+                profile: Some("fresh".into()),
+            },
+        };
+        let mut out = Vec::new();
+        let all_ok = run_verify_refs(args, &mut out).await.unwrap();
+        assert!(!all_ok, "a dead reference makes the run fail");
+        let output: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(output["summary"]["verified"], 1);
+        assert_eq!(output["summary"]["dead"], 1);
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(written.contains("status: dead"), "{written}");
+    }
 
     #[test]
     fn test_compute_summary_counts_each_status() {
