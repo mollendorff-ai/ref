@@ -82,7 +82,8 @@ When the workspace is the filesystem root, file tools are refused.
 
 `parallel` and `concurrency` must be between 1 and 20.
 The server keeps one browser with up to 20 tabs, shared by every browser tool; each call uses at most its own `parallel` / `concurrency` value, calls running at the same time share the tabs, and every tab is closed when its page is done.
-Chrome starts on the first call that has pages to open, and starts again if it stops answering (a crash, or killed); pages run with Chrome's cache off, so every call asks the sites again.
+Chrome starts on the first call that has pages to open, and starts again if it stops answering (a crash, a hang, or killed): the old one is stopped first, so a saved profile is free for the new one.
+Pages run with Chrome's cache off, so every call asks the sites again.
 Only `http` and `https` URLs are fetched.
 
 ### ref_fetch

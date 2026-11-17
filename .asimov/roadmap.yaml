@@ -32,6 +32,8 @@ upcoming:
       - "Cover update, check_links, verify_refs, refresh_data (injected base URL, local server), init and scan (temporary folders), mcp (in-process), login (headless seam)"
       - "Remove the coverage exclusions from the Makefile and CI; gate is cargo llvm-cov --fail-under-lines 100 over everything; README badge renamed from Logic coverage"
       - "Split any file that passes 1,500 lines once its tests are inline (browser.rs and fetch.rs are closest)"
+      - "Real tests for the clean-up after killed runs (sweep_orphans, kill_chrome_using: plant a profile folder named for a dead ref process) and for navigation timeouts; on 2026-11-17 they were covered only by leftovers of earlier runs"
+      - "browser.rs is 1,316 lines (2026-11-17): split it (pool, page, process and profile clean-up) before it reaches 1,500"
   - summary: "MCP tools lock each other out of a saved profile (done 2026-11-17, Unreleased)"
     goal: "MCP_SHARED_PROFILE"
     source: "Probe on 2026-11-17: after ref_fetch, ref_check_links on a saved profile fails with 'profile is open in another Chrome'"

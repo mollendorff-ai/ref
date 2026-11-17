@@ -97,17 +97,30 @@ pub fn remove_open_profiles() {
     }
 }
 
-/// How long ref waits for Chrome to answer one request. A Chrome that crashed
-/// or was killed never answers, so without a limit the call would wait forever.
-const CHROME_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long ref waits for Chrome to answer one request, the one limit on every
+/// request (see [`within`]). A Chrome that crashed fails at once; this limit is
+/// for one that hangs.
+const CHROME_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `work`, or an error saying Chrome did not answer in time
-async fn answered<T>(what: &str, work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    let limit = CHROME_ANSWER_TIMEOUT.as_secs();
-    tokio::time::timeout(CHROME_ANSWER_TIMEOUT, work)
-        .await
-        .map_err(|_| anyhow::anyhow!("Chrome did not answer within {limit} s ({what})"))?
+/// Every request to Chrome goes through here. chromiumoxide has a request
+/// timeout too, but it does not fire while Chrome is frozen (seen with
+/// SIGSTOP), so without this a hung Chrome would hold the call forever.
+async fn within<T, E: Into<anyhow::Error>>(
+    limit: Duration,
+    what: &str,
+    request: impl std::future::Future<Output = std::result::Result<T, E>>,
+) -> Result<T> {
+    match tokio::time::timeout(limit, request).await {
+        Ok(answer) => answer.map_err(Into::into),
+        Err(_) => Err(anyhow::anyhow!(
+            "Chrome did not answer within {} s ({what})",
+            limit.as_secs()
+        )),
+    }
 }
+
+/// How long [`BrowserPool::close`] waits for Chrome to exit before killing it
+const CHROME_EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// Set to `1` or `true` to start Chrome without its sandbox
 /// (needed in some containers; ref also falls back automatically).
@@ -119,6 +132,8 @@ pub struct BrowserPool {
     semaphore: Arc<Semaphore>,
     user_agent: String,
     pub(crate) profile: Profile,
+    /// Limit on each request to Chrome (see [`within`])
+    request_timeout: Duration,
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
     custom_user_agent: bool,
@@ -137,6 +152,16 @@ impl BrowserPool {
     /// # Errors
     /// Returns an error if Chrome/Chromium is not found or fails to launch.
     pub async fn new(concurrency: usize, profile: Option<&ProfileChoice>) -> Result<Self> {
+        Self::with_request_timeout(concurrency, profile, CHROME_REQUEST_TIMEOUT).await
+    }
+
+    /// [`new`](Self::new) with another limit on each request to Chrome (tests
+    /// use a short one to see what happens when Chrome hangs)
+    pub(crate) async fn with_request_timeout(
+        concurrency: usize,
+        profile: Option<&ProfileChoice>,
+        request_timeout: Duration,
+    ) -> Result<Self> {
         let chrome_path = detect_chrome_path().ok_or_else(|| {
             anyhow::anyhow!(
                 "Chrome/Chromium not found. Searched paths:\n  \
@@ -164,14 +189,14 @@ impl BrowserPool {
             running_as_root(),
         );
 
-        let browser = match launch(&chrome_path, &profile_dir, sandbox).await {
+        let browser = match launch(&chrome_path, &profile_dir, sandbox, request_timeout).await {
             Ok(b) => b,
             Err(e) if sandbox => {
                 eprintln!(
                     "Warning: Chrome did not start with its sandbox ({e:#}); retrying without it. \
                      Set {NO_SANDBOX_ENV}=1 to skip this attempt."
                 );
-                launch(&chrome_path, &profile_dir, false).await?
+                launch(&chrome_path, &profile_dir, false, request_timeout).await?
             }
             Err(e) => {
                 if !chosen.is_saved() {
@@ -204,6 +229,7 @@ impl BrowserPool {
             cookies: Vec::new(),
             cookie_jar: Vec::new(),
             custom_user_agent: false,
+            request_timeout,
         })
     }
 
@@ -242,12 +268,25 @@ impl BrowserPool {
         }
     }
 
-    /// True while Chrome still answers: a browser that crashed or was killed
-    /// does not, and a long-lived caller (the MCP server) then starts a new one.
+    /// True while Chrome still answers: one that crashed or was killed fails
+    /// at once, one that hangs after the request timeout. A long-lived caller
+    /// (the MCP server) then stops it and starts a new one.
     pub async fn is_alive(&self) -> bool {
-        tokio::time::timeout(Duration::from_secs(3), self.browser.version())
+        within(self.request_timeout, "version", self.browser.version())
             .await
-            .is_ok_and(|v| v.is_ok())
+            .is_ok()
+    }
+
+    /// Stop this pool's Chrome if it is still running and wait (up to
+    /// [`CHROME_EXIT_WAIT`]) until it is gone, so a new Chrome can take its
+    /// profile. Found through the profile's lock, so it works while other
+    /// calls still hold the pool.
+    pub async fn stop_chrome(&self) {
+        let Some(pid) = profile_in_use(self.profile.path()) else {
+            return;
+        };
+        kill_process(pid);
+        wait_until(CHROME_EXIT_WAIT, || !process_alive(pid)).await;
     }
 
     /// Get a new page with resource blocking and Chrome's cache turned off, so
@@ -258,39 +297,43 @@ impl BrowserPool {
     /// Returns an error if page creation or configuration fails.
     pub async fn new_page(&self) -> Result<BrowserPage> {
         let permit = self.semaphore.clone().acquire_owned().await?;
-        let page = answered("opening a page", self.open_page()).await?;
+        let limit = self.request_timeout;
+        let page = within(limit, "opening a tab", self.browser.new_page("about:blank")).await?;
+        // Closed before the error is returned when setting it up fails, so a
+        // long-lived browser does not collect half-made tabs
+        if let Err(e) = self.set_up(&page).await {
+            let _ = within(limit, "closing a tab", page.close()).await;
+            return Err(e);
+        }
         Ok(BrowserPage {
             page,
             permit: Some(permit),
+            request_timeout: limit,
         })
     }
 
-    async fn open_page(&self) -> Result<Page> {
-        let page = self.browser.new_page("about:blank").await?;
-
-        // Set user agent
-        page.execute(
-            chromiumoxide::cdp::browser_protocol::network::SetUserAgentOverrideParams::new(
-                &self.user_agent,
-            ),
-        )
-        .await?;
+    async fn set_up(&self, page: &Page) -> Result<()> {
+        let limit = self.request_timeout;
+        let agent = chromiumoxide::cdp::browser_protocol::network::SetUserAgentOverrideParams::new(
+            &self.user_agent,
+        );
+        within(limit, "setting the user agent", page.execute(agent)).await?;
 
         if !self.cookies.is_empty() {
             // Raw CDP call: chromiumoxide's helper refuses to run on about:blank
-            page.execute(SetCookiesParams::new(self.cookies.clone()))
+            let cookies = SetCookiesParams::new(self.cookies.clone());
+            within(limit, "setting cookies", page.execute(cookies))
                 .await
                 .context("Failed to set cookies")?;
         }
 
-        page.execute(SetCacheDisabledParams::new(true))
-            .await
-            .context("Failed to turn off the cache")?;
+        let no_cache = SetCacheDisabledParams::new(true);
+        within(limit, "turning off the cache", page.execute(no_cache)).await?;
 
         // Enable lifecycle events for networkIdle detection
-        page.execute(SetLifecycleEventsEnabledParams::new(true))
-            .await?;
-        Ok(page)
+        let lifecycle = SetLifecycleEventsEnabledParams::new(true);
+        within(limit, "enabling page events", page.execute(lifecycle)).await?;
+        Ok(())
     }
 
     /// Close a pool shared through `Arc` once its last user is done: when other
@@ -310,8 +353,14 @@ impl BrowserPool {
     /// # Errors
     /// Returns an error if the browser fails to close cleanly.
     pub async fn close(mut self) -> Result<()> {
-        let closed = self.browser.close().await;
-        let _ = self.browser.wait().await;
+        let closed = within(self.request_timeout, "closing", self.browser.close()).await;
+        // A Chrome that hangs does not exit when asked: kill it after a while
+        if tokio::time::timeout(CHROME_EXIT_WAIT, self.browser.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.browser.kill().await;
+        }
         if let Profile::Fresh(dir) = &self.profile {
             let _ = std::fs::remove_dir_all(dir);
             track_profile(dir, false);
@@ -397,12 +446,18 @@ fn with_chrome_args(mut builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
     builder.arg(("disable-features", &DISABLED_FEATURES[..]))
 }
 
-async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result<Browser> {
+async fn launch(
+    chrome_path: &Path,
+    profile_dir: &Path,
+    sandbox: bool,
+    request_timeout: Duration,
+) -> Result<Browser> {
     // chromiumoxide adds the leading "--" itself, so flags are written without it
     // (written with it, Chrome receives "----flag" and silently ignores it).
     let mut builder = BrowserConfig::builder()
         .chrome_executable(chrome_path)
-        .user_data_dir(profile_dir);
+        .user_data_dir(profile_dir)
+        .request_timeout(request_timeout);
     builder = with_chrome_args(builder);
     if !sandbox {
         builder = builder.no_sandbox();
@@ -416,7 +471,10 @@ async fn launch(chrome_path: &Path, profile_dir: &Path, sandbox: bool) -> Result
         .context("Failed to launch Chrome")?;
 
     // Spawn handler in background
-    tokio::spawn(async move { while handler.next().await.is_some() {} });
+    // An error here means the connection to Chrome is gone (messages it cannot
+    // parse are skipped, not errors). Ending the task then makes every request
+    // fail at once, instead of waiting for an answer that never comes.
+    tokio::spawn(async move { while let Some(Ok(())) = handler.next().await {} });
     Ok(browser)
 }
 
@@ -456,9 +514,43 @@ pub(crate) fn profile_in_use(dir: &Path) -> Option<u32> {
     process_alive(pid).then_some(pid)
 }
 
+/// True while process `pid` runs. An exited process its parent has not
+/// collected yet (a zombie) counts as gone: it holds nothing any more.
 #[cfg(target_os = "linux")]
 fn process_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !is_zombie(&stat))
+}
+
+/// True when a `/proc/<pid>/stat` line says the process is a zombie: the
+/// state letter follows the command name, which is in parentheses
+#[cfg(target_os = "linux")]
+fn is_zombie(stat: &str) -> bool {
+    stat.rsplit_once(')')
+        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+}
+
+/// Kill process `pid` outright
+#[cfg(unix)]
+fn kill_process(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_process(_pid: u32) {}
+
+/// Wait until `done` is true, checking every 100 ms, for at most `limit`;
+/// true when it became true in time
+async fn wait_until(limit: Duration, done: impl Fn() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    while !done() {
+        if start.elapsed() >= limit {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -654,15 +746,17 @@ pub struct DownloadHeaders {
 pub struct BrowserPage {
     page: Page,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// Limit on each request to Chrome (see [`within`])
+    request_timeout: Duration,
 }
 
 impl Drop for BrowserPage {
     fn drop(&mut self) {
-        let page = self.page.clone();
-        let permit = self.permit.take();
+        let (page, permit, limit) = (self.page.clone(), self.permit.take(), self.request_timeout);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // Bounded: a hung Chrome would otherwise keep this tab's slot forever
             handle.spawn(async move {
-                let _ = page.close().await;
+                let _ = within(limit, "closing a tab", page.close()).await;
                 drop(permit);
             });
         }
@@ -684,20 +778,17 @@ impl BrowserPage {
     /// Returns an error if the lifecycle event subscription fails.
     pub async fn goto(&self, url: &str, timeout_ms: u64) -> Result<PageResult> {
         // Subscribe to lifecycle and response events BEFORE navigation
-        let (mut lifecycle, mut responses) = answered("subscribing to page events", async {
-            let lifecycle = self
-                .page
-                .event_listener::<EventLifecycleEvent>()
-                .await
-                .context("Failed to subscribe to lifecycle events")?;
-            let responses = self
-                .page
-                .event_listener::<EventResponseReceived>()
-                .await
-                .context("Failed to subscribe to network responses")?;
-            Ok((lifecycle, responses))
+        let limit = self.request_timeout;
+        let mut lifecycle = within(limit, "subscribing to page events", async {
+            self.page.event_listener::<EventLifecycleEvent>().await
         })
-        .await?;
+        .await
+        .context("Failed to subscribe to lifecycle events")?;
+        let mut responses = within(limit, "subscribing to responses", async {
+            self.page.event_listener::<EventResponseReceived>().await
+        })
+        .await
+        .context("Failed to subscribe to network responses")?;
 
         // Start navigation with overall timeout
         let nav_result =
@@ -709,7 +800,8 @@ impl BrowserPage {
                 // Navigation succeeded, now wait for networkIdle
                 self.wait_for_network_idle(&mut lifecycle).await;
 
-                let main_frame = self.page.mainframe().await.ok().flatten();
+                let frame = within(limit, "reading the main frame", self.page.mainframe());
+                let main_frame = frame.await.ok().flatten();
                 let mut documents = Vec::new();
                 while let Some(Some(event)) = responses.next().now_or_never() {
                     if event.r#type == ResourceType::Document {
@@ -724,7 +816,8 @@ impl BrowserPage {
                 let main = main_document(&documents, main_frame);
                 let status = main.and_then(|d| u16::try_from(d.status).ok());
                 let mime = main.map(|d| d.mime.to_ascii_lowercase());
-                let title = self.page.get_title().await.ok().flatten();
+                let title = within(limit, "reading the title", self.page.get_title());
+                let title = title.await.ok().flatten();
                 Ok(PageResult {
                     status,
                     mime,
@@ -787,20 +880,24 @@ impl BrowserPage {
     pub async fn content(&self) -> Result<String> {
         // Best effort: a page without web components, or with scripts blocked,
         // is read as it is
-        answered("reading the page", async {
-            let _ = self.page.evaluate(FLATTEN_SHADOW_ROOTS).await;
-            self.page
-                .content()
-                .await
-                .context("Failed to get page content")
-        })
-        .await
+        let limit = self.request_timeout;
+        let _ = within(
+            limit,
+            "reading web components",
+            self.page.evaluate(FLATTEN_SHADOW_ROOTS),
+        )
+        .await;
+        within(limit, "reading the page", self.page.content())
+            .await
+            .context("Failed to get page content")
     }
 
     /// Get current URL (after redirects)
     pub async fn current_url(&self) -> Option<String> {
-        let url = tokio::time::timeout(CHROME_ANSWER_TIMEOUT, self.page.url());
-        url.await.ok()?.ok().flatten()
+        within(self.request_timeout, "reading the address", self.page.url())
+            .await
+            .ok()
+            .flatten()
     }
 }
 
@@ -937,6 +1034,99 @@ mod tests {
             !dir.exists(),
             "the last user's close removes the fresh profile"
         );
+    }
+
+    /// Freeze this pool's Chrome (SIGSTOP), as a hang would: it stays running
+    /// but answers nothing
+    fn freeze_chrome(pool: &BrowserPool) -> u32 {
+        let pid = profile_in_use(pool.profile.path()).expect("Chrome holds its profile");
+        let frozen = std::process::Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(frozen.success());
+        pid
+    }
+
+    #[tokio::test]
+    async fn a_hung_chrome_is_killed_on_close() {
+        // Needs Chrome (ADR-004). Before, close waited forever for it to exit.
+        let pool = BrowserPool::with_request_timeout(1, FRESH, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let dir = pool.profile.path().to_path_buf();
+        let pid = freeze_chrome(&pool);
+        let started = std::time::Instant::now();
+        let _ = pool.close().await;
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(20), "{took:?}");
+        assert!(!process_alive(pid), "the hung Chrome still runs");
+        assert!(!dir.exists(), "the fresh profile was not removed");
+    }
+
+    #[tokio::test]
+    async fn stopping_chrome_frees_its_profile_even_when_it_hangs() {
+        // Needs Chrome (ADR-004)
+        let pool = BrowserPool::with_request_timeout(1, FRESH, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let pid = freeze_chrome(&pool);
+        assert!(!pool.is_alive().await, "a frozen Chrome answered");
+        pool.stop_chrome().await;
+        assert!(!process_alive(pid));
+        assert_eq!(profile_in_use(pool.profile.path()), None);
+        // Already gone: nothing to stop
+        pool.stop_chrome().await;
+    }
+
+    /// The tabs open in Chrome, as Chrome itself counts them
+    async fn open_tabs(pool: &BrowserPool) -> usize {
+        let targets = chromiumoxide::cdp::browser_protocol::target::GetTargetsParams::default();
+        let answer = pool.browser.execute(targets).await.unwrap();
+        answer
+            .result
+            .target_infos
+            .iter()
+            .filter(|t| t.r#type == "page")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_tab_that_fails_to_set_up_is_closed() {
+        // Needs Chrome (ADR-004). Chrome refuses a cookie with a ';' in its name.
+        let mut pool = BrowserPool::new(1, FRESH).await.unwrap();
+        let tabs_before = open_tabs(&pool).await;
+        pool.set_cookies(&[Cookie {
+            domain: "example.com".into(),
+            path: "/".into(),
+            secure: false,
+            http_only: false,
+            expires: None,
+            name: "bad;name".into(),
+            value: "v".into(),
+        }]);
+        let err = pool.new_page().await.err().expect("set-up failed");
+        assert!(err.to_string().contains("cookies"), "{err:#}");
+        let tabs_after = open_tabs(&pool).await;
+        assert_eq!(tabs_after, tabs_before, "the half-made tab is still open");
+        pool.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn waiting_ends_when_done_or_at_the_limit() {
+        assert!(wait_until(Duration::from_secs(1), || true).await);
+        let started = std::time::Instant::now();
+        assert!(!wait_until(Duration::from_millis(250), || false).await);
+        assert!(started.elapsed() >= Duration::from_millis(250));
+    }
+
+    #[test]
+    fn zombies_are_recognised_from_proc_stat() {
+        assert!(is_zombie("4321 (chrome) Z 1 4321 4321 0 -1"));
+        assert!(is_zombie("17 (odd ) name) Z 1"));
+        assert!(!is_zombie("4321 (chrome) S 1 4321 4321 0 -1"));
+        assert!(!is_zombie("garbage"));
+        assert!(process_alive(std::process::id()));
     }
 
     #[tokio::test]

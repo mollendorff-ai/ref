@@ -14,7 +14,7 @@ use crate::text::truncate;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Args;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -95,8 +95,17 @@ pub(crate) async fn verify_refs_core(args: &VerifyRefsArgs) -> Result<VerifyOutp
     let output = plan
         .run(&pool, args.parallel, args.timeout, args.dry_run)
         .await;
-    BrowserPool::close_shared(pool).await?;
-    output
+    let closed = BrowserPool::close_shared(pool).await;
+    run_error_first(output, closed)
+}
+
+/// The run's result, with its own error before a close error: it says which
+/// URL failed and that the file is unchanged, and a failure to close a dead
+/// Chrome would only hide that
+fn run_error_first<T>(run: Result<T>, closed: Result<()>) -> Result<T> {
+    let output = run?;
+    closed?;
+    Ok(output)
 }
 
 /// The references file and the entries chosen to verify
@@ -169,7 +178,7 @@ impl Plan {
     /// When Chrome fails or a check panics, returns the error with its URL and
     /// leaves the file as it was; also when the file can't be written.
     pub(crate) async fn run(
-        self,
+        mut self,
         pool: &Arc<BrowserPool>,
         parallel: usize,
         timeout: u64,
@@ -179,7 +188,10 @@ impl Plan {
             "Verifying {} references ({parallel} parallel)...",
             self.chosen.len()
         );
-        let checks: Vec<_> = futures::stream::iter(self.chosen.clone())
+        // Stops at the first failure: nothing will be written, so checking the
+        // rest would only take time (up to the request timeout each on a hung Chrome)
+        let file = &self.file;
+        let checks: Vec<(usize, VerifyResult)> = futures::stream::iter(self.chosen.clone())
             .map(|idx| {
                 let (pool, url) = (Arc::clone(pool), self.refs.references[idx].url.clone());
                 async move {
@@ -189,33 +201,32 @@ impl Plan {
                         async move { verify_url(&pool, &url, timeout).await }
                     })
                     .await;
-                    (idx, url, checked)
+                    let checked =
+                        checked.unwrap_or_else(|e| Err(format!("Internal error in ref: {e}")));
+                    checked.map(|result| (idx, result)).map_err(|e| {
+                        anyhow::anyhow!("{url}: {e}. {} was not changed.", file.display())
+                    })
                 }
             })
             .buffered(parallel.max(1))
-            .collect()
-            .await;
+            .try_collect()
+            .await?;
 
-        let mut refs = self.refs.clone();
         let mut statuses = Vec::with_capacity(checks.len());
-        for (idx, url, checked) in checks {
-            let checked = checked.unwrap_or_else(|e| Err(format!("Internal error in ref: {e}")));
-            let result = checked.map_err(|e| {
-                anyhow::anyhow!("{url}: {e}. {} was not changed.", self.file.display())
-            })?;
-            let entry = &mut refs.references[idx];
+        for (idx, result) in checks {
+            let entry = &mut self.refs.references[idx];
             entry.status = result.status;
             entry.verified = Some(Utc::now().to_rfc3339());
             entry.notes = result.notes;
             statuses.push(result.status);
         }
-        refs.meta.last_verified = Some(Utc::now().to_rfc3339());
-        refs.meta.total_links = refs.references.len();
+        self.refs.meta.last_verified = Some(Utc::now().to_rfc3339());
+        self.refs.meta.total_links = self.refs.references.len();
 
         if dry_run {
             eprintln!("Dry run - file not modified");
         } else {
-            let yaml = serde_yaml::to_string(&refs)?;
+            let yaml = serde_yaml::to_string(&self.refs)?;
             crate::guard::write_atomic(&self.file, yaml.as_bytes())
                 .with_context(|| format!("Failed to write {}", self.file.display()))?;
             eprintln!("Updated {}", self.file.display());
@@ -451,6 +462,29 @@ pub(crate) mod tests {
         assert!(err.contains("http://127.0.0.1:9/: Chrome failed"), "{err}");
         assert!(err.contains("was not changed"), "{err}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn the_run_error_comes_before_a_close_error() {
+        let run = |ok: bool| {
+            if ok {
+                Ok(1)
+            } else {
+                Err(anyhow::anyhow!("run failed"))
+            }
+        };
+        let closed = |ok: bool| {
+            if ok {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("close failed"))
+            }
+        };
+        let err = run_error_first(run(false), closed(false)).unwrap_err();
+        assert_eq!(err.to_string(), "run failed");
+        let err = run_error_first(run(true), closed(false)).unwrap_err();
+        assert_eq!(err.to_string(), "close failed");
+        assert_eq!(run_error_first(run(true), closed(true)).unwrap(), 1);
     }
 
     #[tokio::test]

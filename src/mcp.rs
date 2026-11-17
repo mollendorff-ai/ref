@@ -147,6 +147,9 @@ impl RefMcpServer {
                 return Ok(Arc::clone(pool));
             }
             info!("Chrome stopped answering; starting a new one");
+            // Calls still running may hold the old pool: stop its Chrome
+            // anyway, so the new one can take the profile
+            pool.stop_chrome().await;
         }
         // Dropping the old pool lets its profile go once its last call ends
         *slot = None;
@@ -729,11 +732,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_dead_chrome_is_replaced_on_the_next_call() {
-        // Needs Chrome (ADR-004)
+        // Needs Chrome (ADR-004). A saved profile: the dead Chrome, not yet
+        // collected by its parent, must not keep the new one off the profile.
         let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
         let server = RefMcpServer::new(
-            dir.path().canonicalize().unwrap(),
-            Some(ProfileChoice::Fresh),
+            root.clone(),
+            Some(ProfileChoice::Folder(root.join("saved"))),
         );
         let check = || CheckLinksParams {
             urls: vec!["http://127.0.0.1:9/".into()],
