@@ -95,7 +95,7 @@ pub struct LinkReport {
 ///
 /// Returns error if URLs can't be read or the browser pool fails.
 /// Returns `Ok(false)` when any link failed.
-pub async fn run_check_links(args: CheckLinksArgs, out: &mut impl std::io::Write) -> Result<bool> {
+pub async fn run_check_links(args: CheckLinksArgs, out: &mut dyn std::io::Write) -> Result<bool> {
     let urls = get_urls(&args).await?;
 
     if urls.is_empty() {
@@ -299,6 +299,19 @@ async fn check_one(pool: &BrowserPool, url: &str, timeout: u64, retries: u8) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn real_status_codes_are_reported() {
+        // Needs Chrome (ADR-004)
+        let base = crate::test_server::serve();
+        let url = format!("{base}/missing");
+        let line = ["check-links", "--profile", "fresh", "--url", &url];
+        let (code, out, _) = crate::test_server::ref_cmd(&line).await;
+        let report: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(report["results"][0]["status"], 404);
+        assert_eq!(report["failed"], 1);
+        assert_eq!(code, std::process::ExitCode::from(1));
+    }
 
     #[tokio::test]
     async fn a_tab_chrome_refuses_is_that_links_error() {

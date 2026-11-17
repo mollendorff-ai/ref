@@ -69,7 +69,7 @@ pub enum Commands {
 ///
 /// # Errors
 /// Returns the command's error (bad arguments, Chrome missing, I/O error).
-pub async fn run(cli: Cli, out: &mut impl Write) -> Result<bool> {
+pub async fn run(cli: Cli, out: &mut dyn Write) -> Result<bool> {
     match cli.command {
         Commands::Fetch(args) => run_fetch(args, out).await,
         Commands::Pdf(args) => run_pdf(&args, out).await,
@@ -95,16 +95,12 @@ pub async fn run(cli: Cli, out: &mut impl Write) -> Result<bool> {
 /// goes to `out` and its error to `err`. When `stop` finishes first (Ctrl-C or
 /// SIGTERM in the real program), the command is dropped, which closes Chrome
 /// and removes its temporary profile, instead of leaving them behind.
-pub async fn execute<I, T>(
-    args: I,
-    out: &mut impl Write,
-    err: &mut impl Write,
-    stop: impl Future<Output = ()>,
-) -> ExitCode
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-{
+pub async fn execute(
+    args: Vec<std::ffi::OsString>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    stop: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+) -> ExitCode {
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
@@ -141,23 +137,19 @@ where
 pub fn main() -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
-        std::env::args_os(),
+        std::env::args_os().collect(),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
 }
 
 /// [`main`] with its parts given, so the runtime failing to start can be tested
-fn start<I, T>(
+fn start(
     runtime: std::io::Result<tokio::runtime::Runtime>,
-    args: I,
-    out: &mut impl Write,
-    err: &mut impl Write,
-) -> ExitCode
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-{
+    args: Vec<std::ffi::OsString>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
     let runtime = match runtime {
         Ok(rt) => rt,
         Err(e) => {
@@ -165,7 +157,7 @@ where
             return ExitCode::from(2);
         }
     };
-    let code = runtime.block_on(execute(args, out, err, shutdown_signal()));
+    let code = runtime.block_on(execute(args, out, err, Box::pin(shutdown_signal())));
     // Shutting the runtime down drops every task, which kills Chrome; only
     // then can its temporary profile be removed for good.
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
@@ -178,12 +170,14 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let Ok(mut term) = signal(SignalKind::terminate()) else {
-            return std::future::pending().await;
-        };
+        // Without a SIGTERM handler, that branch is off and Ctrl-C still works
+        let mut term = signal(SignalKind::terminate()).ok();
+        let terminated = futures::future::OptionFuture::from(
+            term.as_mut().map(tokio::signal::unix::Signal::recv),
+        );
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+            Some(_) = terminated => {}
         }
     }
     #[cfg(not(unix))]
@@ -196,14 +190,7 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
 
-    /// Run `ref <args>` in-process: (exit code, standard output, error output)
-    async fn ref_cmd(args: &[&str]) -> (ExitCode, String, String) {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let line = std::iter::once("ref").chain(args.iter().copied());
-        let code = execute(line, &mut out, &mut err, std::future::pending()).await;
-        let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned();
-        (code, text(out), text(err))
-    }
+    use crate::test_server::ref_cmd;
 
     fn code(n: u8) -> ExitCode {
         ExitCode::from(n)
@@ -342,8 +329,10 @@ mod tests {
     #[tokio::test]
     async fn the_stop_signal_ends_the_command_with_code_130() {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let args = ["ref", "check-links", "--url", "http://127.0.0.1:9/"];
-        let code = execute(args, &mut out, &mut err, std::future::ready(())).await;
+        let args = ["ref", "check-links", "--url", "http://127.0.0.1:9/"]
+            .map(Into::into)
+            .to_vec();
+        let code = execute(args, &mut out, &mut err, Box::pin(std::future::ready(()))).await;
         assert_eq!(code, ExitCode::from(130));
         assert_eq!(String::from_utf8_lossy(&err), "Interrupted.\n");
     }
@@ -353,6 +342,22 @@ mod tests {
         let (c, _, err) = ref_cmd(&["mcp", "--root", "/no/such/folder"]).await;
         assert_eq!(c, code(2));
         assert!(err.contains("Workspace folder"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn verify_refs_without_its_file_is_a_command_error() {
+        let (c, _, err) = ref_cmd(&["verify-refs", "/no/such/references.yaml"]).await;
+        assert_eq!(c, code(2));
+        assert!(err.contains("Failed to read"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn update_is_dispatched() {
+        // Only that the command runs: it asks GitHub, so it answers (0) or,
+        // offline, fails as a command (2). Real tests of update need a fake
+        // GitHub, which comes with the update module's own tests.
+        let (c, _, _) = ref_cmd(&["update", "--check"]).await;
+        assert!(c == ExitCode::SUCCESS || c == code(2), "{c:?}");
     }
 
     #[tokio::test]
@@ -366,7 +371,7 @@ mod tests {
     fn the_program_says_so_when_the_runtime_cannot_start() {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let failed = Err(std::io::Error::other("no threads"));
-        let code = start(failed, ["ref"], &mut out, &mut err);
+        let code = start(failed, vec!["ref".into()], &mut out, &mut err);
         assert_eq!(code, ExitCode::from(2));
         let text = String::from_utf8_lossy(&err);
         assert!(
@@ -379,9 +384,23 @@ mod tests {
     fn the_program_runs_a_command_on_its_own_runtime() {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let runtime = tokio::runtime::Runtime::new();
-        let code = start(runtime, ["ref", "--version"], &mut out, &mut err);
+        let code = start(
+            runtime,
+            vec!["ref".into(), "--version".into()],
+            &mut out,
+            &mut err,
+        );
         assert_eq!(code, ExitCode::SUCCESS);
         assert!(String::from_utf8_lossy(&out).contains("ref"));
+    }
+
+    #[test]
+    fn the_real_program_reads_its_own_command_line() {
+        // The test program's arguments are not a ref command line: ref says so
+        // and exits with 2 (or shows help, 0, if run with a filter named help)
+        let code = format!("{:?}", main());
+        let refused = [ExitCode::from(2), ExitCode::SUCCESS].map(|c| format!("{c:?}"));
+        assert!(refused.contains(&code), "{code}");
     }
 
     #[cfg(unix)]

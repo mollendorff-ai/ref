@@ -29,7 +29,7 @@ pub(crate) use process::{
 };
 use process::{
     honest_user_agent, kill_process, launch, remove_dir_retrying, sweep_orphans, to_cookie_param,
-    track_profile, unique_profile_dir,
+    track_profile, unique_profile_dir, untrack_profile,
 };
 pub use process::{remove_open_profiles, validate_user_agent};
 
@@ -187,6 +187,8 @@ pub struct BrowserPool {
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
     custom_user_agent: bool,
+    /// While the pool lives, the final clean-up leaves its fresh profile alone
+    _owner: Arc<()>,
 }
 
 impl BrowserPool {
@@ -226,12 +228,14 @@ impl BrowserPool {
         let home = profile::home_dir();
         let default_saved = profile::default_saved_dir(home.as_deref());
         let chosen = profile::choose(profile, default_saved.as_deref(), unique_profile_dir);
+        // Held by the pool: while it lives, the final clean-up leaves its profile
+        let owner = Arc::new(());
         match &chosen {
             Profile::Saved(dir) => {
                 prepare_saved_profile(dir, home.as_deref())?;
                 eprintln!("Using saved profile {}", dir.display());
             }
-            Profile::Fresh(dir) => track_profile(dir, true),
+            Profile::Fresh(dir) => track_profile(dir, &owner),
         }
         let profile_dir = chosen.path().to_path_buf();
         let sandbox = want_sandbox(
@@ -251,7 +255,7 @@ impl BrowserPool {
             Err(e) => {
                 if !chosen.is_saved() {
                     let _ = std::fs::remove_dir_all(&profile_dir);
-                    track_profile(&profile_dir, false);
+                    untrack_profile(&profile_dir);
                 }
                 return Err(e);
             }
@@ -301,6 +305,7 @@ impl BrowserPool {
             cookies: Vec::new(),
             cookie_jar: Vec::new(),
             custom_user_agent: false,
+            _owner: owner,
         })
     }
 
@@ -485,7 +490,7 @@ async fn remove_profile(dir: &Path) {
     let owned = dir.to_path_buf();
     let _ = tokio::task::spawn_blocking(move || remove_dir_retrying(&owned)).await;
     if !dir.exists() {
-        track_profile(dir, false);
+        untrack_profile(dir);
     }
 }
 

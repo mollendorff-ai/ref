@@ -13,12 +13,15 @@ pub async fn isolated<T: Send + 'static>(
     work: impl Future<Output = T> + Send + 'static,
 ) -> Result<T, String> {
     let mut task = CancelOnDrop(tokio::spawn(work));
-    // Not a panic means cancelled, which needs the runtime to shut down while
-    // this call waits, and then this call is dropped too
-    (&mut task.0).await.map_err(|e| {
-        e.try_into_panic()
-            .map_or_else(|_| "cancelled".into(), |p| panic_message(&*p))
-    })
+    (&mut task.0).await.map_err(join_error)
+}
+
+/// Why a task gave no value: its panic message, or that it was cancelled
+fn join_error(error: tokio::task::JoinError) -> String {
+    match error.try_into_panic() {
+        Ok(payload) => panic_message(&*payload),
+        Err(_) => "cancelled".to_string(),
+    }
 }
 
 /// A task that is cancelled when its handle is dropped
@@ -62,15 +65,21 @@ mod tests {
         let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = DroppedFlag(std::sync::Arc::clone(&dropped));
         // Work that would never end on its own
-        let work = isolated(async move {
-            let _held = flag;
-            std::future::pending::<()>().await;
-        });
+        let held = async move { (flag, std::future::pending::<()>().await) };
+        let work = isolated(held);
         let gave_up = tokio::time::timeout(std::time::Duration::from_millis(50), work).await;
         assert!(gave_up.is_err());
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let cancelled = dropped.load(std::sync::atomic::Ordering::SeqCst);
         assert!(cancelled, "the work kept running");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_task_says_so() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let error = task.await.unwrap_err();
+        assert_eq!(join_error(error), "cancelled");
     }
 
     #[tokio::test]

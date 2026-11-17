@@ -50,7 +50,7 @@ struct FoundUrl {
 
 /// # Errors
 /// Returns an error if file patterns cannot be expanded, files cannot be read, or output cannot be written.
-pub async fn run_scan(args: ScanArgs, out: &mut impl std::io::Write) -> Result<()> {
+pub async fn run_scan(args: ScanArgs, out: &mut dyn std::io::Write) -> Result<()> {
     let output = scan_files(args).await?;
     writeln!(out, "{}", serde_json::to_string(&output)?)?;
     Ok(())
@@ -305,6 +305,22 @@ fn infer_categories(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_command_refuses_to_overwrite_other_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (notes, main) = (dir.path().join("notes.md"), dir.path().join("main.rs"));
+        std::fs::write(&notes, "See https://example.com/a").expect("write");
+        std::fs::write(&main, "fn main() {}").expect("write");
+        let (notes, main_path) = (notes.to_str().unwrap(), main.to_str().unwrap());
+        let line = ["scan", notes, "--output", main_path, "--no-merge"];
+        let (code, _, _) = crate::test_server::ref_cmd(&line).await;
+        assert_eq!(code, std::process::ExitCode::from(2));
+        assert_eq!(
+            std::fs::read_to_string(&main).expect("read"),
+            "fn main() {}"
+        );
+    }
 
     #[test]
     fn test_extract_markdown_urls() {

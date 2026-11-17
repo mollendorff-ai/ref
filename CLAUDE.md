@@ -37,7 +37,8 @@ If one fails, fix the cause; never weaken the check.
 
 ## Status
 
-The repo does not meet rules 1 and 3 yet (89.5% coverage over all code on 2026-11-17, one file in `tests/`: `e2e_local.rs`).
+The repo does not meet rule 1 yet: 91.1% coverage over all code on 2026-11-17 (rules 2, 3 and 4 are met).
+CI's coverage gate still leaves some files out until then.
 The work to get there is the first item in `.asimov/roadmap.yaml` (`STRICT_RULES`); remove this section when it is done.
 
 ## Proposing work

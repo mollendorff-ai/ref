@@ -162,7 +162,7 @@ pub struct Page {
 ///
 /// Returns an error if the browser pool fails to initialize, pages cannot
 /// be serialized, or the browser cannot be closed cleanly.
-pub async fn run_fetch(args: FetchArgs, out: &mut impl std::io::Write) -> Result<bool> {
+pub async fn run_fetch(args: FetchArgs, out: &mut dyn std::io::Write) -> Result<bool> {
     let url_count = args.urls.len();
     let parallel = usize::from(args.parallel).min(url_count).max(1);
 
@@ -695,7 +695,254 @@ fn select_attr(doc: &Html, sel: &str, attr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{all_content, fetch, fetch_with_profile, ref_cmd, serve};
     use crate::text::floor_char_boundary;
+    use std::process::ExitCode;
+
+    #[tokio::test]
+    async fn http_404_is_dead_and_exits_1() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (code, page) = fetch(&[&format!("{base}/missing")]).await;
+        assert_eq!(page["status"], "dead");
+        assert_eq!(page["http"], 404);
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[tokio::test]
+    async fn http_500_is_dead() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/broken")]).await;
+        assert_eq!(page["status"], "dead");
+        assert_eq!(page["http"], 500);
+    }
+
+    #[tokio::test]
+    async fn title_with_500_is_ok() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (code, page) = fetch(&[&format!("{base}/fortune")]).await;
+        assert_eq!(page["status"], "ok");
+        assert_eq!(page["http"], 200);
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[tokio::test]
+    async fn redirect_on_same_host_is_followed() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/moved")]).await;
+        assert_eq!(page["status"], "ok");
+        assert_eq!(page["http"], 200);
+        assert_eq!(page["title"], "Quarterly report");
+    }
+
+    #[tokio::test]
+    async fn lists_tables_quotes_and_loose_text_are_kept() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/report")]).await;
+        let text = all_content(&page);
+        for expected in [
+            "Intro paragraph.",
+            "- Revenue up 12%",
+            "| Region | Q3 |\n| --- | --- |\n| North | 150 |",
+            "> Strong quarter, said the CFO.",
+            "Loose closing remark.",
+        ] {
+            assert!(text.contains(expected), "{expected:?} missing from {text}");
+        }
+        assert!(!text.contains("Home | Blog"), "nav kept: {text}");
+        assert!(!text.contains("Site footer"), "footer kept: {text}");
+    }
+
+    #[tokio::test]
+    async fn long_pages_are_cut_with_a_flag_or_kept_whole() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let url = format!("{base}/long");
+
+        let (_, page) = fetch(&[&url]).await;
+        assert_eq!(page["truncated"], true);
+        assert_eq!(page["sections"][0]["truncated"], true);
+        assert!(page["alerts"].to_string().contains("--max-chars 0"));
+
+        let (_, full) = fetch(&["--max-chars", "0", &url]).await;
+        assert!(full.get("truncated").is_none());
+        let len = full["sections"][0]["content"].as_str().unwrap_or("").len();
+        assert!(len > 16_000, "only {len} characters kept");
+    }
+
+    #[tokio::test]
+    async fn content_loaded_by_fetch_after_load_is_seen() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/late")]).await;
+        assert!(
+            all_content(&page).contains("arrived through fetch()"),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn walls_are_detected_only_when_real() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, article) = fetch(&[&format!("{base}/paywall-article")]).await;
+        assert_eq!(article["status"], "ok");
+
+        let (_, login) = fetch(&[&format!("{base}/login")]).await;
+        assert_eq!(login["status"], "login");
+    }
+
+    #[tokio::test]
+    async fn local_files_are_refused() {
+        // Needs Chrome (ADR-004)
+        let (code, page) = fetch(&["file:///etc/hostname"]).await;
+        assert_eq!(page["status"], "dead");
+        assert!(page["alerts"].to_string().contains("Only http and https"));
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[tokio::test]
+    async fn page_wrapped_in_a_form_keeps_its_content() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/aspnet")]).await;
+        assert!(
+            all_content(&page).contains("Revenue rose this year."),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_pages_and_unmatched_selectors_say_so() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, empty) = fetch(&[&format!("{base}/empty")]).await;
+        assert!(
+            empty["alerts"].to_string().contains("No readable content"),
+            "{empty}"
+        );
+
+        let (_, page) = fetch(&["--selector", "#missing", &format!("{base}/report")]).await;
+        assert!(
+            page["alerts"].to_string().contains("matched nothing"),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_paywall_class_is_not_a_paywall() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/no-paywall")]).await;
+        assert_eq!(page["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn shadow_dom_text_is_kept() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/components")]).await;
+        assert!(
+            all_content(&page).contains("Text that lives in a shadow root."),
+            "{page}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_overlay_is_not_a_paywall() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let (_, page) = fetch(&[&format!("{base}/hidden-overlay")]).await;
+        assert_eq!(page["status"], "ok", "{page}");
+    }
+
+    #[tokio::test]
+    async fn declared_user_agent_gets_through_and_403_says_why() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let url = format!("{base}/needs-declared-agent");
+
+        let (code, page) = fetch(&["--user-agent", "Jane Doe jane@example.com", &url]).await;
+        assert_eq!(page["status"], "ok", "{page}");
+        assert!(all_content(&page).contains("declared reader"), "{page}");
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        let (code, refused) = fetch(&[&url]).await;
+        assert_eq!(refused["status"], "dead", "{refused}");
+        assert_eq!(code, ExitCode::from(1));
+        let alerts = refused["alerts"].to_string();
+        assert!(alerts.contains("HTTP 403"), "{refused}");
+        assert!(alerts.contains("--user-agent"), "{refused}");
+
+        // A wrong custom agent is still refused, and the hint is not repeated
+        let (_, wrong) = fetch(&["--user-agent", "nobody", &url]).await;
+        assert_eq!(wrong["status"], "dead", "{wrong}");
+        assert!(
+            !wrong["alerts"].to_string().contains("try --user-agent"),
+            "{wrong}"
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_in_pdf_uses_the_cookie_file() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let jar = dir.path().join("cookies.txt");
+        std::fs::write(&jar, "127.0.0.1\tFALSE\t/\tFALSE\t0\tsid\tletmein\n").expect("write jar");
+        let url = format!("{base}/signed-in.pdf");
+
+        let (code, page) = fetch(&["--cookies", jar.to_str().expect("path"), &url]).await;
+        assert_eq!(page["status"], "ok", "{page}");
+        assert!(all_content(&page).contains("signed-in readers"), "{page}");
+        assert_eq!(code, ExitCode::SUCCESS);
+
+        let (_, without) = fetch(&[&url]).await;
+        assert_eq!(without["status"], "dead", "{without}");
+    }
+
+    #[tokio::test]
+    async fn saved_profile_keeps_sign_ins_between_runs() {
+        // Needs Chrome (ADR-004)
+        let base = serve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let profile = dir.path().join("profile");
+        let profile = profile.to_str().expect("path");
+
+        let (_, signed_in) = fetch_with_profile(profile, &[&format!("{base}/sign-in")]).await;
+        assert_eq!(signed_in["status"], "ok", "{signed_in}");
+
+        let (_, later) = fetch_with_profile(profile, &[&format!("{base}/whoami")]).await;
+        assert!(
+            all_content(&later).contains("session=kept-between-runs"),
+            "{later}"
+        );
+        assert!(
+            std::path::Path::new(profile).is_dir(),
+            "saved profile was deleted"
+        );
+
+        let (_, fresh) = fetch(&[&format!("{base}/whoami")]).await;
+        assert!(
+            all_content(&fresh).contains("Cookie header: none"),
+            "{fresh}"
+        );
+    }
+
+    #[tokio::test]
+    async fn everyday_chrome_profile_is_refused_with_advice() {
+        // Needs no Chrome: refused before it starts
+        let home = std::env::var("HOME").expect("HOME");
+        let everyday = format!("{home}/.config/google-chrome");
+        let line = ["fetch", "--profile", &everyday, "http://127.0.0.1:9/"];
+        let (code, _, err) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::from(2));
+        assert!(err.contains("ref login"), "{err}");
+    }
 
     #[tokio::test]
     async fn a_tab_chrome_refuses_is_a_dead_page() {

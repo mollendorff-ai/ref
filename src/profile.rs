@@ -242,6 +242,20 @@ mod tests {
                 assert_eq!(resolve(None).unwrap(), Some(folder));
                 assert_eq!(resolve(Some(&given)).unwrap(), Some(ProfileChoice::Fresh));
             }
+            Ok("no-current-folder") => {
+                // This child deletes its own current folder, so a relative
+                // folder cannot be made absolute
+                let gone = tempfile::tempdir().unwrap();
+                std::env::set_current_dir(gone.path()).unwrap();
+                drop(gone);
+                let err = parse_profile("work/p").unwrap_err();
+                assert!(err.starts_with("work/p: "), "{err}");
+                let err = resolve(None).unwrap_err().to_string();
+                assert!(
+                    err.starts_with(&format!("{PROFILE_ENV}: work/p: ")),
+                    "{err}"
+                );
+            }
             Ok("relative") => {
                 let here = std::env::current_dir().unwrap();
                 let folder = ProfileChoice::Folder(here.join("work/p"));
@@ -256,6 +270,7 @@ mod tests {
                 for (mode, value) in [
                     ("folder", "/from/env"),
                     ("relative", "work/p"),
+                    ("no-current-folder", "work/p"),
                     ("empty", " "),
                 ] {
                     let status = std::process::Command::new(std::env::current_exe().unwrap())

@@ -63,7 +63,7 @@ fn login_dir(
 /// # Errors
 /// Returns an error when no profile folder can be chosen, the profile is in
 /// use or is Chrome's everyday profile, a URL is not http(s), or Chrome cannot start.
-pub fn run_login(args: &LoginArgs, out: &mut impl std::io::Write) -> Result<()> {
+pub fn run_login(args: &LoginArgs, out: &mut dyn std::io::Write) -> Result<()> {
     let home = profile::home_dir();
     let from_env = profile::resolve(None)?;
     let dir = login_dir(args.profile.as_ref(), from_env.as_ref(), home.as_deref())?;

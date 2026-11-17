@@ -45,7 +45,7 @@ fn is_url(path: &str) -> bool {
 ///
 /// Returns an error if JSON serialization or network request fails.
 /// Returns `Ok(false)` when any file could not be read or downloaded.
-pub async fn run_pdf(args: &PdfArgs, out: &mut impl std::io::Write) -> Result<bool> {
+pub async fn run_pdf(args: &PdfArgs, out: &mut dyn std::io::Write) -> Result<bool> {
     let file_count = args.files.len();
     eprintln!(
         "Extracting {} PDF{}...",

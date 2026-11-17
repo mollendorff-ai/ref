@@ -40,7 +40,7 @@ struct Asset {
 
 /// # Errors
 /// Returns an error if the latest release cannot be fetched or the binary cannot be replaced.
-pub async fn run_update(args: UpdateArgs, out: &mut impl std::io::Write) -> Result<()> {
+pub async fn run_update(args: UpdateArgs, out: &mut dyn std::io::Write) -> Result<()> {
     eprintln!("Current version: {CURRENT_VERSION}");
     eprintln!("Checking for updates...");
 

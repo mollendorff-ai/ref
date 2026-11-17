@@ -30,6 +30,8 @@ All notable changes to Möllendorff Ref.
   - A Chrome that starts but does not answer leaves no temporary profile behind, and the error names the profile.
 - `ref check-links` and `ref refresh-data` no longer end the program from inside (`process::exit`): a file without URLs still exits with code 1, and missing arguments still exit with code 2, now with the usage text after `Error:`.
 - The command line lives in the library (`ref::cli`), and `main` only calls it, so every exit code is tested in-process.
+- All tests are inline and none is skipped: the tests that need Chrome run in plain `cargo test` (ADR-004), and CI's separate job for them is gone.
+- The clean-up at exit removes only the temporary profiles of browsers that are gone, never one still in use.
 - `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
 - `ref login --profile fresh` is refused, since a fresh profile's sign-ins would be deleted; before, it signed in to a folder named `fresh`.
   `REF_CHROME_PROFILE=fresh` is still ignored by `ref login`, which then uses the default folder.

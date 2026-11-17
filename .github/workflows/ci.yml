@@ -94,34 +94,12 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run unit tests
-        run: cargo test
-
-  test-e2e:
-    name: E2E tests (Chrome)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
-
+      # Tests that need Chrome run in plain cargo test (ADR-004)
       - name: Verify Chrome
         run: google-chrome-stable --version
 
-      - name: Run e2e tests
-        run: cargo test -- --ignored
+      - name: Run tests
+        run: cargo test
 
   coverage:
     name: Coverage
@@ -157,8 +135,8 @@ jobs:
       - name: Run coverage (pure-logic modules, 100% gate)
         id: coverage
         run: |
-          # IO modules excluded — tested in e2e job with Chrome (ADR-003)
-          EXCLUDE='browser\.rs|check_links\.rs|fetch\.rs|init\.rs|login\.rs|main\.rs|mcp\.rs|pdf/|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
+          # IO modules excluded until STRICT_RULES removes this (ADR-004)
+          EXCLUDE='browser/|check_links\.rs|fetch\.rs|init\.rs|login\.rs|main\.rs|mcp\.rs|pdf/|refresh_data\.rs|scan\.rs|update\.rs|verify_refs\.rs'
           OUTPUT=$(cargo llvm-cov --ignore-filename-regex "$EXCLUDE" 2>&1)
           echo "$OUTPUT"
 
@@ -186,7 +164,7 @@ jobs:
   badges:
     name: Update badges
     runs-on: ubuntu-latest
-    needs: [lint, test, test-e2e, coverage]
+    needs: [lint, test, coverage]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - name: Update test count badge
@@ -237,7 +215,7 @@ jobs:
   auto-release:
     name: Auto Release
     runs-on: ubuntu-latest
-    needs: [lint, audit, test, test-e2e, coverage, build]
+    needs: [lint, audit, test, coverage, build]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: write

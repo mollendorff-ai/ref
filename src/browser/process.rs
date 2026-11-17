@@ -51,32 +51,42 @@ pub(crate) fn detect_chrome_path() -> Option<PathBuf> {
     None
 }
 
-/// Profile folders of pools that are still open, so an interrupted run can
-/// remove them (see [`remove_open_profiles`]).
-static OPEN_PROFILES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// Fresh profile folders not removed yet, each with a token its pool holds,
+/// so the final clean-up can tell a pool that is gone from one still in use
+/// (see [`remove_open_profiles`]).
+type Tracked = Vec<(PathBuf, std::sync::Weak<()>)>;
+static OPEN_PROFILES: std::sync::Mutex<Tracked> = std::sync::Mutex::new(Vec::new());
 
-pub(super) fn track_profile(dir: &Path, open: bool) {
-    if let Ok(mut dirs) = OPEN_PROFILES.lock() {
-        dirs.retain(|d| d != dir);
-        if open {
-            dirs.push(dir.to_path_buf());
-        }
-    }
+fn tracked() -> std::sync::MutexGuard<'static, Tracked> {
+    OPEN_PROFILES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Remove the temporary Chrome profiles of pools that were not closed.
-/// Called when ref is interrupted (Ctrl-C or SIGTERM).
+/// Track `dir` for the final clean-up while `owner` (held by its pool) lives
+pub(super) fn track_profile(dir: &Path, owner: &std::sync::Arc<()>) {
+    let mut dirs = tracked();
+    dirs.retain(|(d, _)| d != dir);
+    dirs.push((dir.to_path_buf(), std::sync::Arc::downgrade(owner)));
+}
+
+/// Stop tracking `dir`: it was removed
+pub(super) fn untrack_profile(dir: &Path) {
+    tracked().retain(|(d, _)| d != dir);
+}
+
+/// Remove the fresh profiles of pools that are gone without removing them:
+/// when ref was interrupted (Ctrl-C or SIGTERM), their Chrome was killed.
+/// Profiles of pools still in use are left alone, so this is safe to call
+/// while other work runs (tests run the program in-process).
 pub fn remove_open_profiles() {
-    if let Ok(mut dirs) = OPEN_PROFILES.lock() {
-        if dirs.is_empty() {
-            return;
-        }
-        // Their Chrome was killed when ref was interrupted
-        for dir in dirs.iter() {
+    let mut dirs = tracked();
+    for (dir, owner) in dirs.iter() {
+        if owner.upgrade().is_none() {
             remove_dir_retrying(dir);
         }
-        dirs.retain(|d| d.exists());
     }
+    dirs.retain(|(dir, owner)| owner.upgrade().is_some() || dir.exists());
 }
 
 /// Remove a profile folder. Chrome's helper processes can still write to it for
@@ -477,6 +487,26 @@ mod tests {
         // Three tries, two waits of 300 ms between them
         assert!(took >= std::time::Duration::from_millis(600), "{took:?}");
         assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    }
+
+    #[test]
+    fn only_the_profiles_of_pools_that_are_gone_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (live, gone) = (dir.path().join("live"), dir.path().join("gone"));
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&gone).unwrap();
+        let live_owner = std::sync::Arc::new(());
+        track_profile(&live, &live_owner);
+        track_profile(&gone, &std::sync::Arc::new(()));
+
+        remove_open_profiles();
+        assert!(live.exists(), "the profile of a pool in use was removed");
+        assert!(
+            !gone.exists(),
+            "the profile of a pool that is gone was kept"
+        );
+        untrack_profile(&live);
+        assert!(!tracked().iter().any(|(d, _)| d == &live || d == &gone));
     }
 
     #[test]

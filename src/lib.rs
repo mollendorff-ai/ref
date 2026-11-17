@@ -21,6 +21,8 @@ pub mod refresh_data;
 pub mod scan;
 pub mod schema;
 pub mod task;
+#[cfg(test)]
+pub(crate) mod test_server;
 pub mod text;
 pub mod update;
 pub mod verify_refs;
