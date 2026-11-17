@@ -159,10 +159,33 @@ impl Chrome {
         }
     }
 
-    /// One request with a deadline, not yet judged. Callers that hold the
-    /// browser lock for the request drop it before [`judge`](Self::judge),
-    /// which takes the lock again (a writer queued in between would otherwise
-    /// wait for the first guard, and the second for the writer).
+    /// A request on the browser itself rather than a tab (opening a tab,
+    /// listing tabs): the one way to make one, so the lock order cannot be
+    /// got wrong at a new call site. Like [`ask`](Self::ask), a failed pool asks
+    /// nothing and the answer is judged (rules 3 and 6); the read lock is held
+    /// for the request only and dropped before judging, which takes it again
+    /// (a writer queued in between would otherwise wait for the first guard,
+    /// and the second for the writer).
+    async fn ask_browser<T, E: Into<anyhow::Error>>(
+        &self,
+        until: tokio::time::Instant,
+        what: &str,
+        request: impl for<'b> FnOnce(
+            &'b Browser,
+        )
+            -> futures::future::BoxFuture<'b, std::result::Result<T, E>>,
+    ) -> Result<T> {
+        // Generic, like `ask`: no branches here, so every copy is covered whole
+        self.refuse_if_failed(what)?;
+        let answer = {
+            let browser = self.browser.read().await;
+            Self::attempt(until, what, request(&browser)).await
+        };
+        let failure = self.failure_behind(answer.as_ref().err(), what).await;
+        failure.map_or(answer, Err)
+    }
+
+    /// One request with a deadline, not yet judged.
     async fn attempt<T, E: Into<anyhow::Error>>(
         until: tokio::time::Instant,
         what: &str,
@@ -386,20 +409,16 @@ impl BrowserPool {
             return Err(Chrome::failure("opening a tab"));
         }
         let permit = self.semaphore.clone().acquire_owned().await?;
-        // The pool may have failed while this call waited for a slot
-        if self.chrome.has_failed() {
-            return Err(Chrome::failure("opening a tab"));
-        }
-        // One budget for opening the tab and setting it up (rule 6)
+        // One budget for opening the tab and setting it up (rule 6). The pool
+        // may have failed while this call waited for a slot: then
+        // `ask_browser` asks nothing.
         let until = tokio::time::Instant::now() + self.chrome.request_timeout;
-        let opened = {
-            let browser = self.chrome.browser.read().await;
-            Chrome::attempt(until, "opening a tab", browser.new_page("about:blank")).await
-        };
-        let page = match opened {
-            Ok(page) => page,
-            Err(error) => return Err(self.chrome.judge(error, "opening a tab").await),
-        };
+        let page = self
+            .chrome
+            .ask_browser(until, "opening a tab", |browser| {
+                Box::pin(browser.new_page("about:blank"))
+            })
+            .await?;
         // Closed before the error is returned, however set-up ends, so a
         // long-lived browser does not collect half-made tabs
         let agent = agent.unwrap_or(&self.user_agent);
@@ -605,6 +624,14 @@ pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Write};
 
     pub(crate) const FRESH: Option<&ProfileChoice> = Some(&ProfileChoice::Fresh);
+
+    impl BrowserPage {
+        /// Close this tab in Chrome while ref still holds it, as a tab that
+        /// goes away would
+        pub(crate) async fn close_tab(&self) {
+            self.page.clone().close().await.unwrap();
+        }
+    }
 
     impl BrowserPool {
         /// The process id of this pool's Chrome, until it has been collected

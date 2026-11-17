@@ -50,6 +50,8 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- A tab that closed before its page loaded was reported as the site's "Navigation timeout", so `ref verify-refs` could record a good reference as `dead`.
+  After a failed navigation ref now asks Chrome whether the tab still exists; if not, it is an error ("the tab closed before the page loaded"): `ref verify-refs` ends without writing, as for any tab failure, and `ref fetch` and `ref check-links` report it as that URL's error.
 - A Chrome that starts but answers its first request with an error (it went away) is reported as "Chrome started but answered with an error: <reason>", not as "did not answer"; a Chrome that stays silent says how long ref waited.
 - The saved-profile folder, and `.ref` above it, are created readable by their owner only (mode 0700) on macOS and Linux, not with the default permissions.
   A folder that already exists keeps its permissions.
