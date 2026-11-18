@@ -35,7 +35,8 @@ upcoming:
   - summary: "Confirm 1.10.0 in CI"
     goal: "CI_CONFIRM"
     deliverables:
-      - "CI green on the 1.10.0 pull request, including the coverage job pinned to Rust 1.99.1 (the branch had no CI run before; the gate passes in the container: 100% of 9,737 lines, 370 tests)"
+      - "Done 2026-11-18. CI green on the 1.10.0 pull request (#52), including the coverage job pinned to Rust 1.99.1; the gate also passes in the container: 100% of 9,737 lines, 370 tests"
+      - "Check that the push to main tagged v1.10.0 and that the release build published the binaries"
       - "Then move the Rust pin (lint and coverage jobs) to 1.100"
   - summary: "Leftovers outside the code"
     goal: "LEFTOVERS"
