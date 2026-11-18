@@ -80,7 +80,7 @@ upcoming:
       - "Done 2026-11-18. The CI test-count badge read four too high: the profile.rs child test runs inherited stdout, so their \"test result:\" lines were counted; their output is now captured (the count is 369)"
       - "Done 2026-11-18. ref check-links --stdin swallowed Ctrl-C while it waited for input: it read stdin on the thread that waits for the stop signal. Standard input is now a Send reader (cli::Input) read on a task of its own; test: a pipe that never delivers, the stop signal ends the run with 130"
       - "Done 2026-11-18. Clippy 1.100 findings fixed (cli::main must_use with a reason, which 1.99 and 1.100 both accept; all_content; ignored ExitCode in three tests); pedantic clippy passes on 1.99 and 1.100. The pin can move once CI confirms"
-      - "Done 2026-11-18, to be confirmed by CI. The coverage job is pinned to 1.99.1 like the lint job (with llvm-tools-preview). Not yet seen green: the branch has had no CI run (ci.yml runs on main and on pull requests), and this container's own gate reads 98.6% even on unchanged code"
+      - "Done 2026-11-18, to be confirmed by CI. The coverage job is pinned to 1.99.1 like the lint job (with llvm-tools-preview). Not yet seen green: the branch has had no CI run (ci.yml runs on main and on pull requests), and this container's own gate (cargo llvm-cov --fail-under-lines 100) passes on 2026-11-18: 100% of 9,737 lines, 370 tests; the 98.6% once noted here was a region figure (mcp.rs), not line coverage"
   - summary: "Content detection on GitHub pages (done 2026-11-17, Unreleased)"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
