@@ -18,6 +18,9 @@ shipped:
   - version: "1.6.0"
     date: "2026-03-07"
     summary: "PDF from URL and --selector for fetch"
+  - version: "1.10.0"
+    date: "2026-11-18"
+    summary: "Strict quality rules, Chrome lifecycle (ADR-005), --profile, MCP user_agent and shared profile, GitHub content detection, signed-in PDFs"
 
 upcoming:
   - summary: "Meet the strict quality rules (ADR-004, CLAUDE.md) (done 2026-11-17: 100% line coverage of all code, 9,173 lines)"
