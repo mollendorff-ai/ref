@@ -50,6 +50,7 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- `ref check-links --stdin` now ends on Ctrl-C or SIGTERM while it waits for input (it read standard input on the thread that waits for the signal, so the signal was ignored until input came).
 - **`ref mcp` stopped by Ctrl-C or SIGTERM** killed its Chrome, which could lose a saved profile's newest sign-ins; only a closed input stopped it gracefully.
   A signal now ends the server the same way: Chrome is asked to close and given time to save the profile, then the command exits with code 130.
 - After the MCP server ends, a tool call still running gets an error instead of starting a new Chrome that nobody would stop.

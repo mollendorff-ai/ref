@@ -109,7 +109,7 @@ pub struct LinkReport {
 /// Returns `Ok(false)` when any link failed.
 pub async fn run_check_links(
     args: CheckLinksArgs,
-    input: &mut dyn BufRead,
+    input: crate::cli::Input,
     out: &mut dyn std::io::Write,
 ) -> Result<bool> {
     let urls = get_urls(&args, input).await?;
@@ -144,17 +144,23 @@ pub async fn run_check_links(
 }
 
 /// Get URLs from file, --url, or stdin
-async fn get_urls(args: &CheckLinksArgs, input: &mut dyn BufRead) -> Result<Vec<String>> {
+async fn get_urls(args: &CheckLinksArgs, input: crate::cli::Input) -> Result<Vec<String>> {
     if let Some(url) = &args.url {
         return Ok(vec![url.clone()]);
     }
 
     if args.stdin {
-        let urls: Vec<String> = input
-            .lines()
-            .map_while(Result::ok)
-            .filter(|line| line.starts_with("http"))
-            .collect();
+        // Read away from the thread that waits for the stop signal, so Ctrl-C
+        // ends the run even while no input arrives
+        let urls: Vec<String> = crate::task::isolated(async move {
+            input
+                .lines()
+                .map_while(Result::ok)
+                .filter(|line| line.starts_with("http"))
+                .collect()
+        })
+        .await
+        .map_err(anyhow::Error::msg)?;
         return Ok(urls);
     }
 
@@ -344,6 +350,33 @@ mod tests {
         assert_eq!(report["results"].as_array().unwrap().len(), 1, "{out}");
         assert_eq!(report["ok"], 1);
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    /// Ctrl-C while `--stdin` waits for input that never comes: the run ends
+    /// with 130 instead of waiting on, because the wait is on a thread of its own.
+    /// (Needs a runtime with worker threads: the waiting thread is one of them.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_stop_signal_ends_a_run_that_waits_for_input() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let stop = async {
+            // Only after the run has started to wait on the pipe
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        let code = crate::cli::execute(
+            ["ref", "check-links", "--profile", "fresh", "--stdin"]
+                .map(Into::into)
+                .to_vec(),
+            Box::new(std::io::BufReader::new(reader)),
+            &mut out,
+            &mut err,
+            Box::pin(stop),
+        )
+        .await;
+        assert_eq!(code, ExitCode::from(130));
+        assert_eq!(String::from_utf8_lossy(&err), "Interrupted.\n");
+        // Closing the pipe lets the waiting thread end
+        drop(writer);
     }
 
     #[tokio::test]

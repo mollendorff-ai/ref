@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: CHROME_LIFECYCLE
+current: MACOS_CHECK
 
 shipped:
   - version: "1.5.1"
@@ -73,14 +73,14 @@ upcoming:
       - "Done 2026-11-17. A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
       - "Done 2026-11-17. verify-refs: a tab that dies between opening and navigation. It was a bug, not only a missing test: a tab closed just before navigation made goto wait out the navigation timeout, and verify-refs wrote the reference as dead (\"Navigation timeout\"). goto now checks after a failed navigation whether its tab still exists (BrowserPage::is_open, Target.getTargets) and returns an error if not; verify-refs says \"The tab was gone before it could load the page\" and writes nothing. A crashed renderer is not a dead tab: Chrome replaces it on the next navigation (tried 2026-11-17)"
       - "Done 2026-11-17. \"Chrome started but did not answer\" also covered a Chrome that answered with an error, without the reason: browser::first_answer now says \"answered with an error: <reason>\" or \"did not answer within <n> ms\""
-  - summary: "Small findings from the last review (not bugs of this branch)"
+  - summary: "Small findings from the last review (not bugs of this branch) (done 2026-11-18, Unreleased; CI to confirm the coverage pin)"
     goal: "REVIEW_LEFTOVERS"
     source: "Review of ec2e81e on 2026-11-17"
     deliverables:
-      - "The CI test-count badge reads about four too high: the profile.rs tests start child test runs, and their \"test result:\" lines are counted too"
-      - "ref check-links --stdin at a terminal can swallow Ctrl-C while it waits for input (older than this branch)"
-      - "Clippy 1.100 (pedantic) flags code that 1.99.1, the version CI's lint job pins, accepts: src/cli.rs:171 (must_use with no message), src/test_server.rs:393 (map then unwrap_or_default; the one in fetch.rs went with main_content), src/scan.rs:395 and :449 and src/test_server.rs:416 (unused ExitCode in a tuple); fix them before moving the pin"
-      - "CI's coverage job runs on the stable toolchain, which moves with each Rust release and changes which lines the gate counts (Rust 1.100 showed 8 untaken branches that 1.97 and 1.99.1 did not); run the gate on the same version CI uses, or pin it"
+      - "Done 2026-11-18. The CI test-count badge read four too high: the profile.rs child test runs inherited stdout, so their \"test result:\" lines were counted; their output is now captured (the count is 369)"
+      - "Done 2026-11-18. ref check-links --stdin swallowed Ctrl-C while it waited for input: it read stdin on the thread that waits for the stop signal. Standard input is now a Send reader (cli::Input) read on a task of its own; test: a pipe that never delivers, the stop signal ends the run with 130"
+      - "Done 2026-11-18. Clippy 1.100 findings fixed (cli::main must_use with a reason, which 1.99 and 1.100 both accept; all_content; ignored ExitCode in three tests); pedantic clippy passes on 1.99 and 1.100. The pin can move once CI confirms"
+      - "Done 2026-11-18, to be confirmed by CI. The coverage job is pinned to 1.99.1 like the lint job (with llvm-tools-preview). Not yet seen green: the branch has had no CI run (ci.yml runs on main and on pull requests), and this container's own gate reads 98.6% even on unchanged code"
   - summary: "Content detection on GitHub pages (done 2026-11-17, Unreleased)"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"

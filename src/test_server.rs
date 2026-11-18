@@ -368,7 +368,14 @@ pub(crate) async fn ref_cmd_with_input(args: &[&str], input: &str) -> (ExitCode,
         .map(Into::into)
         .collect();
     let stop = Box::pin(std::future::pending());
-    let code = crate::cli::execute(line, &mut input.as_bytes(), &mut out, &mut err, stop).await;
+    let code = crate::cli::execute(
+        line,
+        Box::new(std::io::Cursor::new(input.to_owned())),
+        &mut out,
+        &mut err,
+        stop,
+    )
+    .await;
     let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned();
     (code, text(out), text(err))
 }
