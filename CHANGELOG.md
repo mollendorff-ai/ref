@@ -4,6 +4,8 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-18
+
 ### Added
 
 - **`user_agent` on the MCP tools `ref_fetch` and `ref_check_links`**: the same as `--user-agent`, for that call only.
