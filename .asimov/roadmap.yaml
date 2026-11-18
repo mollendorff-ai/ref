@@ -36,7 +36,7 @@ upcoming:
     goal: "CI_CONFIRM"
     deliverables:
       - "Done 2026-11-18. CI green on the 1.10.0 pull request (#52), including the coverage job pinned to Rust 1.99.1; the gate also passes in the container: 100% of 9,737 lines, 370 tests"
-      - "Check that the push to main tagged v1.10.0 and that the release build published the binaries"
+      - "Done 2026-11-18. The push to main tagged v1.10.0; the Release workflow built all five targets, published the GitHub release and published mollendorff-ref 1.10.0 to crates.io"
       - "Then move the Rust pin (lint and coverage jobs) to 1.100"
   - summary: "Leftovers outside the code"
     goal: "LEFTOVERS"
