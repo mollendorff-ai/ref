@@ -37,7 +37,7 @@ upcoming:
     deliverables:
       - "Done 2026-11-18. CI green on the 1.10.0 pull request (#52), including the coverage job pinned to Rust 1.99.1; the gate also passes in the container: 100% of 9,737 lines, 370 tests"
       - "Done 2026-11-18. The push to main tagged v1.10.0; the Release workflow built all five targets, published the GitHub release and published mollendorff-ref 1.10.0 to crates.io"
-      - "Then move the Rust pin (lint and coverage jobs) to 1.100"
+      - "Done 2026-11-18, to be confirmed by CI on its pull request. The Rust pin (lint, coverage and release jobs) is 1.100.0. In this container the full gate passes on 1.100.0 (fmt, pedantic clippy, 100% of 9,588 lines, 370 tests) when the coverage target folder is clean; an earlier 97% reading came from a test binary left in target/llvm-cov-target by another toolchain, which cargo-llvm-cov 0.9.1 reads with no profile data"
   - summary: "Leftovers outside the code"
     goal: "LEFTOVERS"
     deliverables:

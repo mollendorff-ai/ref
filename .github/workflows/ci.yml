@@ -36,7 +36,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -116,8 +116,8 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           # The same version as the lint job: the gate counts lines, and a new
-          # Rust release can change which lines count (1.100 showed 8 untaken branches)
-          toolchain: "1.99.1"
+          # Rust release can change which lines count
+          toolchain: "1.100.0"
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
