@@ -113,7 +113,12 @@ jobs:
 
       - name: Install Rust
         id: toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # The same version as the lint job: the gate counts lines, and a new
+          # Rust release can change which lines count (1.100 showed 8 untaken branches)
+          toolchain: "1.99.1"
+          components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov

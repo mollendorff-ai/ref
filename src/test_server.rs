@@ -390,21 +390,18 @@ pub(crate) async fn fetch_with_profile(profile: &str, args: &[&str]) -> (ExitCod
 }
 
 pub(crate) fn all_content(page: &Value) -> String {
-    page["sections"]
-        .as_array()
-        .map(|s| {
-            s.iter()
-                .map(|x| {
-                    format!(
-                        "{} {}",
-                        x["heading"].as_str().unwrap_or(""),
-                        x["content"].as_str().unwrap_or("")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
+    page["sections"].as_array().map_or_else(String::new, |s| {
+        s.iter()
+            .map(|x| {
+                format!(
+                    "{} {}",
+                    x["heading"].as_str().unwrap_or(""),
+                    x["content"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 #[cfg(test)]
@@ -413,6 +410,6 @@ mod tests {
     #[should_panic(expected = "invalid JSON")]
     async fn fetch_says_when_ref_printed_no_json() {
         // Refused before Chrome starts, so ref prints an error and no JSON
-        super::fetch(&["--user-agent", " ", "https://example.com"]).await;
+        drop(super::fetch(&["--user-agent", " ", "https://example.com"]).await);
     }
 }

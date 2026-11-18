@@ -167,7 +167,7 @@ pub async fn execute(
 
 /// The real program: the command line, standard output and error, and
 /// Ctrl-C or SIGTERM as the stop signal.
-#[must_use]
+#[must_use = "the exit code is the result of the program"]
 pub fn main() -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
