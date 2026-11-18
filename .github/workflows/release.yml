@@ -21,7 +21,7 @@ jobs:
       - name: Install Rust (same pinned version as CI lint)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           components: rustfmt, clippy
 
       # A release must pass the same gates as main
