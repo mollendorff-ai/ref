@@ -368,7 +368,14 @@ pub(crate) async fn ref_cmd_with_input(args: &[&str], input: &str) -> (ExitCode,
         .map(Into::into)
         .collect();
     let stop = Box::pin(std::future::pending());
-    let code = crate::cli::execute(line, &mut input.as_bytes(), &mut out, &mut err, stop).await;
+    let code = crate::cli::execute(
+        line,
+        Box::new(std::io::Cursor::new(input.to_owned())),
+        &mut out,
+        &mut err,
+        stop,
+    )
+    .await;
     let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned();
     (code, text(out), text(err))
 }
@@ -390,21 +397,18 @@ pub(crate) async fn fetch_with_profile(profile: &str, args: &[&str]) -> (ExitCod
 }
 
 pub(crate) fn all_content(page: &Value) -> String {
-    page["sections"]
-        .as_array()
-        .map(|s| {
-            s.iter()
-                .map(|x| {
-                    format!(
-                        "{} {}",
-                        x["heading"].as_str().unwrap_or(""),
-                        x["content"].as_str().unwrap_or("")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
+    page["sections"].as_array().map_or_else(String::new, |s| {
+        s.iter()
+            .map(|x| {
+                format!(
+                    "{} {}",
+                    x["heading"].as_str().unwrap_or(""),
+                    x["content"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 #[cfg(test)]
@@ -413,6 +417,6 @@ mod tests {
     #[should_panic(expected = "invalid JSON")]
     async fn fetch_says_when_ref_printed_no_json() {
         // Refused before Chrome starts, so ref prints an error and no JSON
-        super::fetch(&["--user-agent", " ", "https://example.com"]).await;
+        drop(super::fetch(&["--user-agent", " ", "https://example.com"]).await);
     }
 }

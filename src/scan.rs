@@ -392,7 +392,7 @@ mod tests {
             "-o",
             out_file.to_str().unwrap(),
         ];
-        ref_cmd(&first).await;
+        assert_eq!(ref_cmd(&first).await.0, ExitCode::SUCCESS);
 
         // A new file cites the bare URL under a title and adds one more link
         std::fs::write(
@@ -446,7 +446,7 @@ mod tests {
             "-o",
             out_file.to_str().unwrap(),
         ];
-        ref_cmd(&line).await;
+        assert_eq!(ref_cmd(&line).await.0, ExitCode::SUCCESS);
         let before = std::fs::read_to_string(&out_file).unwrap();
         let (code, out, _) = ref_cmd(&line).await;
         assert_eq!(code, ExitCode::SUCCESS);

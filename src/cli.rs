@@ -15,6 +15,10 @@ use clap::{Parser, Subcommand};
 use futures::future::{FutureExt, Shared};
 use std::future::Future;
 use std::io::{BufRead, Write};
+
+/// Standard input: read on a thread of its own, so a command waiting for it
+/// still hears the stop signal
+pub type Input = Box<dyn BufRead + Send>;
 use std::pin::Pin;
 use std::process::ExitCode;
 
@@ -88,12 +92,7 @@ pub enum Commands {
 /// Returns the command's error (bad arguments, Chrome missing, I/O error).
 /// Run one command. `stop` is for `ref mcp`, which ends on it by itself so it
 /// can stop its Chrome gracefully; [`execute`] drops every other command on it.
-pub async fn run(
-    cli: Cli,
-    input: &mut dyn BufRead,
-    out: &mut dyn Write,
-    stop: Shared<Stop>,
-) -> Result<bool> {
+pub async fn run(cli: Cli, input: Input, out: &mut dyn Write, stop: Shared<Stop>) -> Result<bool> {
     match cli.command {
         Commands::Fetch(args) => run_fetch(args, out).await,
         Commands::Pdf(args) => run_pdf(&args, out).await,
@@ -125,7 +124,7 @@ pub async fn run(
 /// and removes its temporary profile, instead of leaving them behind.
 pub async fn execute(
     args: Vec<std::ffi::OsString>,
-    input: &mut dyn BufRead,
+    input: Input,
     out: &mut dyn Write,
     err: &mut dyn Write,
     stop: Stop,
@@ -167,12 +166,12 @@ pub async fn execute(
 
 /// The real program: the command line, standard output and error, and
 /// Ctrl-C or SIGTERM as the stop signal.
-#[must_use]
+#[must_use = "the exit code is the result of the program"]
 pub fn main() -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
         std::env::args_os().collect(),
-        &mut std::io::stdin().lock(),
+        Box::new(std::io::BufReader::new(std::io::stdin())),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
@@ -182,7 +181,7 @@ pub fn main() -> ExitCode {
 fn start(
     runtime: std::io::Result<tokio::runtime::Runtime>,
     args: Vec<std::ffi::OsString>,
-    input: &mut dyn BufRead,
+    input: Input,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
@@ -370,7 +369,7 @@ mod tests {
             .to_vec();
         let code = execute(
             args,
-            &mut &b""[..],
+            Box::new(std::io::empty()),
             &mut out,
             &mut err,
             Box::pin(std::future::ready(())),
@@ -417,7 +416,7 @@ mod tests {
         let code = start(
             failed,
             vec!["ref".into()],
-            &mut &b""[..],
+            Box::new(std::io::empty()),
             &mut out,
             &mut err,
         );
@@ -436,7 +435,7 @@ mod tests {
         let code = start(
             runtime,
             vec!["ref".into(), "--version".into()],
-            &mut &b""[..],
+            Box::new(std::io::empty()),
             &mut out,
             &mut err,
         );
