@@ -482,6 +482,11 @@ mod tests {
 
     const CHILD_ARGS: &str = "REF_TEST_CHILD_ARGS";
 
+    /// How long a child may take to answer: it starts a real Chrome, on a
+    /// machine that runs many such tests at once. A child that says nothing
+    /// still fails its test after this, instead of hanging it.
+    const REPLY_LIMIT_SECS: u64 = 60;
+
     /// The child half: run `real` with the command line in `CHILD_ARGS` (joined
     /// by newlines) and end the process with its exit code. A normal test run
     /// has no such variable, and this does nothing.
@@ -544,13 +549,22 @@ mod tests {
         lines
     }
 
+    /// The JSON on a line of the child's output, `Null` when there is none.
+    /// The harness's own text can come first on the same line: with one test
+    /// thread (one CPU, or `--test-threads=1`) it prints `test <name> ... `
+    /// before the test runs, and the child's first output follows it.
+    fn json_in(line: &str) -> serde_json::Value {
+        let json = line.find('{').map_or("", |start| &line[start..]);
+        serde_json::from_str(json).unwrap_or_default()
+    }
+
     /// Wait for the JSON-RPC reply with `id` (the harness's own lines are skipped)
     fn reply_with_id(lines: &std::sync::mpsc::Receiver<String>, id: u64) -> serde_json::Value {
         loop {
             let line = lines
-                .recv_timeout(std::time::Duration::from_secs(30))
-                .expect("a reply within 30 seconds");
-            let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                .recv_timeout(std::time::Duration::from_secs(REPLY_LIMIT_SECS))
+                .expect("a reply in time");
+            let value = json_in(&line);
             if value["id"] == id {
                 return value;
             }
@@ -614,13 +628,14 @@ mod tests {
         let out = output_lines(child.0.stdout.take().expect("stdout"));
         writeln!(input, "{page}/").expect("send");
         drop(input);
-        // The test harness prints its own "running 1 test" line first
+        // The test harness prints its own lines first
         let report = loop {
             let line = out
-                .recv_timeout(std::time::Duration::from_secs(30))
-                .expect("a report within 30 seconds");
-            if line.starts_with('{') {
-                break serde_json::from_str::<serde_json::Value>(&line).expect("JSON");
+                .recv_timeout(std::time::Duration::from_secs(REPLY_LIMIT_SECS))
+                .expect("a report in time");
+            let value = json_in(&line);
+            if !value.is_null() {
+                break value;
             }
         };
         assert_eq!(report["results"][0]["url"], format!("{page}/"));
