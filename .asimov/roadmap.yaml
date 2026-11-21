@@ -30,6 +30,9 @@ shipped:
   - version: "1.10.0"
     date: "2026-11-18"
     summary: "Strict quality rules (100% line coverage), Chrome lifecycle (ADR-005), --profile, MCP user_agent and shared profile, GitHub content detection, signed-in PDFs"
+  - version: "1.10.1"
+    date: "2026-11-21"
+    summary: "Stop-signal handlers installed at start (ref mcp), faster orphan sweep; process-level tests (ADR-006)"
 
 upcoming:
   - summary: "Confirm 1.10.0 in CI"

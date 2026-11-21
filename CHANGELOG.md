@@ -4,12 +4,18 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-11-21
+
+### Fixed
+
+- **`ref mcp` stopped by a signal during start-up**: the Ctrl-C and SIGTERM handlers are installed when ref starts, not when the stop signal is first polled.
+  For `ref mcp` that was after the handshake, and a SIGTERM in between ended the process with the default action instead of "Interrupted." and exit code 130.
+- The clean-up of profiles left by killed ref runs waits and retries only after it stopped a Chrome; a leftover nothing uses that cannot be removed (another user's, in a shared temporary folder) no longer costs 600 ms at every start.
+
 ### Changed
 
 - Tests now also run ref as a real process ([ADR-006](docs/adr/ADR-006-PROCESS-LEVEL-TESTS.md)): `ref mcp` answering requests on real standard input, `check-links --stdin`, SIGTERM giving exit code 130, and the saved profile found through the real `HOME`.
   `update`'s real addresses are wired in one function, `Source::real`, which a test checks.
-- Ctrl-C and SIGTERM handlers are installed when ref starts, not when the stop signal is first polled; for `ref mcp` that was after the handshake, and a SIGTERM in between ended the process with the default action instead of "Interrupted." and exit code 130.
-- The clean-up of profiles left by killed ref runs waits and retries only after it stopped a Chrome; a leftover nothing uses that cannot be removed (another user's, in a shared temporary folder) no longer costs 600 ms at every start.
 
 ## [1.10.0] - 2026-11-18
 
