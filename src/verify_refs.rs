@@ -254,6 +254,7 @@ fn compute_summary(total: usize, skipped: usize, statuses: &[Status]) -> VerifyS
 }
 
 /// Result of verifying a single URL
+#[derive(Debug)]
 struct VerifyResult {
     status: Status,
     notes: Option<String>,
@@ -277,8 +278,17 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> Result<Verif
         });
     }
     let page = pool.new_page().await.context("Could not open a tab")?;
+    verify_in(&page, url, timeout).await
+}
+
+/// Verify one URL in a tab already open
+async fn verify_in(
+    page: &crate::browser::BrowserPage,
+    url: &str,
+    timeout: u64,
+) -> Result<VerifyResult> {
     let nav = page.goto(url, timeout).await?;
-    judge(&page, url, nav).await
+    judge(page, url, nav).await
 }
 
 /// The status of a page Chrome loaded
@@ -467,6 +477,26 @@ pub(crate) mod tests {
         assert!(err.contains("Could not open a tab"), "{err}");
         assert!(err.contains("was not changed"), "{err}");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        pool.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_tab_that_dies_before_navigation_is_no_fact_about_the_url() {
+        // Needs Chrome (ADR-004). The tab ends between opening and navigation
+        // while Chrome is fine: an error that names the tab, so the run ends
+        // and nothing is written (ADR-005 rule 3), never a dead reference
+        let pool = crate::browser::BrowserPool::new(1, crate::browser::tests::FRESH)
+            .await
+            .unwrap();
+        let page = pool.new_page().await.unwrap();
+        page.end_tab_in_chrome().await;
+        let site = crate::test_server::serve();
+        let err = verify_in(&page, &format!("{site}/report"), 5000).await;
+        let err = err.expect_err("the tab is gone");
+        assert!(!err.is::<crate::browser::ChromeFailed>(), "{err:#}");
+        assert!(err.to_string().starts_with("The tab was closed"), "{err:#}");
+        assert!(pool.is_alive().await);
+        drop(page);
         pool.stop().await;
     }
 

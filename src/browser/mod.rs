@@ -75,8 +75,9 @@ pub fn page_failure<T>(result: Result<T>) -> Result<std::result::Result<T, Strin
 
 /// The Chrome a pool started, shared by the pool and its tabs
 struct Chrome {
-    /// Requests share it; stopping takes it alone (rule 4)
-    browser: tokio::sync::RwLock<Browser>,
+    /// Requests share it; stopping takes it alone (rule 4). In an `Arc` so a
+    /// request can hold its lock on a task of its own ([`open_tab`](Self::open_tab))
+    browser: Arc<tokio::sync::RwLock<Browser>>,
     /// The process this pool started, until it has been collected: the only
     /// process ref may signal (rule 1)
     pid: tokio::sync::Mutex<Option<u32>>,
@@ -182,6 +183,50 @@ impl Chrome {
         }
     }
 
+    /// Whether Chrome still has the tab `target`: asked of the browser itself,
+    /// within [`ALIVE_LIMIT`]. A crashed tab is still there; a closed one is not.
+    /// Like [`alive`](Self::alive), it takes the browser's read lock for the
+    /// request alone and judges nothing.
+    async fn has_tab(
+        &self,
+        target: &chromiumoxide::cdp::browser_protocol::target::TargetId,
+    ) -> bool {
+        let info = chromiumoxide::cdp::browser_protocol::target::GetTargetInfoParams {
+            target_id: Some(target.clone()),
+        };
+        let browser = self.browser.read().await;
+        tokio::time::timeout(ALIVE_LIMIT, browser.execute(info))
+            .await
+            .is_ok_and(|r| r.is_ok())
+    }
+
+    /// Open a tab (rules 3, 4 and 6): the one request on the browser itself
+    /// whose failure is judged, besides the questions [`alive`](Self::alive) and
+    /// [`has_tab`](Self::has_tab). It runs on a task of its own, which holds a read
+    /// lock on the browser; the caller waits until `until`, then judges a
+    /// failure without holding any lock. Once asked, Chrome makes the tab even
+    /// if nobody waits for it any more (the caller ran out of time or was
+    /// cancelled), so the task closes such a tab itself, waiting for it at most
+    /// [`CLOSE_ACK_LIMIT`] past `until`.
+    async fn open_tab(&self, until: tokio::time::Instant) -> Result<Page> {
+        let browser = Arc::clone(&self.browser).read_owned().await;
+        let (sent, answer) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let opened =
+                tokio::time::timeout_at(until + CLOSE_ACK_LIMIT, browser.new_page("about:blank"));
+            let opened = opened.await;
+            drop(browser);
+            if let Err(Ok(Ok(page))) = sent.send(opened) {
+                let _ = tokio::time::timeout(CLOSE_ACK_LIMIT, page.close()).await;
+            }
+        });
+        let opened = Self::attempt(until, "opening a tab", answer).await;
+        match opened.and_then(|o| Ok(o??)) {
+            Ok(page) => Ok(page),
+            Err(error) => Err(self.judge(error, "opening a tab").await),
+        }
+    }
+
     /// Collect an exited Chrome as soon as its connection is gone, so it
     /// never lingers as a zombie that seems to hold the profile's lock
     async fn collect_exited(&self) {
@@ -249,7 +294,8 @@ impl BrowserPool {
              Please install Chrome or Chromium.",
         )?;
 
-        sweep_orphans();
+        // Reads /proc and removes folders: off the async workers
+        let _ = tokio::task::spawn_blocking(sweep_orphans).await;
         let home = profile::home_dir();
         let default_saved = profile::default_saved_dir(home.as_deref());
         let chosen = profile::choose(profile, default_saved.as_deref(), unique_profile_dir);
@@ -286,7 +332,7 @@ impl BrowserPool {
         };
         let pid = browser.get_mut_child().and_then(|c| c.as_mut_inner().id());
         let chrome = Arc::new(Chrome {
-            browser: tokio::sync::RwLock::new(browser),
+            browser: Arc::new(tokio::sync::RwLock::new(browser)),
             pid: tokio::sync::Mutex::new(pid),
             failed: std::sync::atomic::AtomicBool::new(false),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -393,26 +439,18 @@ impl BrowserPool {
         }
         // One budget for opening the tab and setting it up (rule 6)
         let until = tokio::time::Instant::now() + self.chrome.request_timeout;
-        let opened = {
-            let browser = self.chrome.browser.read().await;
-            Chrome::attempt(until, "opening a tab", browser.new_page("about:blank")).await
-        };
-        let page = match opened {
-            Ok(page) => page,
-            Err(error) => return Err(self.chrome.judge(error, "opening a tab").await),
-        };
-        // Closed before the error is returned, however set-up ends, so a
-        // long-lived browser does not collect half-made tabs
-        if let Err(e) = self.set_up(&page, until).await {
-            let _ = tokio::time::timeout(CLOSE_ACK_LIMIT, page.close()).await;
-            return Err(e);
-        }
-        Ok(BrowserPage {
+        let page = self.chrome.open_tab(until).await?;
+        // A tab closes when dropped, so one whose set-up fails, runs out of
+        // time or is cancelled is closed too: a long-lived browser does not
+        // collect half-made tabs (rule 6)
+        let tab = BrowserPage {
             page,
             permit: Some(permit),
             chrome: Arc::clone(&self.chrome),
             reads_until: std::sync::Mutex::new(None),
-        })
+        };
+        self.set_up(&tab.page, until).await?;
+        Ok(tab)
     }
 
     async fn set_up(&self, page: &Page, until: tokio::time::Instant) -> Result<()> {
@@ -607,6 +645,18 @@ pub(crate) mod tests {
         /// running but answers nothing
         pub(crate) async fn freeze_chrome(&self) {
             signal_chrome(self, "-STOP").await;
+        }
+    }
+
+    impl BrowserPage {
+        /// Close this tab from Chrome's side, as a tab crash would end it,
+        /// while Chrome itself stays fine
+        pub(crate) async fn end_tab_in_chrome(&self) {
+            let target = self.page.target_id().clone();
+            let close =
+                chromiumoxide::cdp::browser_protocol::target::CloseTargetParams::new(target);
+            let browser = self.chrome.browser.read().await;
+            browser.execute(close).await.unwrap();
         }
     }
 
@@ -1169,6 +1219,39 @@ pub(crate) mod tests {
         assert!(!err.is::<ChromeFailed>(), "Chrome is fine: {err:#}");
         // Chrome acknowledges the close before its list of tabs catches up
         wait_for(|| async { open_tabs(&pool).await == tabs_before }).await;
+        pool.stop().await;
+    }
+
+    #[tokio::test]
+    async fn rule_6_a_tab_chrome_makes_after_its_deadline_is_closed() {
+        // Needs Chrome (ADR-004). A deadline already past: the caller gives
+        // up at once, while Chrome, which answers, makes the tab anyway.
+        let pool = BrowserPool::new(1, FRESH).await.unwrap();
+        let tabs_before = open_tabs(&pool).await;
+        let err = pool.chrome.open_tab(tokio::time::Instant::now()).await;
+        let err = err.expect_err("out of time");
+        assert!(err.to_string().contains("in time"), "{err:#}");
+        assert!(!err.is::<ChromeFailed>(), "Chrome is fine: {err:#}");
+        // Made after the caller gave up, then closed
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        wait_for(|| async { open_tabs(&pool).await == tabs_before }).await;
+        pool.stop().await;
+    }
+
+    #[tokio::test]
+    async fn rule_6_a_tab_whose_caller_is_cancelled_is_closed() {
+        // Needs Chrome (ADR-004). The call is dropped at points spread over
+        // opening the tab and setting it up; no tab is left either way.
+        let pool = BrowserPool::new(1, FRESH).await.unwrap();
+        let tabs_before = open_tabs(&pool).await;
+        for ms in [0, 2, 5, 10, 20, 40] {
+            let cut = Duration::from_millis(ms);
+            let _ = tokio::time::timeout(cut, pool.new_page()).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        wait_for(|| async { open_tabs(&pool).await == tabs_before }).await;
+        // The slots were all freed: a tab still opens
+        drop(pool.new_page().await.unwrap());
         pool.stop().await;
     }
 

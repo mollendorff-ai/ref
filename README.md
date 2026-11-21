@@ -219,6 +219,7 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 - Only `http` and `https` URLs are opened; `file://`, `data:` and other schemes are refused.
 - Chrome runs with its sandbox unless ref runs as root, `REF_CHROME_NO_SANDBOX=1` is set, or Chrome cannot start with it (ref then retries without it and prints a warning).
 - Without a saved profile, each run uses its own temporary Chrome profile, deleted afterwards (also after Ctrl-C or SIGTERM).
+  `ref mcp` stopped by Ctrl-C or SIGTERM first asks its Chrome to close, and gives it up to 30 seconds to save a saved profile.
   If a run is killed outright (SIGKILL), the next run on Linux stops its leftover Chrome and removes its profile.
   A saved profile (see above) is never deleted.
 - ref turns off Chrome's optional background services (sync, metrics, safe-browsing updates, translation and others).

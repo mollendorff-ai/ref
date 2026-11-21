@@ -119,10 +119,19 @@ const MAX_PARALLEL: usize = 20;
 /// for; calls running at the same time share these tabs.
 const MCP_POOL_TABS: usize = MAX_PARALLEL;
 
+/// The shared browser's slot
+enum Slot {
+    /// None started yet, or the last one failed and was stopped
+    Empty,
+    Running(Arc<BrowserPool>),
+    /// The server has ended: a call still running starts no new Chrome
+    Ended,
+}
+
 #[derive(Clone)]
 pub struct RefMcpServer {
     /// The browser every tool shares, started on first use and again when it stops answering
-    pool: Arc<Mutex<Option<Arc<BrowserPool>>>>,
+    pool: Arc<Mutex<Slot>>,
     root: PathBuf,
     /// `--profile` value every browser of this server runs with
     profile: Option<ProfileChoice>,
@@ -132,7 +141,7 @@ pub struct RefMcpServer {
 impl RefMcpServer {
     fn new(root: PathBuf, profile: Option<ProfileChoice>) -> Self {
         Self {
-            pool: Arc::new(Mutex::new(None)),
+            pool: Arc::new(Mutex::new(Slot::Empty)),
             root,
             profile,
             tool_router: Self::tool_router(),
@@ -144,23 +153,28 @@ impl RefMcpServer {
     /// does not end the agent's web access.
     async fn browser(&self) -> std::result::Result<Arc<BrowserPool>, ErrorData> {
         let mut slot = self.pool.lock().await;
-        if let Some(pool) = slot.as_ref() {
-            if pool.is_alive().await {
-                return Ok(Arc::clone(pool));
+        match &*slot {
+            Slot::Ended => {
+                let message = "The MCP server is stopping; no new Chrome is started";
+                return Err(ErrorData::internal_error(message, None));
             }
-            info!("Chrome failed; starting a new one");
-            // Calls still running on it end with ChromeFailed; stopping works
-            // while they hold it, and frees the profile for the new Chrome
-            pool.stop().await;
+            Slot::Running(pool) if pool.is_alive().await => return Ok(Arc::clone(pool)),
+            Slot::Running(pool) => {
+                info!("Chrome failed; starting a new one");
+                // Calls still running on it end with ChromeFailed; stopping works
+                // while they hold it, and frees the profile for the new Chrome
+                pool.stop().await;
+            }
+            Slot::Empty => {}
         }
-        *slot = None;
+        *slot = Slot::Empty;
         let pool = BrowserPool::new(MCP_POOL_TABS, self.profile.as_ref())
             .await
             .map_err(|e| {
                 ErrorData::internal_error(format!("Browser pool init failed: {e:#}"), None)
             })?;
         let pool = Arc::new(pool);
-        *slot = Some(Arc::clone(&pool));
+        *slot = Slot::Running(Arc::clone(&pool));
         Ok(pool)
     }
 
@@ -217,9 +231,11 @@ fn browser_err(e: anyhow::Error) -> ErrorData {
 }
 
 /// Stop the shared Chrome gracefully, so it can save a saved profile before
-/// the server ends (ADR-005 rule 4: the end of every command)
-async fn stop_browser(slot: &Mutex<Option<Arc<BrowserPool>>>) {
-    if let Some(pool) = slot.lock().await.take() {
+/// the server ends (ADR-005 rule 4: the end of every command); from then on
+/// no call starts a new one
+async fn stop_browser(slot: &Mutex<Slot>) {
+    let ended = std::mem::replace(&mut *slot.lock().await, Slot::Ended);
+    if let Slot::Running(pool) = ended {
         pool.stop().await;
     }
 }
@@ -452,7 +468,15 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
 /// # Errors
 ///
 /// Returns an error if the transport fails to initialize or the server exits abnormally.
-pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> Result<()> {
+///
+/// # Errors
+/// Returns [`Interrupted`](crate::cli::Interrupted) when `stop` finished (Ctrl-C
+/// or SIGTERM): the server stopped its Chrome gracefully first.
+pub async fn run_mcp(
+    root: Option<PathBuf>,
+    profile: Option<ProfileChoice>,
+    stop: Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) -> Result<()> {
     // All log output to stderr (stdout reserved for JSON-RPC). A second
     // server in the same process (in tests) keeps the first one's logger.
     let _ = tracing_subscriber::fmt()
@@ -468,17 +492,19 @@ pub async fn run_mcp(root: Option<PathBuf>, profile: Option<ProfileChoice>) -> R
         profile,
         Box::pin(tokio::io::stdin()),
         Box::pin(tokio::io::stdout()),
+        stop,
     )
     .await
 }
 
 /// Serve MCP on `input` and `output` (stdio, or a pipe in tests) until the
-/// input ends, then stop the shared Chrome.
+/// input ends or `stop` finishes, then stop the shared Chrome gracefully.
 async fn serve_mcp(
     root: Option<PathBuf>,
     profile: Option<ProfileChoice>,
     input: Pin<Box<dyn AsyncRead + Send>>,
     output: Pin<Box<dyn AsyncWrite + Send>>,
+    stop: Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 ) -> Result<()> {
     info!("Starting ref MCP server v{}", env!("CARGO_PKG_VERSION"));
 
@@ -494,8 +520,17 @@ async fn serve_mcp(
     let server = RefMcpServer::new(root, profile);
     let browser = Arc::clone(&server.pool);
     let service = server.serve((input, output)).await?;
-    let outcome = service.waiting().await;
+    // On a stop signal the service is dropped, which ends it; Chrome is then
+    // stopped as at the end of the input, not killed with the process
+    let outcome = tokio::select! {
+        outcome = service.waiting() => Some(outcome),
+        () = stop => None,
+    };
     stop_browser(&browser).await;
+    let Some(outcome) = outcome else {
+        info!("MCP server stopped by a signal");
+        return Err(anyhow::Error::new(crate::cli::Interrupted));
+    };
     outcome?;
 
     info!("MCP server stopped");
@@ -510,6 +545,14 @@ async fn serve_mcp(
 mod tests {
     use super::*;
     use rmcp::handler::server::ServerHandler;
+
+    /// The shared browser, while one runs
+    async fn running(server: &RefMcpServer) -> Option<Arc<BrowserPool>> {
+        match &*server.pool.lock().await {
+            Slot::Running(pool) => Some(Arc::clone(pool)),
+            Slot::Empty | Slot::Ended => None,
+        }
+    }
 
     #[test]
     fn test_fetch_params_minimal() {
@@ -741,7 +784,7 @@ mod tests {
             missing.message
         );
 
-        assert!(server.pool.lock().await.is_none(), "Chrome was started");
+        assert!(running(&server).await.is_none(), "Chrome was started");
 
         // With something to do, the unusable profile is reported as such
         let refused = server
@@ -778,7 +821,7 @@ mod tests {
         };
 
         server.ref_check_links(Parameters(check())).await.unwrap();
-        let first = server.pool.lock().await.clone().unwrap();
+        let first = running(&server).await.unwrap();
         first.kill_chrome().await;
 
         let again = server.ref_check_links(Parameters(check())).await.unwrap();
@@ -787,7 +830,7 @@ mod tests {
             !error.contains("Browser error"),
             "the dead Chrome was used: {error}"
         );
-        let second = server.pool.lock().await.clone().unwrap();
+        let second = running(&server).await.unwrap();
         assert!(!Arc::ptr_eq(&first, &second), "no new Chrome was started");
         assert!(second.is_alive().await);
     }
@@ -820,12 +863,33 @@ mod tests {
             retries: Some(0),
         };
         server.ref_check_links(Parameters(check)).await.unwrap();
-        let pool = server.pool.lock().await.clone().unwrap();
+        let pool = running(&server).await.unwrap();
         stop_browser(&server.pool).await;
-        assert!(server.pool.lock().await.is_none());
+        assert!(running(&server).await.is_none());
         assert!(!pool.is_alive().await, "Chrome still runs");
         // Nothing started: nothing to stop
         stop_browser(&server.pool).await;
+    }
+
+    #[tokio::test]
+    async fn after_the_server_ended_a_call_starts_no_new_chrome() {
+        // A call still running when the server ends must not start a Chrome
+        // that nothing would stop
+        let dir = tempfile::tempdir().unwrap();
+        let server = RefMcpServer::new(
+            dir.path().canonicalize().unwrap(),
+            Some(ProfileChoice::Fresh),
+        );
+        stop_browser(&server.pool).await;
+        let check = CheckLinksParams {
+            urls: vec!["http://127.0.0.1:9/".into()],
+            concurrency: None,
+            timeout: Some(5000),
+            retries: Some(0),
+        };
+        let refused = server.ref_check_links(Parameters(check)).await.unwrap_err();
+        assert!(refused.message.contains("stopping"), "{}", refused.message);
+        assert!(matches!(*server.pool.lock().await, Slot::Ended));
     }
 
     #[tokio::test]
@@ -852,7 +916,7 @@ mod tests {
             .ref_fetch(Parameters(fetch(format!("{site}/show"))))
             .await
             .unwrap();
-        let first = server.pool.lock().await.clone().unwrap();
+        let first = running(&server).await.unwrap();
         let trap = crate::browser::tests::serve_trap(&first, "-STOP").await;
 
         // The call during the failure gets the tool error
@@ -874,7 +938,7 @@ mod tests {
             .await;
         let again = again.unwrap();
         assert_eq!(text(&again)["status"], "ok");
-        let second = server.pool.lock().await.clone().unwrap();
+        let second = running(&server).await.unwrap();
         assert!(!Arc::ptr_eq(&first, &second));
         second.stop().await;
     }
@@ -910,7 +974,7 @@ mod tests {
             .unwrap();
         assert_eq!(text(fetched)["status"], "dead");
         assert_eq!(
-            server.pool.lock().await.as_ref().unwrap().profile,
+            running(&server).await.unwrap().profile,
             crate::profile::Profile::Saved(saved.clone())
         );
         // Several pages come back as a list, in the order given
@@ -1142,6 +1206,7 @@ mod tests {
             Some(ProfileChoice::Fresh),
             Box::pin(input),
             Box::pin(output),
+            Box::pin(std::future::pending()),
         ));
         let (from_server, mut to_server) = tokio::io::split(client);
         let mut from_server = tokio::io::BufReader::new(from_server);
@@ -1171,5 +1236,55 @@ mod tests {
             .unwrap();
         let ended = tokio::time::timeout(std::time::Duration::from_mins(1), served).await;
         ended.unwrap().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stop_signal_stops_chrome_gracefully_and_keeps_its_sign_ins() {
+        // Needs Chrome (ADR-004). Before, a signal dropped the server, which
+        // killed Chrome, so sign-ins of that session could be lost.
+        let site = crate::browser::tests::serve_cookie_jar();
+        let dir = tempfile::tempdir().unwrap();
+        let saved = ProfileChoice::Folder(dir.path().join("saved"));
+        let (client, end) = tokio::io::duplex(1 << 20);
+        let (input, output) = tokio::io::split(end);
+        let (signal, stop) = tokio::sync::oneshot::channel::<()>();
+        let served = tokio::spawn(serve_mcp(
+            Some(dir.path().to_path_buf()),
+            Some(saved.clone()),
+            Box::pin(input),
+            Box::pin(output),
+            Box::pin(async move {
+                let _ = stop.await;
+            }),
+        ));
+        let (from_server, mut to_server) = tokio::io::split(client);
+        let mut from_server = tokio::io::BufReader::new(from_server);
+        let hello = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "0"}}});
+        send(&mut to_server, &hello).await;
+        receive(&mut from_server).await;
+        let ready = serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        send(&mut to_server, &ready).await;
+        // A page that sets a cookie for an hour, as a sign-in would
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "ref_fetch", "arguments": {"urls": [format!("{site}/set")]}}});
+        send(&mut to_server, &call).await;
+        receive(&mut from_server).await;
+
+        // The signal, with the input still open
+        signal.send(()).unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_mins(1), served).await;
+        let err = ended.unwrap().unwrap().unwrap_err();
+        assert!(err.is::<crate::cli::Interrupted>(), "{err:#}");
+
+        // A new Chrome on the same profile still has the cookie
+        let pool = BrowserPool::new(1, Some(&saved)).await.unwrap();
+        let page = pool.new_page().await.unwrap();
+        page.goto(&format!("{site}/show"), 10_000).await.unwrap();
+        let shown = page.content().await.unwrap();
+        drop(page);
+        pool.stop().await;
+        assert!(shown.contains("kept=yes"), "{shown}");
     }
 }

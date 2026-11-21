@@ -84,6 +84,7 @@ When the workspace is the filesystem root, file tools are refused.
 The server keeps one browser with up to 20 tabs, shared by every browser tool; each call uses at most its own `parallel` / `concurrency` value, calls running at the same time share the tabs, and every tab is closed when its page is done.
 Chrome starts on the first call that has pages to open.
 If Chrome crashes or hangs, the call that meets it gets a tool error saying "Chrome failed", and the next call starts a new Chrome on the same profile (see [ADR-005](adr/ADR-005-CHROME-LIFECYCLE.md)).
+When the server ends, because its input closes or on Ctrl-C or SIGTERM, it asks Chrome to close and gives it up to 30 seconds to save a saved profile; a call still running then gets a tool error instead of a new Chrome.
 Pages run with Chrome's cache off, so every call asks the sites again.
 Only `http` and `https` URLs are fetched.
 

@@ -9,6 +9,11 @@ use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The error when a tab fails, not the page in it, while Chrome itself answers
+const TAB_GONE: &str =
+    "The tab was closed or stopped answering, so this says nothing about the URL \
+     (Chrome itself still answers)";
+
 /// Default wait time for network idle (ms) - how long to wait for `networkIdle` event
 const NETWORK_IDLE_TIMEOUT_MS: u64 = 10000;
 
@@ -97,7 +102,9 @@ impl BrowserPage {
         // The budget of an earlier navigation is spent: forget it, so reads
         // after this one (also a failed one) get a budget of their own
         *self.reads_until() = None;
-        // Subscribe to lifecycle and response events BEFORE navigation
+        // Subscribe to lifecycle and response events BEFORE navigation. A
+        // failure here, while Chrome answers, is the tab's (it was closed or
+        // crashed, or stopped answering), never the URL's
         let until = tokio::time::Instant::now() + self.chrome.request_timeout;
         let mut lifecycle = self
             .chrome
@@ -105,14 +112,14 @@ impl BrowserPage {
                 self.page.event_listener::<EventLifecycleEvent>().await
             })
             .await
-            .context("Failed to subscribe to lifecycle events")?;
+            .context(TAB_GONE)?;
         let mut responses = self
             .chrome
             .ask(until, "subscribing to responses", async {
                 self.page.event_listener::<EventResponseReceived>().await
             })
             .await
-            .context("Failed to subscribe to network responses")?;
+            .context(TAB_GONE)?;
 
         // Start navigation with overall timeout
         let nav_result =
@@ -131,6 +138,12 @@ impl BrowserPage {
                 .await;
             if error.is::<ChromeFailed>() {
                 return Err(error);
+            }
+            // A tab closed from outside, before or during navigation, says
+            // nothing about the URL; a crashed tab is still there, and is the
+            // page's failure (rule 3)
+            if !self.chrome.has_tab(self.page.target_id()).await {
+                return Err(anyhow::anyhow!(TAB_GONE));
             }
             return Ok(PageResult::failed(error.to_string()));
         }

@@ -64,12 +64,35 @@ pub enum Commands {
     Mcp(McpArgs),
 }
 
+/// A command ended early by the stop signal (Ctrl-C or SIGTERM): exit code 130
+#[derive(Debug)]
+pub struct Interrupted;
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Interrupted.")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+/// The stop signal as [`execute`] receives it, shared with `ref mcp`
+type Stop = futures::future::Shared<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>>;
+
 /// Run the chosen command, writing its JSON to `out`: `true` when everything
-/// succeeded, `false` when some URLs or files failed.
+/// succeeded, `false` when some URLs or files failed. `ref mcp` watches `stop`
+/// itself, so it can stop Chrome gracefully first; other commands are dropped
+/// by [`execute`] when it finishes.
 ///
 /// # Errors
-/// Returns the command's error (bad arguments, Chrome missing, I/O error).
-pub async fn run(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool> {
+/// Returns the command's error (bad arguments, Chrome missing, I/O error), or
+/// [`Interrupted`] when `ref mcp` was stopped.
+pub async fn run(
+    cli: Cli,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+    stop: Stop,
+) -> Result<bool> {
     match cli.command {
         Commands::Fetch(args) => run_fetch(args, out).await,
         Commands::Pdf(args) => run_pdf(&args, out).await,
@@ -82,7 +105,10 @@ pub async fn run(cli: Cli, input: &mut dyn BufRead, out: &mut dyn Write) -> Resu
         Commands::Update(args) => run_update(args, out).await.map(|()| true),
         Commands::Mcp(args) => {
             let profile = args.profile.choice()?;
-            crate::mcp::run_mcp(args.root, profile).await.map(|()| true)
+            let stop = Box::pin(stop);
+            crate::mcp::run_mcp(args.root, profile, stop)
+                .await
+                .map(|()| true)
         }
     }
 }
@@ -116,16 +142,19 @@ pub async fn execute(
             return ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(2));
         }
     };
+    let stop = futures::FutureExt::shared(stop);
+    let stops_itself = matches!(cli.command, Commands::Mcp(_));
     let result = tokio::select! {
-        r = run(cli, input, out) => r,
-        () = stop => {
-            let _ = writeln!(err, "Interrupted.");
-            return ExitCode::from(130);
-        }
+        r = run(cli, input, out, stop.clone()) => r,
+        () = stop, if !stops_itself => Err(anyhow::Error::new(Interrupted)),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
+        Err(e) if e.is::<Interrupted>() => {
+            let _ = writeln!(err, "{e}");
+            ExitCode::from(130)
+        }
         Err(e) => {
             let _ = writeln!(err, "Error: {e:#}");
             ExitCode::from(2)

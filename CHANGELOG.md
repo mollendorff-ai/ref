@@ -11,7 +11,8 @@ All notable changes to Möllendorff Ref.
 
 ### Changed
 
-- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does).
+- Library: `cli::run` takes the stop signal and `mcp::run_mcp` takes it too; a command ended by it returns `cli::Interrupted`.
+  `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does).
   The `run_*` command functions write their JSON to a writer they are given.
   New `check_links_with` and `refresh_data_with` run in a browser the caller already has (`Arc<BrowserPool>`, with plain values).
   `BrowserPool::stop` stops Chrome through a shared reference and cannot fail, so it returns nothing (`close` too); `fetch_one`, `check_links_with`, `refresh_data_with` and `BrowserPage::current_url` return `Result`, whose error is `ChromeFailed` when Chrome itself failed.
@@ -24,9 +25,11 @@ All notable changes to Möllendorff Ref.
   - Stopping asks Chrome to close and gives it 30 seconds to save a saved profile; only a Chrome that does not answer, or does not exit, is killed, with a warning.
   - Every request to Chrome has a limit, also while Chrome is frozen: 30 seconds to open and set up a tab, and 30 seconds for everything read from a page after navigation.
   - A crashed Chrome is noticed and collected at once, so it never seems to hold the profile's lock.
-  - A tab whose set-up fails is closed before the error is returned, and a run that stops early cancels its remaining checks.
-  - `ref mcp` stops its Chrome the same way when the server ends because its input closes, so a saved profile keeps the sign-ins of the session's last seconds.
-    A server ended by a signal (Ctrl-C, SIGTERM) still kills its Chrome at once.
+  - A tab is closed however its opening and set-up end: when set-up fails, when Chrome makes the tab only after the 30 seconds ran out, and when the call is cancelled midway, so a long-lived browser does not collect stray tabs.
+    A run that stops early cancels its remaining checks.
+  - `ref mcp` stops its Chrome the same way when the server ends, because its input closes or because of a signal (Ctrl-C, SIGTERM), so a saved profile keeps the sign-ins of the session's last seconds; a call still running then starts no new Chrome.
+  - A tab that was closed, before or during navigation, while Chrome itself answers, is an error that says so, not a fact about the URL: `ref verify-refs` ends and writes nothing, and the other commands report it as that URL's error.
+    A tab that crashed is still the page's failure.
   - A Chrome that starts but does not answer leaves no temporary profile behind, and the error names the profile.
   - So does a Chrome that cannot start at all, also after ref retries without the sandbox: the error begins "Chrome did not start (profile ...)".
     A Chrome that exits before its first answer is an error, not a browser with an empty user agent.
@@ -38,6 +41,7 @@ All notable changes to Möllendorff Ref.
 - `ref check-links` reads URLs from the standard input it is given, so `--stdin` is tested with real input; its redirect check is one small function.
 - All tests are inline and none is skipped: the tests that need Chrome run in plain `cargo test` (ADR-004), and CI's separate job for them is gone.
 - The clean-up at exit removes only the temporary profiles of browsers that are gone, never one still in use.
+- The clean-up of profiles left by killed ref runs waits and retries only after it stopped a Chrome; a leftover nothing uses that cannot be removed (another user's, in a shared temporary folder) no longer costs 600 ms at every start.
 - `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
 - `ref update` removes its download folder however the update ends; before, a failed download, checksum entry, extraction or install left it in the temporary folder.
 - 100% line coverage of all code (ADR-004): CI's coverage gate and `make coverage` no longer leave any file out, and the README badge is a plain coverage badge.
@@ -54,6 +58,8 @@ All notable changes to Möllendorff Ref.
 - **`verify-refs` with a failing Chrome** wrote every reference as `dead`, also when Chrome died in the middle of loading a page.
   Now it stops at the first Chrome failure with an error naming the URL, and leaves `references.yaml` as it was.
   The same holds when Chrome still answers but a tab cannot be opened: that says nothing about the URL either.
+- **`ref mcp` never answered a request** in builds after 1.9.0 (never released): the command line held standard input for the whole run, so the server could not read it.
+  Tests now also run ref as a real process ([ADR-006](docs/adr/ADR-006-PROCESS-LEVEL-TESTS.md)).
 - MCP calls with nothing to do (no URLs, nothing chosen, a missing file) answer without starting Chrome, so the real error is reported.
 - MCP `concurrency` / `parallel` values of 17 to 20 were quietly capped at 16 tabs; the shared browser now has 20.
 

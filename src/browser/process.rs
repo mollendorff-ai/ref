@@ -286,18 +286,26 @@ fn sweep_orphans_in(folder: &Path) {
             continue;
         }
         let dir = entry.path();
-        kill_chrome_using(&dir);
-        remove_dir_retrying(&dir);
+        // Wait and retry only after a kill, when Chrome's helpers may still be
+        // writing; a folder nothing uses that cannot be removed (another
+        // user's, in a shared temporary folder) costs one attempt
+        if kill_chrome_using(&dir) {
+            remove_dir_retrying(&dir);
+        } else {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn sweep_orphans() {}
 
-/// Kill every process whose command line uses `profile` as its user-data-dir
+/// Kill every process whose command line uses `profile` as its user-data-dir;
+/// true when there was one
 #[cfg(target_os = "linux")]
-fn kill_chrome_using(profile: &Path) {
+fn kill_chrome_using(profile: &Path) -> bool {
     let needle = format!("--user-data-dir={}", profile.display());
+    let mut killed = false;
     for proc_entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Ok(pid) = proc_entry.file_name().to_string_lossy().parse() else {
             continue;
@@ -308,8 +316,10 @@ fn kill_chrome_using(profile: &Path) {
             .any(|arg| arg == needle.as_bytes())
         {
             kill_process(pid);
+            killed = true;
         }
     }
+    killed
 }
 
 /// The ref process id in a profile folder name `ref-chrome-<pid>-<nanos>`
@@ -463,6 +473,22 @@ mod tests {
         }
         // A folder that cannot be read is nothing to sweep
         sweep_orphans_in(&temp.path().join("missing"));
+    }
+
+    #[test]
+    fn a_leftover_nothing_uses_costs_the_sweep_no_waiting() {
+        // A stale entry that cannot be removed as a folder (a plain file), with
+        // no Chrome on it, as another user's folder in a shared /tmp would be
+        let temp = tempfile::tempdir().unwrap();
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        gone.wait().unwrap();
+        let stuck = temp.path().join(format!("ref-chrome-{}-4", gone.id()));
+        std::fs::write(&stuck, "x").unwrap();
+        let started = std::time::Instant::now();
+        sweep_orphans_in(temp.path());
+        let took = started.elapsed();
+        assert!(stuck.exists());
+        assert!(took < std::time::Duration::from_millis(250), "{took:?}");
     }
 
     #[test]
