@@ -34,6 +34,7 @@ Chrome is a requirement of the tool, so it is a requirement of its tests.
 ## How the rules are met
 
 - **Command-line tests**: `main` becomes a thin wrapper over a library function `cli::run(args) -> ExitCode`, which inline tests call in-process instead of starting the binary.
+  A thin layer of process-level tests on top of this is proposed in [ADR-006](ADR-006-PROCESS-LEVEL-TESTS.md).
 - **Chrome tests**: move into the modules they exercise (`fetch`, `browser`, `pdf`), using the existing fixtures and a local HTTP server.
 - **Network code** (`update`, `check_links`, `verify_refs`, `refresh_data`): the base URL is a parameter, so tests point it at a local server (`wiremock` is already a dev dependency).
 - **File code** (`init`, `scan`): tests use temporary folders.
