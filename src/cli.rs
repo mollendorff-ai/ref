@@ -12,17 +12,38 @@ use crate::update::{run_update, UpdateArgs};
 use crate::verify_refs::{run_verify_refs, VerifyRefsArgs};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use futures::future::{FutureExt, Shared};
 use std::future::Future;
 use std::io::{BufRead, Write};
+
+/// Standard input: read on a thread of its own, so a command waiting for it
+/// still hears the stop signal
+pub type Input = Box<dyn BufRead + Send>;
+use std::pin::Pin;
 use std::process::ExitCode;
+
+/// Ctrl-C or SIGTERM in the real program; any future in tests
+pub type Stop = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// The command was ended by the stop signal (exit code 130)
+#[derive(Debug)]
+pub struct Interrupted;
+
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
 
 #[derive(Parser)]
 #[command(name = "ref")]
 #[command(author = "Möllendorff AI")]
 #[command(version)]
-#[command(about = "Möllendorff Ref - LLM-optimized reference toolkit")]
+#[command(about = "Renders web pages and PDFs into compact JSON for LLM agents")]
 #[command(
-    long_about = "Reference verification and web fetching for AI agents.\nRenders pages in headless Chrome, including JavaScript-heavy sites.\nAll output is JSON for LLM consumption.\n\nExit codes: 0 = all succeeded, 1 = some URLs or files failed, 2 = command error."
+    long_about = "Renders web pages and PDFs into compact JSON for LLM agents.\nPages are rendered in headless Chrome, including JavaScript-heavy sites.\n\nExit codes: 0 = all succeeded, 1 = some URLs or files failed, 2 = command error."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -64,35 +85,14 @@ pub enum Commands {
     Mcp(McpArgs),
 }
 
-/// A command ended early by the stop signal (Ctrl-C or SIGTERM): exit code 130
-#[derive(Debug)]
-pub struct Interrupted;
-
-impl std::fmt::Display for Interrupted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Interrupted.")
-    }
-}
-
-impl std::error::Error for Interrupted {}
-
-/// The stop signal as [`execute`] receives it, shared with `ref mcp`
-type Stop = futures::future::Shared<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>>;
-
 /// Run the chosen command, writing its JSON to `out`: `true` when everything
-/// succeeded, `false` when some URLs or files failed. `ref mcp` watches `stop`
-/// itself, so it can stop Chrome gracefully first; other commands are dropped
-/// by [`execute`] when it finishes.
+/// succeeded, `false` when some URLs or files failed.
 ///
 /// # Errors
-/// Returns the command's error (bad arguments, Chrome missing, I/O error), or
-/// [`Interrupted`] when `ref mcp` was stopped.
-pub async fn run(
-    cli: Cli,
-    input: &mut dyn BufRead,
-    out: &mut dyn Write,
-    stop: Stop,
-) -> Result<bool> {
+/// Returns the command's error (bad arguments, Chrome missing, I/O error).
+/// Run one command. `stop` is for `ref mcp`, which ends on it by itself so it
+/// can stop its Chrome gracefully; [`execute`] drops every other command on it.
+pub async fn run(cli: Cli, input: Input, out: &mut dyn Write, stop: Shared<Stop>) -> Result<bool> {
     match cli.command {
         Commands::Fetch(args) => run_fetch(args, out).await,
         Commands::Pdf(args) => run_pdf(&args, out).await,
@@ -105,7 +105,7 @@ pub async fn run(
         Commands::Update(args) => run_update(args, out).await.map(|()| true),
         Commands::Mcp(args) => {
             let profile = args.profile.choice()?;
-            let stop = Box::pin(stop);
+            let stop: Stop = Box::pin(stop);
             crate::mcp::run_mcp(args.root, profile, stop)
                 .await
                 .map(|()| true)
@@ -124,10 +124,10 @@ pub async fn run(
 /// and removes its temporary profile, instead of leaving them behind.
 pub async fn execute(
     args: Vec<std::ffi::OsString>,
-    input: &mut dyn BufRead,
+    input: Input,
     out: &mut dyn Write,
     err: &mut dyn Write,
-    stop: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
+    stop: Stop,
 ) -> ExitCode {
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
@@ -142,17 +142,19 @@ pub async fn execute(
             return ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(2));
         }
     };
-    let stop = futures::FutureExt::shared(stop);
-    let stops_itself = matches!(cli.command, Commands::Mcp(_));
+    // `ref mcp` ends on the signal itself, stopping its Chrome gracefully;
+    // every other command is dropped, which closes Chrome
+    let serves = matches!(cli.command, Commands::Mcp(_));
+    let stop = stop.shared();
     let result = tokio::select! {
         r = run(cli, input, out, stop.clone()) => r,
-        () = stop, if !stops_itself => Err(anyhow::Error::new(Interrupted)),
+        () = stop, if !serves => Err(anyhow::Error::new(Interrupted)),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) if e.is::<Interrupted>() => {
-            let _ = writeln!(err, "{e}");
+            let _ = writeln!(err, "{e}.");
             ExitCode::from(130)
         }
         Err(e) => {
@@ -164,37 +166,29 @@ pub async fn execute(
 
 /// The real program: the command line, standard output and error, and
 /// Ctrl-C or SIGTERM as the stop signal.
-#[must_use]
+#[must_use = "the exit code is the result of the program"]
 pub fn main() -> ExitCode {
     real(std::env::args_os().collect())
 }
 
 /// [`main`] with the command line given, and everything else real: standard
 /// input, output and error, the stop signals and the async runtime. The
-/// process-level tests run it in a child process.
+/// process-level tests run it in a child process (ADR-006).
 fn real(args: Vec<std::ffi::OsString>) -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
         args,
-        &mut real_input(),
+        Box::new(std::io::BufReader::new(std::io::stdin())),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
-}
-
-/// Standard input for `check-links --stdin`, locked only while each read runs.
-/// Holding the lock for the whole run would block every other reader of
-/// standard input for good: `ref mcp` reads its requests through tokio, which
-/// takes the same lock on another thread.
-fn real_input() -> std::io::BufReader<std::io::Stdin> {
-    std::io::BufReader::new(std::io::stdin())
 }
 
 /// [`main`] with its parts given, so the runtime failing to start can be tested
 fn start(
     runtime: std::io::Result<tokio::runtime::Runtime>,
     args: Vec<std::ffi::OsString>,
-    input: &mut dyn BufRead,
+    input: Input,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> ExitCode {
@@ -382,7 +376,7 @@ mod tests {
             .to_vec();
         let code = execute(
             args,
-            &mut &b""[..],
+            Box::new(std::io::empty()),
             &mut out,
             &mut err,
             Box::pin(std::future::ready(())),
@@ -429,7 +423,7 @@ mod tests {
         let code = start(
             failed,
             vec!["ref".into()],
-            &mut &b""[..],
+            Box::new(std::io::empty()),
             &mut out,
             &mut err,
         );
@@ -448,7 +442,7 @@ mod tests {
         let code = start(
             runtime,
             vec!["ref".into(), "--version".into()],
-            &mut &b""[..],
+            Box::new(std::io::empty()),
             &mut out,
             &mut err,
         );
@@ -635,19 +629,6 @@ mod tests {
             .expect("read");
         assert_eq!(child.0.wait().expect("wait").code(), Some(130));
         assert!(stderr.contains("Interrupted."), "{stderr}");
-    }
-
-    #[test]
-    fn the_real_input_leaves_standard_input_unlocked() {
-        // ref mcp reads standard input on another thread while main holds its
-        // input; that thread must be able to take the lock
-        let _input = real_input();
-        let (sent, got) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            drop(std::io::stdin().lock());
-            let _ = sent.send(());
-        });
-        assert!(got.recv_timeout(std::time::Duration::from_secs(5)).is_ok());
     }
 
     #[cfg(unix)]

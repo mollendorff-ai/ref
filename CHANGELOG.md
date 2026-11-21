@@ -4,19 +4,25 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+### Changed
+
+- Tests now also run ref as a real process ([ADR-006](docs/adr/ADR-006-PROCESS-LEVEL-TESTS.md)): `ref mcp` answering requests on real standard input, `check-links --stdin`, SIGTERM giving exit code 130, and the saved profile found through the real `HOME`.
+  `update`'s real addresses are wired in one function, `Source::real`, which a test checks.
+- The clean-up of profiles left by killed ref runs waits and retries only after it stopped a Chrome; a leftover nothing uses that cannot be removed (another user's, in a shared temporary folder) no longer costs 600 ms at every start.
+
+## [1.10.0] - 2026-11-18
+
 ### Added
 
+- **`user_agent` on the MCP tools `ref_fetch` and `ref_check_links`**: the same as `--user-agent`, for that call only.
+  Calls sharing the server's Chrome each send their own; a call without one sends Chrome's.
+  The user agent now belongs to each tab, not to the browser, and `--user-agent` uses the same path; an invalid one is refused before Chrome starts.
 - **`--profile <folder|fresh>`** on `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and `ref mcp`: chooses the Chrome profile for that run.
   Without it, `REF_CHROME_PROFILE` gives the value, as before.
 
-- **`user_agent`** on the MCP tools `ref_fetch` and `ref_check_links`, as `--user-agent` on the command line: exactly that text is sent for that call's pages and PDF downloads, and other calls on the server's shared browser are not affected.
-  Tried against sec.gov: without it a 403 "Undeclared Automated Tool", with a declared name and email normal answers.
-
 ### Changed
 
-- Library: `check_links_with` takes the call's user agent (`Option<&str>`), `FetchOptions` has a `user_agent` field, and `BrowserPool` has `new_page_as` and `download_headers_as` for a tab's own user agent.
-- Library: `cli::run` takes the stop signal and `mcp::run_mcp` takes it too; a command ended by it returns `cli::Interrupted`.
-  `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does).
+- Library: `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does).
   The `run_*` command functions write their JSON to a writer they are given.
   New `check_links_with` and `refresh_data_with` run in a browser the caller already has (`Arc<BrowserPool>`, with plain values).
   `BrowserPool::stop` stops Chrome through a shared reference and cannot fail, so it returns nothing (`close` too); `fetch_one`, `check_links_with`, `refresh_data_with` and `BrowserPage::current_url` return `Result`, whose error is `ChromeFailed` when Chrome itself failed.
@@ -29,11 +35,9 @@ All notable changes to Möllendorff Ref.
   - Stopping asks Chrome to close and gives it 30 seconds to save a saved profile; only a Chrome that does not answer, or does not exit, is killed, with a warning.
   - Every request to Chrome has a limit, also while Chrome is frozen: 30 seconds to open and set up a tab, and 30 seconds for everything read from a page after navigation.
   - A crashed Chrome is noticed and collected at once, so it never seems to hold the profile's lock.
-  - A tab is closed however its opening and set-up end: when set-up fails, when Chrome makes the tab only after the 30 seconds ran out, and when the call is cancelled midway, so a long-lived browser does not collect stray tabs.
-    A run that stops early cancels its remaining checks.
-  - `ref mcp` stops its Chrome the same way when the server ends, because its input closes or because of a signal (Ctrl-C, SIGTERM), so a saved profile keeps the sign-ins of the session's last seconds; a call still running then starts no new Chrome.
-  - A tab that was closed, before or during navigation, while Chrome itself answers, is an error that says so, not a fact about the URL: `ref verify-refs` ends and writes nothing, and the other commands report it as that URL's error.
-    A tab that crashed is still the page's failure.
+  - A tab whose set-up fails is closed before the error is returned, and a run that stops early cancels its remaining checks.
+  - `ref mcp` stops its Chrome the same way when the server ends because its input closes, so a saved profile keeps the sign-ins of the session's last seconds.
+    A server ended by a signal (Ctrl-C, SIGTERM) still kills its Chrome at once.
   - A Chrome that starts but does not answer leaves no temporary profile behind, and the error names the profile.
   - So does a Chrome that cannot start at all, also after ref retries without the sandbox: the error begins "Chrome did not start (profile ...)".
     A Chrome that exits before its first answer is an error, not a browser with an empty user agent.
@@ -41,11 +45,10 @@ All notable changes to Möllendorff Ref.
 - The command line lives in the library (`ref::cli`), and `main` only calls it, so every exit code is tested in-process.
 - `ref fetch`, `ref verify-refs` and `ref check-links` share one cross-host redirect check (`www.` does not count); `ref verify-refs` also treats a page whose text cannot be read as having neither a paywall nor a login.
 - `ref refresh-data`, `ref fetch` and the PDF reader report every failure of one URL as that URL's failure; a PDF library panic or error is reported as "PDF extraction failed".
-- `ref pdf` no longer tries to decrypt a PDF again after it was opened: the PDF library already does that when it loads a file locked with the empty password.
+- A PDF locked with a real user password is an error that names the password ("PDF extraction failed: PDF error: decryption error: the supplied password is incorrect"), not "PDF contains no extractable text". The PDF library opens a file locked with the empty password while loading it; for any other lock, `ref pdf` tries the empty password so the error comes back.
 - `ref check-links` reads URLs from the standard input it is given, so `--stdin` is tested with real input; its redirect check is one small function.
 - All tests are inline and none is skipped: the tests that need Chrome run in plain `cargo test` (ADR-004), and CI's separate job for them is gone.
 - The clean-up at exit removes only the temporary profiles of browsers that are gone, never one still in use.
-- The clean-up of profiles left by killed ref runs waits and retries only after it stopped a Chrome; a leftover nothing uses that cannot be removed (another user's, in a shared temporary folder) no longer costs 600 ms at every start.
 - `--profile` folders are made absolute; the everyday-Chrome-profile check also sees through relative paths and symbolic links.
 - `ref update` removes its download folder however the update ends; before, a failed download, checksum entry, extraction or install left it in the temporary folder.
 - 100% line coverage of all code (ADR-004): CI's coverage gate and `make coverage` no longer leave any file out, and the README badge is a plain coverage badge.
@@ -55,11 +58,24 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
-- A saved-profile folder that ref creates is readable by its owner only (mode 0700 on macOS and Linux); one that already exists is left as it is.
-- README: `ref pdf` does not use the saved profile; local and private addresses are opened; a line on sites' terms of service.
-- **GitHub pages**: `ref fetch https://github.com/<owner>/<repo>` came back as `paywall`, because the signal `isAccessibleForFree: false` was searched for in the whole HTML and this repository's README quotes it.
-  It is now read only where publishers put it: JSON-LD (also nested), and `itemprop` or `property` elements; JSON-LD that does not parse is still read as text.
-  The README (`article.markdown-body`) is also chosen over the rest of `<main>`, so the repository navigation, About, Stars and Forks no longer come first and repeat after it.
+- `ref check-links --stdin` now ends on Ctrl-C or SIGTERM while it waits for input (it read standard input on the thread that waits for the signal, so the signal was ignored until input came).
+- **`ref mcp` stopped by Ctrl-C or SIGTERM** killed its Chrome, which could lose a saved profile's newest sign-ins; only a closed input stopped it gracefully.
+  A signal now ends the server the same way: Chrome is asked to close and given time to save the profile, then the command exits with code 130.
+- After the MCP server ends, a tool call still running gets an error instead of starting a new Chrome that nobody would stop.
+- A tab that closed before its page loaded was reported as the site's "Navigation timeout", so `ref verify-refs` could record a good reference as `dead`.
+  After a failed navigation ref now asks Chrome whether the tab still exists; if not, it is an error ("the tab closed before the page loaded"): `ref verify-refs` ends without writing, as for any tab failure, and `ref fetch` and `ref check-links` report it as that URL's error.
+- A Chrome that starts but answers its first request with an error (it went away) is reported as "Chrome started but answered with an error: <reason>", not as "did not answer"; a Chrome that stays silent says how long ref waited.
+- The saved-profile folder, and `.ref` above it, are created readable by their owner only (mode 0700) on macOS and Linux, not with the default permissions.
+  A folder that already exists keeps its permissions.
+- **Signed-in PDFs with the saved profile**: `ref fetch` (and `ref_fetch`) of a PDF behind a sign-in came back as `dead` (HTTP 403): Chrome had the session, but ref downloaded the file without it, sending only a `--cookies` file.
+  ref now downloads a PDF with the cookies Chrome has for that address, the saved profile's sessions included.
+- The README said `ref pdf` sees signed-in pages through the saved profile; it does not use the profile (it works without Chrome), and the README now says to use `ref fetch` for a PDF behind a sign-in.
+  The README also says that `localhost` and private addresses are opened and that signed-in browsing is subject to a site's terms of service.
+- One description everywhere in the repository: "Renders web pages and PDFs into compact JSON for LLM agents" (`--help`, the MCP server instructions, the crate docs and `.asimov/project.yaml`).
+- A page that only mentions `isAccessibleForFree: false` is no longer a `paywall`: the signal counts only in the page's JSON-LD or microdata, not in its text or other scripts.
+  ref's own GitHub page, whose README explains the signal, came back as a paywall.
+- A `main` element that holds exactly one `article` with at least a third of its text gives just that article as content, for `ref fetch` and `ref refresh-data`.
+  A GitHub repository page now starts with its README instead of the file list and the About, Stars and Forks sidebar.
 - **MCP with a saved profile**: `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` failed once `ref_fetch` had run, because each started a second Chrome on the profile the server's browser already held.
   They now share the server's browser.
 - The "profile is open in another Chrome" error names the possible holders (`ref login`, a running `ref mcp`, another ref command) instead of only `ref login`.
@@ -67,8 +83,6 @@ All notable changes to Möllendorff Ref.
 - **`verify-refs` with a failing Chrome** wrote every reference as `dead`, also when Chrome died in the middle of loading a page.
   Now it stops at the first Chrome failure with an error naming the URL, and leaves `references.yaml` as it was.
   The same holds when Chrome still answers but a tab cannot be opened: that says nothing about the URL either.
-- **`ref mcp` never answered a request** in builds after 1.9.0 (never released): the command line held standard input for the whole run, so the server could not read it.
-  Tests now also run ref as a real process ([ADR-006](docs/adr/ADR-006-PROCESS-LEVEL-TESTS.md)).
 - MCP calls with nothing to do (no URLs, nothing chosen, a missing file) answer without starting Chrome, so the real error is reported.
 - MCP `concurrency` / `parallel` values of 17 to 20 were quietly capped at 16 tabs; the shared browser now has 20.
 

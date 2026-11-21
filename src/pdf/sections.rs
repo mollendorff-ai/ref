@@ -43,14 +43,13 @@ pub(super) fn parse_sections(text: &str) -> Vec<Section> {
         let is_heading = heading_match.as_ref().is_some_and(|h| h.confidence >= 0.5);
 
         // "Content" placeholder (so "1. Introduction" on the first line is a heading)
-        if is_heading && sections.is_empty() && first_heading_pending && current_content.is_empty()
-        {
-            if let Some(hm) = heading_match {
-                current_heading = hm.text;
+        if sections.is_empty() && first_heading_pending && current_content.is_empty() {
+            if let Some(hm) = heading_match.as_ref().filter(|h| h.confidence >= 0.5) {
+                current_heading.clone_from(&hm.text);
                 current_level = hm.level;
+                first_heading_pending = false;
+                continue;
             }
-            first_heading_pending = false;
-            continue;
         }
         first_heading_pending = false;
 
@@ -101,6 +100,13 @@ pub(super) fn parse_sections(text: &str) -> Vec<Section> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_heading_with_no_text_after_it_makes_no_section() {
+        let sections = parse_sections("1. Introduction\n\nShort text.\n\n2. Results\n");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].heading, "1. Introduction");
+    }
 
     #[test]
     fn first_line_heading_names_the_first_section() {

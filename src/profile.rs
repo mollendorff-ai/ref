@@ -273,18 +273,21 @@ mod tests {
                     ("no-current-folder", "work/p"),
                     ("empty", " "),
                 ] {
-                    let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    // Captured, so the child's "test result:" line stays out of
+                    // this run's output (CI counts those lines)
+                    let child = std::process::Command::new(std::env::current_exe().unwrap())
                         .args([
                             "--exact",
                             "profile::tests::profile_option_beats_the_environment_variable",
                         ])
                         .env(CHILD, mode)
                         .env(PROFILE_ENV, value)
-                        .status()
+                        .output()
                         .unwrap();
+                    let shown = String::from_utf8_lossy(&child.stdout);
                     assert!(
-                        status.success(),
-                        "child run with {PROFILE_ENV}={value:?} failed"
+                        child.status.success(),
+                        "child run with {PROFILE_ENV}={value:?} failed: {shown}"
                     );
                 }
             }

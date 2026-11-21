@@ -53,7 +53,10 @@ Add to `.vscode/mcp.json`:
 ## Signed-in sites
 
 The MCP server uses ref's saved profile (`~/.ref/chrome-profile`) when it exists, so tools see the sites you signed in to with `ref login`.
+`ref_pdf` does not: it reads PDF files and downloads PDF URLs without Chrome.
+For a PDF behind a sign-in, call `ref_fetch` on its URL; it downloads the PDF with the cookies Chrome has for that address.
 Stop the server before running `ref login`, since only one Chrome can use the profile at a time.
+However the server ends (its input closes, Ctrl-C or SIGTERM), it asks its Chrome to close and waits for it, so the profile keeps its newest sign-ins; a tool call still running then gets an error and does not start a new Chrome.
 To use another profile, pass `--profile` (or set `REF_CHROME_PROFILE` in the server's environment); `--profile fresh` gives an empty, temporary profile:
 
 ```json
@@ -84,7 +87,6 @@ When the workspace is the filesystem root, file tools are refused.
 The server keeps one browser with up to 20 tabs, shared by every browser tool; each call uses at most its own `parallel` / `concurrency` value, calls running at the same time share the tabs, and every tab is closed when its page is done.
 Chrome starts on the first call that has pages to open.
 If Chrome crashes or hangs, the call that meets it gets a tool error saying "Chrome failed", and the next call starts a new Chrome on the same profile (see [ADR-005](adr/ADR-005-CHROME-LIFECYCLE.md)).
-When the server ends, because its input closes or on Ctrl-C or SIGTERM, it asks Chrome to close and gives it up to 30 seconds to save a saved profile; a call still running then gets a tool error instead of a new Chrome.
 Pages run with Chrome's cache off, so every call asks the sites again.
 Only `http` and `https` URLs are fetched.
 
@@ -103,7 +105,7 @@ Each page reports `status`, `http` and, when content was cut, `"truncated": true
 | `selector` | string | - | CSS selector to extract a specific element, skipping content heuristics |
 | `max_chars` | number | 5000 | Characters per section before it is cut and marked truncated (0 = no limit) |
 | `max_sections` | number | 50 | Sections per page before the rest are dropped and the page is marked truncated (0 = no limit) |
-| `user_agent` | string | Chrome's own plus ref's name | Exactly this user agent, for this call's pages and PDF downloads only (other calls are not affected). Some sites want a name and an email, for example SEC EDGAR: `Jane Doe jane@example.com` |
+| `user_agent` | string | Chrome's own | User agent for this call's pages and PDF downloads; SEC EDGAR, for one, answers 403 without a name and email |
 
 ```json
 {
@@ -111,6 +113,9 @@ Each page reports `status`, `http` and, when content was cut, `"truncated": true
   "timeout": 15000
 }
 ```
+
+A `user_agent` belongs to its call: calls running at the same time on the server's one Chrome each send their own, and a call without one sends Chrome's.
+A `user_agent` that is empty or holds a line break is refused before Chrome starts.
 
 ### ref_pdf
 
@@ -136,7 +141,7 @@ Validate URL health using headless Chrome.
 | `concurrency` | number | 5 | Parallel tabs (1-20) |
 | `timeout` | number | 15000 | Timeout per URL in ms |
 | `retries` | number | 1 | Retry count on failure |
-| `user_agent` | string | Chrome's own plus ref's name | Exactly this user agent, for this call's checks only |
+| `user_agent` | string | Chrome's own | User agent for this call's pages |
 
 ```json
 {

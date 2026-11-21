@@ -9,10 +9,10 @@
 
 ## Context
 
-On 2026-11-21 the final review of the ADR-005 work found that `ref mcp` never read a request.
+On 2026-11-21 a review of a branch that had moved `main` into `cli` found that `ref mcp` never read a request.
 `cli::main` passed `stdin().lock()` as the command's input and held the lock for the whole run, while the MCP server reads its requests through tokio, which takes the same lock on another thread.
 Every MCP client would have timed out.
-The bug had come in with moving `main` into `cli` and was never released.
+That branch was never released, and the code on `main` reads standard input through a `BufReader` that locks it only for each read; but nothing in the tests would have caught the hang, and that is the point of this ADR.
 
 The gate was green the whole time: 100% line coverage, pedantic lint, all tests passing.
 Two things let it through:

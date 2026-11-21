@@ -4,12 +4,10 @@
 //! structured data that says the article is not free, an overlay element
 //! that walls use, a password form, or wall wording on a page that has
 //! little readable text left.
-//! Words such as "paywall" inside a normal article do not count, and neither
-//! does a page that only quotes the structured-data signal in its text (a
-//! README about paywall detection, for example).
+//! Words such as "paywall" inside a normal article do not count.
 
 use regex::Regex;
-use scraper::{Html, Node, Selector};
+use scraper::{ElementRef, Html, Node, Selector};
 use std::sync::LazyLock;
 
 /// Pages with less visible text than this are treated as "walled" when they
@@ -95,53 +93,40 @@ pub fn detect(html: &str) -> Access {
     Access::Open
 }
 
-/// Schema.org `isAccessibleForFree: false`, the signal publishers give search
-/// engines: in JSON-LD, or as microdata or `RDFa` on an element. The words in a
-/// page's text or code blocks are not the signal.
+/// Schema.org `isAccessibleForFree: false`, the signal publishers give search engines.
+///
+/// It counts only where publishers put it: in a JSON-LD block or on a
+/// microdata property. A page that only mentions it, in its text or in other
+/// scripts (schema.org documentation, ref's own README on GitHub), is not walled.
 fn not_free_structured_data(doc: &Html) -> bool {
-    doc.select(&JSON_LD).any(|script| {
-        let text: String = script.text().collect();
-        // Malformed JSON-LD is read as text, as search engines are lenient too
-        serde_json::from_str::<serde_json::Value>(&text)
-            .map_or_else(|_| NOT_FREE_RE.is_match(&text), |json| not_free_json(&json))
-    }) || doc.select(&NOT_FREE_ELEMENT).any(|el| {
-        let text: String = el.text().collect();
-        is_false(el.attr("content").unwrap_or(&text))
-    })
+    doc.select(&SCRIPTS).any(json_ld_says_not_free) || doc.select(&FREE_PROPERTY).any(says_false)
 }
 
-/// JSON-LD (nested objects and lists too) with `"isAccessibleForFree"` false
-fn not_free_json(json: &serde_json::Value) -> bool {
-    match json {
-        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
-            (key == "isAccessibleForFree" && is_false_json(value)) || not_free_json(value)
-        }),
-        serde_json::Value::Array(items) => items.iter().any(not_free_json),
-        _ => false,
-    }
-}
+static SCRIPTS: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("script[type]").expect("constant selector"));
 
-fn is_false_json(value: &serde_json::Value) -> bool {
-    value == &serde_json::Value::Bool(false) || value.as_str().is_some_and(is_false)
-}
-
-fn is_false(text: &str) -> bool {
-    text.trim().eq_ignore_ascii_case("false")
-}
-
-static JSON_LD: LazyLock<Selector> = LazyLock::new(|| {
-    Selector::parse("script[type='application/ld+json' i]").expect("constant selector")
+static FREE_PROPERTY: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("[itemprop~='isAccessibleForFree']").expect("constant selector")
 });
 
-static NOT_FREE_ELEMENT: LazyLock<Selector> = LazyLock::new(|| {
-    Selector::parse("[itemprop='isAccessibleForFree'], [property='isAccessibleForFree']")
-        .expect("constant selector")
-});
-
-/// For JSON-LD that does not parse: the quoted key with a false value
-static NOT_FREE_RE: LazyLock<Regex> = LazyLock::new(|| {
+static NOT_FREE_JSON: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)"isAccessibleForFree"\s*:\s*"?false"#).expect("constant regex")
 });
+
+/// A `<script type="application/ld+json">` whose data says the page is not free
+fn json_ld_says_not_free(script: ElementRef<'_>) -> bool {
+    let json_ld = script
+        .attr("type")
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/ld+json"));
+    json_ld && NOT_FREE_JSON.is_match(&script.text().collect::<String>())
+}
+
+/// A microdata property whose value (its `content`, else its text) is `false`
+fn says_false(property: ElementRef<'_>) -> bool {
+    let text: String = property.text().collect();
+    let value = property.attr("content").unwrap_or(&text);
+    value.trim().eq_ignore_ascii_case("false")
+}
 
 fn any_element(doc: &Html, selectors: &[&str]) -> bool {
     selectors
@@ -315,48 +300,30 @@ mod tests {
         let meta = r#"<meta itemprop="isAccessibleForFree" content="false">"#;
         assert_eq!(detect(meta), Access::Paywall);
 
-        // As text of an element (RDFa), and nested in a list of parts
-        let text = r#"<span property="isAccessibleForFree"> False </span>"#;
-        assert_eq!(detect(text), Access::Paywall);
-        let parts = r#"<script type="application/ld+json">
-            {"@graph":[{"@type":"WebPage"},{"hasPart":[{"isAccessibleForFree":false}]}]}</script>"#;
-        assert_eq!(detect(parts), Access::Paywall);
-
-        // JSON that does not parse is still read as text
-        let broken =
-            r#"<script type="application/ld+json">{"isAccessibleForFree": false,}</script>"#;
-        assert_eq!(detect(broken), Access::Paywall);
-        let broken_free =
-            r#"<script type="application/ld+json">{"isAccessibleForFree": true,}</script>"#;
-        assert_eq!(detect(broken_free), Access::Open);
+        let span = r#"<span itemprop="isAccessibleForFree"> False </span>"#;
+        assert_eq!(detect(span), Access::Paywall);
 
         let free = r#"<script type="application/ld+json">{"isAccessibleForFree": true}</script>"#;
+        assert_eq!(detect(free), Access::Open);
+        let free = r#"<meta itemprop="isAccessibleForFree" content="true">"#;
         assert_eq!(detect(free), Access::Open);
     }
 
     #[test]
-    fn a_page_that_only_quotes_the_signal_is_open() {
-        // ref's own README on GitHub: the words are in its text and code
-        // blocks, not in the page's structured data (found 2026-11-16)
-        let quoted = long_article(
-            "<p>A page is a paywall when <code>isAccessibleForFree: false</code> is in its \
-             JSON-LD, as <code>\"isAccessibleForFree\": false</code>.</p>\
-             <pre>{\"isAccessibleForFree\": false}</pre>",
+    fn a_page_that_only_mentions_the_property_is_open() {
+        // Its text quotes the property, as ref's own README does
+        let prose = long_article(
+            "<p>A page is a paywall with <code>isAccessibleForFree: false</code> data.</p>",
         );
-        assert_eq!(detect(&quoted), Access::Open);
-        // A script that is not JSON-LD, and an element that only mentions it
-        let other = long_article(
-            "<script>var s = {\"isAccessibleForFree\": false};</script>\
-             <p itemprop='description'>isAccessibleForFree: false</p>\
-             <meta itemprop='isAccessibleForFree' content='true'>",
+        assert_eq!(detect(&prose), Access::Open);
+        // So does a script that is not JSON-LD (GitHub embeds the README in one)
+        let data = long_article(
+            r#"<script type="application/json">{"md":"\"isAccessibleForFree\": false"}</script>"#,
         );
-        assert_eq!(detect(&other), Access::Open);
-        // The JSON-LD says the page is free, and quotes the other case in a value
-        let free = long_article(
-            r#"<script type="application/ld+json">{"isAccessibleForFree": true,
-               "description": "uses \"isAccessibleForFree\": false for paywalls"}</script>"#,
-        );
-        assert_eq!(detect(&free), Access::Open);
+        assert_eq!(detect(&data), Access::Open);
+        // And an attribute that is not microdata
+        let attr = long_article(r#"<p data-x="isAccessibleForFree" content="false">x</p>"#);
+        assert_eq!(detect(&attr), Access::Open);
     }
 
     #[test]

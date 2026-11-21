@@ -1,7 +1,7 @@
-//! Möllendorff Ref: LLM-optimized reference toolkit
+//! Möllendorff Ref: renders web pages and PDFs into compact JSON for LLM agents.
 //!
 //! JSON output for agents, not humans.
-//! Renders pages in headless Chrome, including JavaScript-heavy sites.
+//! Pages are rendered in headless Chrome, including JavaScript-heavy sites.
 
 pub mod access;
 pub mod browser;

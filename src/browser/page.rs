@@ -2,17 +2,15 @@
 
 use super::{page_failure, Chrome, ChromeFailed, CLOSE_ACK_LIMIT};
 use anyhow::{Context, Result};
-use chromiumoxide::cdp::browser_protocol::network::{EventResponseReceived, ResourceType};
+use chromiumoxide::cdp::browser_protocol::network::{
+    Cookie, EventResponseReceived, GetCookiesParams, ResourceType,
+};
 use chromiumoxide::cdp::browser_protocol::page::EventLifecycleEvent;
+use chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
 use chromiumoxide::Page;
 use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
-
-/// The error when a tab fails, not the page in it, while Chrome itself answers
-const TAB_GONE: &str =
-    "The tab was closed or stopped answering, so this says nothing about the URL \
-     (Chrome itself still answers)";
 
 /// Default wait time for network idle (ms) - how long to wait for `networkIdle` event
 const NETWORK_IDLE_TIMEOUT_MS: u64 = 10000;
@@ -102,9 +100,7 @@ impl BrowserPage {
         // The budget of an earlier navigation is spent: forget it, so reads
         // after this one (also a failed one) get a budget of their own
         *self.reads_until() = None;
-        // Subscribe to lifecycle and response events BEFORE navigation. A
-        // failure here, while Chrome answers, is the tab's (it was closed or
-        // crashed, or stopped answering), never the URL's
+        // Subscribe to lifecycle and response events BEFORE navigation
         let until = tokio::time::Instant::now() + self.chrome.request_timeout;
         let mut lifecycle = self
             .chrome
@@ -112,14 +108,14 @@ impl BrowserPage {
                 self.page.event_listener::<EventLifecycleEvent>().await
             })
             .await
-            .context(TAB_GONE)?;
+            .context("Failed to subscribe to lifecycle events")?;
         let mut responses = self
             .chrome
             .ask(until, "subscribing to responses", async {
                 self.page.event_listener::<EventResponseReceived>().await
             })
             .await
-            .context(TAB_GONE)?;
+            .context("Failed to subscribe to network responses")?;
 
         // Start navigation with overall timeout
         let nav_result =
@@ -139,11 +135,9 @@ impl BrowserPage {
             if error.is::<ChromeFailed>() {
                 return Err(error);
             }
-            // A tab closed from outside, before or during navigation, says
-            // nothing about the URL; a crashed tab is still there, and is the
-            // page's failure (rule 3)
-            if !self.chrome.has_tab(self.page.target_id()).await {
-                return Err(anyhow::anyhow!(TAB_GONE));
+            // Nor is a tab that closed: it could not load anything (rule 3)
+            if !self.is_open().await? {
+                anyhow::bail!("the tab closed before the page loaded");
             }
             return Ok(PageResult::failed(error.to_string()));
         }
@@ -180,6 +174,24 @@ impl BrowserPage {
             title,
             error: None,
         })
+    }
+
+    /// Whether this tab still exists in Chrome
+    ///
+    /// # Errors
+    /// Returns [`ChromeFailed`] when Chrome failed.
+    async fn is_open(&self) -> Result<bool> {
+        let until = tokio::time::Instant::now() + self.chrome.request_timeout;
+        let listing = self.chrome.ask_browser(until, "listing tabs", |browser| {
+            Box::pin(browser.execute(GetTargetsParams::default()))
+        });
+        let mine = self.page.target_id();
+        Ok(listing
+            .await?
+            .result
+            .target_infos
+            .iter()
+            .any(|t| &t.target_id == mine))
     }
 
     /// Wait for `networkIdle` lifecycle event with timeout
@@ -224,6 +236,23 @@ impl BrowserPage {
             .context("Failed to get page content")
     }
 
+    /// The `Cookie` header Chrome would send to `url`: the saved profile's
+    /// sessions and any `--cookies` file. `None` when Chrome has none for it,
+    /// or cannot say (the page's failure, not Chrome's).
+    ///
+    /// # Errors
+    /// Returns [`ChromeFailed`] when Chrome failed.
+    pub async fn cookie_header(&self, url: &str) -> Result<Option<String>> {
+        let request = self
+            .page
+            .execute(GetCookiesParams::builder().url(url).build());
+        let answer = self
+            .chrome
+            .ask(self.read_deadline(), "reading cookies", request);
+        let cookies = page_failure(answer.await)?.ok();
+        Ok(cookies.and_then(|answer| cookie_line(&answer.result.cookies)))
+    }
+
     /// Get current URL (after redirects); `None` when Chrome does not say
     ///
     /// # Errors
@@ -234,6 +263,15 @@ impl BrowserPage {
             .ask(self.read_deadline(), "reading the address", self.page.url());
         Ok(page_failure(address.await)?.ok().flatten())
     }
+}
+
+/// Cookies as one `Cookie` header value (`a=1; b=2`); `None` when there are none
+fn cookie_line(cookies: &[Cookie]) -> Option<String> {
+    let pairs: Vec<String> = cookies
+        .iter()
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect();
+    (!pairs.is_empty()).then(|| pairs.join("; "))
 }
 
 /// A `Document` response seen during navigation

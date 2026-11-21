@@ -2,7 +2,7 @@ identity:
   name: "ref"
   type: rust
 
-description: "Renders web pages and PDFs into compact JSON for LLM agents"
+description: "Renders web pages and PDFs into compact JSON for LLM agents. CLI and MCP server; web pages go through headless Chrome, PDFs give tables, headings and text. Single static binary; needs Chrome or Chromium installed."
 
 stack:
   - "chromiumoxide (headless Chrome)"

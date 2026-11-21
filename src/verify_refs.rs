@@ -254,7 +254,6 @@ fn compute_summary(total: usize, skipped: usize, statuses: &[Status]) -> VerifyS
 }
 
 /// Result of verifying a single URL
-#[derive(Debug)]
 struct VerifyResult {
     status: Status,
     notes: Option<String>,
@@ -278,16 +277,19 @@ async fn verify_url(pool: &BrowserPool, url: &str, timeout: u64) -> Result<Verif
         });
     }
     let page = pool.new_page().await.context("Could not open a tab")?;
-    verify_in(&page, url, timeout).await
+    verify_on(&page, url, timeout).await
 }
 
-/// Verify one URL in a tab already open
-async fn verify_in(
+/// [`verify_url`] on a tab already open. A tab that cannot load anything any
+/// more (it closed) says nothing about the URL, so it is an error, never a
+/// dead reference; a Chrome failure stays a [`ChromeFailed`](crate::browser::ChromeFailed).
+async fn verify_on(
     page: &crate::browser::BrowserPage,
     url: &str,
     timeout: u64,
 ) -> Result<VerifyResult> {
-    let nav = page.goto(url, timeout).await?;
+    let loaded = page.goto(url, timeout).await;
+    let nav = loaded.context("The tab was gone before it could load the page")?;
     judge(page, url, nav).await
 }
 
@@ -481,21 +483,22 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_tab_that_dies_before_navigation_is_no_fact_about_the_url() {
-        // Needs Chrome (ADR-004). The tab ends between opening and navigation
-        // while Chrome is fine: an error that names the tab, so the run ends
-        // and nothing is written (ADR-005 rule 3), never a dead reference
-        let pool = crate::browser::BrowserPool::new(1, crate::browser::tests::FRESH)
+    async fn a_tab_gone_before_navigation_is_an_error_that_says_so() {
+        // Needs Chrome (ADR-004). Chrome is fine; the closed tab says nothing
+        // about the URL, so the reference must not become dead (ADR-005 rule 3).
+        let pool = BrowserPool::new(1, Some(&crate::profile::ProfileChoice::Fresh))
             .await
             .unwrap();
         let page = pool.new_page().await.unwrap();
-        page.end_tab_in_chrome().await;
-        let site = crate::test_server::serve();
-        let err = verify_in(&page, &format!("{site}/report"), 5000).await;
-        let err = err.expect_err("the tab is gone");
+        page.close_tab().await;
+        let err = verify_on(&page, "http://127.0.0.1:9/", 5000).await;
+        let err = err.err().expect("a closed tab is an error, not a status");
         assert!(!err.is::<crate::browser::ChromeFailed>(), "{err:#}");
-        assert!(err.to_string().starts_with("The tab was closed"), "{err:#}");
-        assert!(pool.is_alive().await);
+        let err = format!("{err:#}");
+        assert!(
+            err.starts_with("The tab was gone before it could load the page"),
+            "{err}"
+        );
         drop(page);
         pool.stop().await;
     }

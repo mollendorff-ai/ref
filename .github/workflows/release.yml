@@ -16,12 +16,12 @@ jobs:
     name: Test before release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust (same pinned version as CI lint)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
           components: rustfmt, clippy
 
       # A release must pass the same gates as main
@@ -31,14 +31,11 @@ jobs:
       - name: Clippy (pedantic, all targets)
         run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
 
-      - name: Run unit tests
-        run: cargo test
-
       - name: Verify Chrome
         run: google-chrome-stable --version
 
-      - name: Run e2e tests
-        run: cargo test -- --ignored
+      - name: Run tests
+        run: cargo test
 
   build:
     name: Build ${{ matrix.target }}
@@ -79,7 +76,7 @@ jobs:
             cross: false
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -95,7 +92,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -159,7 +156,7 @@ jobs:
       id-token: write       # sign the attestation with the workflow's OIDC identity
       attestations: write   # store it on the repository
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -236,7 +233,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: release
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

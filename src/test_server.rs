@@ -290,6 +290,12 @@ fn route(path: &str) -> (&'static str, String, String) {
             "Set-Cookie: session=kept-between-runs; Max-Age=3600; Path=/\r\n".to_string(),
             page("Signed in", "<p>You are now signed in to this test site.</p>"),
         ),
+        // Signs in for /signed-in.pdf, like a members' area that hands out PDFs
+        "/pdf-sign-in" => (
+            "200 OK",
+            "Set-Cookie: sid=letmein; Max-Age=3600; Path=/\r\n".to_string(),
+            page("Signed in", "<p>You can now read the members' PDF.</p>"),
+        ),
         "/moved" => ("301 Moved Permanently", "Location: /report\r\n".to_string(), String::new()),
         "/broken" => ("500 Internal Server Error", String::new(), page("Oops", "<p>Server error page.</p>")),
         _ => ("404 Not Found", String::new(), page("Not found", "<p>Nothing here.</p>")),
@@ -362,7 +368,14 @@ pub(crate) async fn ref_cmd_with_input(args: &[&str], input: &str) -> (ExitCode,
         .map(Into::into)
         .collect();
     let stop = Box::pin(std::future::pending());
-    let code = crate::cli::execute(line, &mut input.as_bytes(), &mut out, &mut err, stop).await;
+    let code = crate::cli::execute(
+        line,
+        Box::new(std::io::Cursor::new(input.to_owned())),
+        &mut out,
+        &mut err,
+        stop,
+    )
+    .await;
     let text = |bytes: Vec<u8>| String::from_utf8_lossy(&bytes).into_owned();
     (code, text(out), text(err))
 }
@@ -384,21 +397,18 @@ pub(crate) async fn fetch_with_profile(profile: &str, args: &[&str]) -> (ExitCod
 }
 
 pub(crate) fn all_content(page: &Value) -> String {
-    page["sections"]
-        .as_array()
-        .map(|s| {
-            s.iter()
-                .map(|x| {
-                    format!(
-                        "{} {}",
-                        x["heading"].as_str().unwrap_or(""),
-                        x["content"].as_str().unwrap_or("")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default()
+    page["sections"].as_array().map_or_else(String::new, |s| {
+        s.iter()
+            .map(|x| {
+                format!(
+                    "{} {}",
+                    x["heading"].as_str().unwrap_or(""),
+                    x["content"].as_str().unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 #[cfg(test)]
@@ -407,6 +417,6 @@ mod tests {
     #[should_panic(expected = "invalid JSON")]
     async fn fetch_says_when_ref_printed_no_json() {
         // Refused before Chrome starts, so ref prints an error and no JSON
-        super::fetch(&["--user-agent", " ", "https://example.com"]).await;
+        drop(super::fetch(&["--user-agent", " ", "https://example.com"]).await);
     }
 }

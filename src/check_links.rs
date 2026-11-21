@@ -2,7 +2,7 @@
 //!
 //! LLM-optimized output - JSON compact only.
 
-use crate::browser::{page_failure, BrowserPool, PageResult};
+use crate::browser::{page_failure, validate_user_agent, BrowserPool, PageResult};
 use crate::extract::extract_urls;
 use crate::text::truncate;
 use anyhow::{Context, Result};
@@ -109,7 +109,7 @@ pub struct LinkReport {
 /// Returns `Ok(false)` when any link failed.
 pub async fn run_check_links(
     args: CheckLinksArgs,
-    input: &mut dyn BufRead,
+    input: crate::cli::Input,
     out: &mut dyn std::io::Write,
 ) -> Result<bool> {
     let urls = get_urls(&args, input).await?;
@@ -144,17 +144,23 @@ pub async fn run_check_links(
 }
 
 /// Get URLs from file, --url, or stdin
-async fn get_urls(args: &CheckLinksArgs, input: &mut dyn BufRead) -> Result<Vec<String>> {
+async fn get_urls(args: &CheckLinksArgs, input: crate::cli::Input) -> Result<Vec<String>> {
     if let Some(url) = &args.url {
         return Ok(vec![url.clone()]);
     }
 
     if args.stdin {
-        let urls: Vec<String> = input
-            .lines()
-            .map_while(Result::ok)
-            .filter(|line| line.starts_with("http"))
-            .collect();
+        // Read away from the thread that waits for the stop signal, so Ctrl-C
+        // ends the run even while no input arrives
+        let urls: Vec<String> = crate::task::isolated(async move {
+            input
+                .lines()
+                .map_while(Result::ok)
+                .filter(|line| line.starts_with("http"))
+                .collect()
+        })
+        .await
+        .map_err(anyhow::Error::msg)?;
         return Ok(urls);
     }
 
@@ -179,18 +185,20 @@ async fn get_urls(args: &CheckLinksArgs, input: &mut dyn BufRead) -> Result<Vec<
 /// Returns error if Chrome fails to launch, fails while checking
 /// ([`ChromeFailed`](crate::browser::ChromeFailed)), or the user agent is invalid.
 pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<LinkReport> {
-    let mut pool = BrowserPool::new(config.concurrency, config.profile.as_ref()).await?;
-    if let Some(ua) = &config.user_agent {
-        pool.set_user_agent(ua)?;
-    }
-    let pool = Arc::new(pool);
+    // Checked before Chrome starts
+    let agent = config
+        .user_agent
+        .as_deref()
+        .map(validate_user_agent)
+        .transpose()?;
+    let pool = Arc::new(BrowserPool::new(config.concurrency, config.profile.as_ref()).await?);
     let report = check_links_with(
         &pool,
         urls,
         config.concurrency,
         config.timeout_ms,
         config.retries,
-        None,
+        agent.as_deref(),
     )
     .await;
     pool.stop().await;
@@ -199,8 +207,7 @@ pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<L
 
 /// Check links in a browser the caller already has, such as the MCP server's
 /// shared one, at most `concurrency` at once, each on a task of its own so a
-/// panic on one URL becomes that URL's error. `user_agent` (already checked by
-/// `validate_user_agent`) is sent for these checks alone.
+/// panic on one URL becomes that URL's error.
 ///
 /// # Errors
 /// Returns [`ChromeFailed`](crate::browser::ChromeFailed) when Chrome fails,
@@ -211,12 +218,13 @@ pub async fn check_links_with(
     concurrency: usize,
     timeout_ms: u64,
     retries: u8,
-    user_agent: Option<&str>,
+    agent: Option<&str>,
 ) -> Result<LinkReport> {
-    let agent = user_agent.map(str::to_string);
+    let agent = agent.map(str::to_string);
     let results: Vec<LinkResult> = futures::stream::iter(urls.to_vec())
         .map(|url| {
-            let (pool, agent) = (Arc::clone(pool), agent.clone());
+            let pool = Arc::clone(pool);
+            let agent = agent.clone();
             async move {
                 let checked =
                     crate::task::isolated({
@@ -342,6 +350,33 @@ mod tests {
         assert_eq!(report["results"].as_array().unwrap().len(), 1, "{out}");
         assert_eq!(report["ok"], 1);
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    /// Ctrl-C while `--stdin` waits for input that never comes: the run ends
+    /// with 130 instead of waiting on, because the wait is on a thread of its own.
+    /// (Needs a runtime with worker threads: the waiting thread is one of them.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_stop_signal_ends_a_run_that_waits_for_input() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let stop = async {
+            // Only after the run has started to wait on the pipe
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        };
+        let code = crate::cli::execute(
+            ["ref", "check-links", "--profile", "fresh", "--stdin"]
+                .map(Into::into)
+                .to_vec(),
+            Box::new(std::io::BufReader::new(reader)),
+            &mut out,
+            &mut err,
+            Box::pin(stop),
+        )
+        .await;
+        assert_eq!(code, ExitCode::from(130));
+        assert_eq!(String::from_utf8_lossy(&err), "Interrupted.\n");
+        // Closing the pipe lets the waiting thread end
+        drop(writer);
     }
 
     #[tokio::test]

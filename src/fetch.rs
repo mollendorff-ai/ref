@@ -4,7 +4,7 @@
 //! JSON compact output only. No YAML, no pretty printing.
 
 use crate::access::{self, Access};
-use crate::browser::BrowserPool;
+use crate::browser::{validate_user_agent, BrowserPool};
 pub use crate::content::Section;
 use crate::content::{self, DEFAULT_MAX_SECTIONS};
 use crate::text::{cut_at_word, truncate};
@@ -82,8 +82,8 @@ pub struct FetchOptions {
     pub max_chars: usize,
     /// Sections per page (0 = no limit)
     pub max_sections: usize,
-    /// This user agent, exactly, for this page and its PDF download, in place
-    /// of the browser's (already checked by `validate_user_agent`)
+    /// User agent for this request's pages and downloads instead of the
+    /// browser's own; checked with [`validate_user_agent`] first
     pub user_agent: Option<String>,
 }
 
@@ -177,10 +177,13 @@ pub async fn run_fetch(args: FetchArgs, out: &mut dyn std::io::Write) -> Result<
         parallel
     );
 
+    // Checked before Chrome starts
+    let user_agent = args
+        .user_agent
+        .as_deref()
+        .map(validate_user_agent)
+        .transpose()?;
     let mut pool = BrowserPool::new(parallel, args.profile.choice()?.as_ref()).await?;
-    if let Some(ua) = &args.user_agent {
-        pool.set_user_agent(ua)?;
-    }
     if let Some(path) = &args.cookies {
         let text = tokio::fs::read_to_string(path)
             .await
@@ -196,7 +199,7 @@ pub async fn run_fetch(args: FetchArgs, out: &mut dyn std::io::Write) -> Result<
         selector: args.selector,
         max_chars: args.max_chars,
         max_sections: args.max_sections,
-        user_agent: None,
+        user_agent,
     });
 
     // Spawn parallel fetch tasks
@@ -261,8 +264,7 @@ pub(crate) async fn fetch_one(
 async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Result<Page> {
     crate::guard::check_web_url(url).map_err(|e| anyhow!(e))?;
 
-    let agent = options.user_agent.as_deref();
-    let page = pool.new_page_as(agent).await?;
+    let page = pool.new_page_as(options.user_agent.as_deref()).await?;
     let nav = page.goto(url, options.timeout).await?;
 
     if let Some(error) = nav.error {
@@ -275,9 +277,12 @@ async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Re
 
     // A PDF opens in Chrome's viewer, which has no readable HTML: extract it instead
     if nav.mime.as_deref() == Some("application/pdf") && nav.status.is_some_and(|c| c < 400) {
+        // Same user agent and cookies as Chrome (the saved profile's sessions
+        // and any --cookies file), so a signed-in PDF downloads too
+        let cookie = page.cookie_header(url).await?;
         drop(page);
-        // Same user agent and cookies as Chrome, so a signed-in PDF downloads too
-        let headers = pool.download_headers_as(url, agent);
+        let mut headers = pool.download_headers(url, options.user_agent.as_deref());
+        headers.cookie = cookie.or(headers.cookie);
         let mut pdf = crate::pdf::extract_pdf_from_url_with(url, &headers)
             .await
             .base;
@@ -303,7 +308,7 @@ async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Re
     let html = page.content().await?;
     let mut parsed = parse_page(&html, url, options);
     apply_http_status(&mut parsed, nav.status);
-    if nav.status == Some(403) && agent.is_none() && !pool.has_custom_user_agent() {
+    if nav.status == Some(403) && options.user_agent.is_none() {
         parsed.alerts.insert(1, USER_AGENT_HINT.to_string());
     }
     Ok(parsed)
@@ -393,12 +398,12 @@ pub(crate) fn parse_page(html: &str, url: &str, options: &FetchOptions) -> Page 
             alerts.push(format!(
                 "Selector {sel_str:?} {why}; returned the main content instead"
             ));
-            extract_main_content(&doc)
+            content::main_content(&doc)
         }
     } else if raw {
         html.to_string()
     } else {
-        extract_main_content(&doc)
+        content::main_content(&doc)
     };
 
     let content_doc = Html::parse_document(&content_html);
@@ -510,36 +515,6 @@ fn detect_status(html: &str) -> PageStatus {
         Access::Paywall => PageStatus::Paywall,
         Access::Login => PageStatus::Login,
     }
-}
-
-pub(crate) fn extract_main_content(doc: &Html) -> String {
-    // Priority: a rendered README or wiki page (GitHub's `article.markdown-body`,
-    // where `main` also holds repository navigation, About, Stars and Forks,
-    // which come first and repeat after it) > main > article > [role=main] > body
-    let selectors = [
-        "article.markdown-body",
-        "main",
-        "article",
-        "[role='main']",
-        ".post-content",
-        ".article-content",
-        ".entry-content",
-        "#content",
-        ".content",
-    ];
-
-    for sel_str in selectors {
-        if let Some(el) = doc.select(&selector(sel_str)).next() {
-            return el.html();
-        }
-    }
-
-    // Fallback: the whole body; page chrome (nav, header, footer, aside,
-    // forms) is skipped later by content::extract_sections
-    doc.select(&selector("body"))
-        .next()
-        .map(|body| body.html())
-        .unwrap_or_default()
 }
 
 /// Content links, deduplicated; the flag is true when more than [`MAX_LINKS`] were found
@@ -773,43 +748,6 @@ mod tests {
     }
 
     #[test]
-    fn a_github_readme_wins_over_the_repository_sidebar() {
-        // Shaped like github.com/<owner>/<repo> (found 2026-11-16): the README
-        // is inside <main>, with navigation before it and the sidebar around it
-        let sidebar = "<h2>About</h2><p>Renders web pages.</p><h3>Stars</h3><p>1</p>";
-        let html = format!(
-            "<html><head><title>GitHub - o/r</title></head><body><main>\
-             <h2>Repository navigation</h2><ul><li>Code</li><li>Issues</li></ul>\
-             <p>You must be signed in to star a repository</p>{sidebar}\
-             <article class='markdown-body entry-content' itemprop='text'>\
-             <h1>The README</h1><p>What the project does.</p><h2>Install</h2><p>Run it.</p>\
-             <p>A paywall is <code>isAccessibleForFree: false</code> in JSON-LD.</p></article>\
-             {sidebar}</main></body></html>"
-        );
-        let page = parsed(&html);
-        assert_eq!(page.status, PageStatus::Ok);
-        let headings: Vec<&str> = page.sections.iter().map(|s| s.heading.as_str()).collect();
-        assert_eq!(headings, ["The README", "Install"]);
-        // Without the README, the page is read as before
-        let plain = html.replace("markdown-body", "other");
-        let headings: Vec<String> = parsed(&plain)
-            .sections
-            .iter()
-            .map(|s| s.heading.clone())
-            .collect();
-        assert!(
-            headings.contains(&"Repository navigation".to_string()),
-            "{headings:?}"
-        );
-        // Comments on an issue are not a README: the whole page is kept
-        let issue = "<html><body><main><div class='markdown-body'><p>Issue text.</p></div>\
-                     <div class='markdown-body'><p>A comment.</p></div></main></body></html>";
-        let issue = parsed(issue);
-        let text: Vec<&str> = issue.sections.iter().map(|s| s.content.as_str()).collect();
-        assert!(text.join(" ").contains("A comment."), "{text:?}");
-    }
-
-    #[test]
     fn walls_are_named_in_the_alerts() {
         let walled = "<html><head><script type='application/ld+json'>{\"isAccessibleForFree\": false}</script></head><body><p>Subscribe.</p></body></html>";
         let page = parsed(walled);
@@ -838,7 +776,8 @@ mod tests {
             "{:?}",
             page.alerts
         );
-        assert!(!page.sections.is_empty());
+        // The fallback returned the page's one paragraph
+        assert_eq!(page.sections.len(), 1);
     }
 
     #[test]
@@ -1121,6 +1060,60 @@ mod tests {
             !wrong["alerts"].to_string().contains("try --user-agent"),
             "{wrong}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_pdf_that_cannot_be_read_stays_dead_and_says_why() {
+        // Needs Chrome (ADR-004): Chrome calls it a PDF, the download is not one
+        let base = serve();
+        let (code, page) = fetch(&[&format!("{base}/text.pdf")]).await;
+        assert_eq!(page["status"], "dead", "{page}");
+        assert!(page["http"].is_null(), "{page}");
+        let alerts = page["alerts"].to_string();
+        assert!(alerts.contains("PDF detected"), "{alerts}");
+        assert!(alerts.contains("PDF extraction failed"), "{alerts}");
+        assert_eq!(code, ExitCode::from(1));
+    }
+
+    #[test]
+    fn the_truncation_alert_names_only_the_limits_that_are_on() {
+        let on = truncation_alert(&FetchOptions::default());
+        assert!(on.contains("characters per section"), "{on}");
+        assert!(
+            on.contains(&format!("{DEFAULT_MAX_SECTIONS} sections")),
+            "{on}"
+        );
+        let off = truncation_alert(&FetchOptions {
+            max_chars: 0,
+            max_sections: 0,
+            ..FetchOptions::default()
+        });
+        assert!(!off.contains("characters per section"), "{off}");
+        assert!(
+            !off.contains(&format!("{DEFAULT_MAX_SECTIONS} sections")),
+            "{off}"
+        );
+        assert!(off.contains("code blocks"), "{off}");
+    }
+
+    #[tokio::test]
+    async fn signed_in_pdf_downloads_with_the_saved_profiles_session() {
+        // Needs Chrome (ADR-004): Chrome holds the session, ref downloads the PDF
+        let base = serve();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let profile = dir.path().join("profile");
+        let profile = profile.to_str().expect("path");
+        let pdf = format!("{base}/signed-in.pdf");
+
+        let (_, before) = fetch_with_profile(profile, &[&pdf]).await;
+        assert_eq!(before["status"], "dead", "{before}");
+        let (_, signed_in) = fetch_with_profile(profile, &[&format!("{base}/pdf-sign-in")]).await;
+        assert_eq!(signed_in["status"], "ok", "{signed_in}");
+
+        let (code, after) = fetch_with_profile(profile, &[&pdf]).await;
+        assert_eq!(after["status"], "ok", "{after}");
+        assert!(all_content(&after).contains("signed-in readers"), "{after}");
+        assert_eq!(code, ExitCode::SUCCESS);
     }
 
     #[tokio::test]

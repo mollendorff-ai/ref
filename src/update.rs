@@ -11,6 +11,7 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const GITHUB_REPO: &str = "mollendorff-ai/ref";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -38,12 +39,30 @@ struct Asset {
     browser_download_url: String,
 }
 
+/// How long `ref update` waits for GitHub, so a silent server cannot hang it
+#[derive(Clone, Copy)]
+struct Limits {
+    /// To open a connection
+    connect: Duration,
+    /// For the whole request for the release description (a small JSON file)
+    release: Duration,
+    /// For the whole download of one file (the archive is a few megabytes)
+    download: Duration,
+}
+
+const GITHUB_LIMITS: Limits = Limits {
+    connect: Duration::from_secs(15),
+    release: Duration::from_secs(30),
+    download: Duration::from_mins(5),
+};
+
 /// Where an update comes from and where it goes: GitHub and the running
 /// binary, or, in tests, a fake GitHub and a scratch folder.
 struct Source {
     latest_release_url: String,
     exe: PathBuf,
     temp_root: PathBuf,
+    limits: Limits,
 }
 
 /// # Errors
@@ -61,6 +80,7 @@ impl Source {
             ),
             exe: env::current_exe().context("Failed to get current executable path")?,
             temp_root: env::temp_dir(),
+            limits: GITHUB_LIMITS,
         })
     }
 }
@@ -69,7 +89,7 @@ async fn update_from(source: &Source, args: &UpdateArgs, out: &mut dyn Write) ->
     eprintln!("Current version: {CURRENT_VERSION}");
     eprintln!("Checking for updates...");
 
-    let release = fetch_latest_release(&source.latest_release_url).await?;
+    let release = fetch_latest_release(&source.latest_release_url, &source.limits).await?;
     let latest_version = release.tag_name.trim_start_matches('v');
 
     eprintln!("Latest version: {latest_version}");
@@ -117,7 +137,8 @@ async fn update_from(source: &Source, args: &UpdateArgs, out: &mut dyn Write) ->
         .temp_root
         .join(format!("ref-update-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).context("Failed to create temp folder")?;
-    let installed = download_and_install(asset, checksums, &temp_dir, &source.exe).await;
+    let installed =
+        download_and_install(asset, checksums, &temp_dir, &source.exe, &source.limits).await;
     let _ = fs::remove_dir_all(&temp_dir);
     installed?;
 
@@ -140,10 +161,11 @@ async fn download_and_install(
     checksums: &Asset,
     temp_dir: &Path,
     exe: &Path,
+    limits: &Limits,
 ) -> Result<()> {
     eprintln!("Downloading {}...", asset.name);
-    let archive = download_bytes(&asset.browser_download_url).await?;
-    let sums = download_bytes(&checksums.browser_download_url).await?;
+    let archive = download_bytes(&asset.browser_download_url, limits).await?;
+    let sums = download_bytes(&checksums.browser_download_url, limits).await?;
 
     let expected = expected_checksum(&String::from_utf8_lossy(&sums), &asset.name)
         .with_context(|| format!("checksums.txt has no entry for {}", asset.name))?;
@@ -165,10 +187,19 @@ async fn download_and_install(
     install_binary(&binary_path, exe)
 }
 
-async fn fetch_latest_release(url: &str) -> Result<Release> {
-    let client = reqwest::Client::builder()
+/// One client for every request of `ref update`: it names itself and gives up
+/// after `connect` to open a connection or `total` for the whole request.
+fn client(connect: Duration, total: Duration) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
         .user_agent("ref-update")
-        .build()?;
+        .connect_timeout(connect)
+        .timeout(total)
+        .build()
+        .context("Failed to create the HTTP client")
+}
+
+async fn fetch_latest_release(url: &str, limits: &Limits) -> Result<Release> {
+    let client = client(limits.connect, limits.release)?;
 
     let response = client
         .get(url)
@@ -188,10 +219,8 @@ async fn fetch_latest_release(url: &str) -> Result<Release> {
     Ok(release)
 }
 
-async fn download_bytes(url: &str) -> Result<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .user_agent("ref-update")
-        .build()?;
+async fn download_bytes(url: &str, limits: &Limits) -> Result<Vec<u8>> {
+    let client = client(limits.connect, limits.download)?;
 
     let response = client.get(url).send().await.context("Failed to download")?;
 
@@ -437,10 +466,21 @@ mod tests {
 
     impl Run {
         async fn update(&self, url: &str, check: bool, force: bool) -> Result<serde_json::Value> {
+            self.update_within(url, check, force, GITHUB_LIMITS).await
+        }
+
+        async fn update_within(
+            &self,
+            url: &str,
+            check: bool,
+            force: bool,
+            limits: Limits,
+        ) -> Result<serde_json::Value> {
             let source = Source {
                 latest_release_url: url.to_string(),
                 exe: self.exe.clone(),
                 temp_root: self.dir.path().to_path_buf(),
+                limits,
             };
             let mut out = Vec::new();
             update_from(&source, &UpdateArgs { check, force }, &mut out).await?;
@@ -593,6 +633,62 @@ mod tests {
         assert_eq!(err, "Download failed: 404 Not Found");
     }
 
+    /// Limits short enough for a test; the server answers after 30 s
+    const QUICK: Limits = Limits {
+        connect: Duration::from_secs(5),
+        release: Duration::from_millis(300),
+        download: Duration::from_millis(300),
+    };
+    const SILENCE: Duration = Duration::from_secs(30);
+
+    #[tokio::test]
+    async fn a_github_that_never_answers_with_the_release_is_given_up_on() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(ResponseTemplate::new(200).set_delay(SILENCE))
+            .mount(&server)
+            .await;
+        let run = installed();
+        let started = std::time::Instant::now();
+        let url = format!("{}/latest", server.uri());
+        let err = run.update_within(&url, true, false, QUICK).await;
+        let err = format!("{:#}", err.unwrap_err());
+        assert!(err.starts_with("Failed to fetch release info"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(10), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_download_that_never_arrives_is_given_up_on() {
+        let server = MockServer::start().await;
+        let slow = format!("{}/slow", server.uri());
+        let release = serde_json::json!({
+            "tag_name": "v99.0.0",
+            "assets": [
+                {"name": archive_name(), "browser_download_url": slow},
+                {"name": "checksums.txt", "browser_download_url": slow},
+            ],
+        });
+        Mock::given(method("GET"))
+            .and(path("/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(release))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(ResponseTemplate::new(200).set_delay(SILENCE))
+            .mount(&server)
+            .await;
+        let run = installed();
+        let started = std::time::Instant::now();
+        let url = format!("{}/latest", server.uri());
+        let err = run.update_within(&url, false, false, QUICK).await;
+        let err = format!("{:#}", err.unwrap_err());
+        assert!(err.starts_with("Failed to download"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(10), "{err}");
+        run.only_the_binary_is_left();
+    }
+
     #[tokio::test]
     async fn github_errors_are_reported() {
         let server = MockServer::start().await;
@@ -638,6 +734,12 @@ mod tests {
         let missing = run.dir.path().join("missing");
         assert!(install_binary(&missing, &run.exe).is_err());
         assert_eq!(run.binary(), "old");
+        run.only_the_binary_is_left();
+
+        // With nothing installed yet there is no backup to put back either
+        let nothing = run.dir.path().join("nothing");
+        assert!(install_binary(&missing, &nothing).is_err());
+        assert!(!nothing.exists());
         run.only_the_binary_is_left();
 
         // A first install has nothing to back up

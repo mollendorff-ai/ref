@@ -216,12 +216,8 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
             dir.display()
         );
     }
-    let existed = dir.exists();
-    std::fs::create_dir_all(dir)
+    create_profile_dir(dir)
         .with_context(|| format!("Cannot create the profile folder {}", dir.display()))?;
-    if !existed {
-        owner_only(dir)?;
-    }
     if let Some(pid) = profile_in_use(dir) {
         anyhow::bail!(
             "The profile {} is open in another Chrome (process {pid}): a `ref login` window, \
@@ -233,21 +229,18 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
     Ok(())
 }
 
-/// Make a folder ref just created readable by its owner only: a saved profile
-/// holds sign-ins. A folder that already existed is the user's, and is left as it is.
-#[cfg(unix)]
-fn owner_only(dir: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    // Not `with_context`: its closure would be a line no test reaches
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).context(format!(
-        "Cannot restrict the profile folder {}",
-        dir.display()
-    ))
-}
-
-#[cfg(not(unix))]
-fn owner_only(_dir: &Path) -> Result<()> {
-    Ok(())
+/// Create `dir` and any missing parents. On Unix they are for their owner only
+/// (0700), because the folder holds the sessions you signed in with.
+/// A folder that already exists keeps the permissions it has.
+fn create_profile_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 /// The live process holding Chrome's `SingletonLock` in `dir`, if any
@@ -344,6 +337,7 @@ fn kill_chrome_using(profile: &Path) -> bool {
 }
 
 /// The ref process id in a profile folder name `ref-chrome-<pid>-<nanos>`
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux sweep uses it
 fn profile_owner(name: &str) -> Option<u32> {
     let rest = name.strip_prefix("ref-chrome-")?;
     let (pid, nanos) = rest.split_once('-')?;
@@ -446,6 +440,26 @@ mod tests {
         assert_eq!(first_existing(&["/no/chrome"]), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_new_saved_profile_folder_is_for_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".ref").join("chrome-profile");
+        prepare_saved_profile(&dir, None).unwrap();
+        for made in [dir.parent().unwrap(), dir.as_path()] {
+            let mode = std::fs::metadata(made).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", made.display());
+        }
+        // A folder that exists already keeps its permissions
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        prepare_saved_profile(&shared, None).unwrap();
+        let mode = std::fs::metadata(&shared).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
     #[test]
     fn a_profile_open_in_another_chrome_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -459,20 +473,22 @@ mod tests {
         assert!(err.contains(&open), "{err}");
     }
 
+    // The sweep reads /proc, so it exists on Linux only
+    #[cfg(target_os = "linux")]
     #[test]
-    fn a_new_saved_profile_folder_is_for_its_owner_only() {
-        use std::os::unix::fs::PermissionsExt;
+    fn a_leftover_nothing_uses_costs_the_sweep_no_waiting() {
+        // A stale entry that cannot be removed as a folder (a plain file), with
+        // no Chrome on it, as another user's folder in a shared /tmp would be
         let temp = tempfile::tempdir().unwrap();
-        let mode = |dir: &Path| std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
-        let new = temp.path().join("new");
-        prepare_saved_profile(&new, None).unwrap();
-        assert_eq!(mode(&new), 0o700);
-        // A folder that was there already is the user's: left as it is
-        let old = temp.path().join("old");
-        std::fs::create_dir(&old).unwrap();
-        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
-        prepare_saved_profile(&old, None).unwrap();
-        assert_eq!(mode(&old), 0o755);
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        gone.wait().unwrap();
+        let stuck = temp.path().join(format!("ref-chrome-{}-4", gone.id()));
+        std::fs::write(&stuck, "x").unwrap();
+        let started = std::time::Instant::now();
+        sweep_orphans_in(temp.path());
+        let took = started.elapsed();
+        assert!(stuck.exists());
+        assert!(took < std::time::Duration::from_millis(250), "{took:?}");
     }
 
     #[test]
@@ -510,22 +526,6 @@ mod tests {
         }
         // A folder that cannot be read is nothing to sweep
         sweep_orphans_in(&temp.path().join("missing"));
-    }
-
-    #[test]
-    fn a_leftover_nothing_uses_costs_the_sweep_no_waiting() {
-        // A stale entry that cannot be removed as a folder (a plain file), with
-        // no Chrome on it, as another user's folder in a shared /tmp would be
-        let temp = tempfile::tempdir().unwrap();
-        let mut gone = std::process::Command::new("true").spawn().unwrap();
-        gone.wait().unwrap();
-        let stuck = temp.path().join(format!("ref-chrome-{}-4", gone.id()));
-        std::fs::write(&stuck, "x").unwrap();
-        let started = std::time::Instant::now();
-        sweep_orphans_in(temp.path());
-        let took = started.elapsed();
-        assert!(stuck.exists());
-        assert!(took < std::time::Duration::from_millis(250), "{took:?}");
     }
 
     #[test]

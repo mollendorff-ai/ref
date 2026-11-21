@@ -66,7 +66,8 @@ ref fetch https://example.com/report 2>/dev/null | jq .
 
 `status` is one of `ok`, `dead`, `redirect`, `paywall` or `login`; `http` is the HTTP status of the main document as Chrome received it.
 Any 4xx or 5xx response is `dead`.
-A page is `paywall` or `login` only when there is a real sign of a wall: `isAccessibleForFree: false` in the page's structured data (JSON-LD, microdata or RDFa; the words in its text do not count), a wall overlay element, or wall wording or a password field on a page with little readable text.
+A page is `paywall` or `login` only when there is a real sign of a wall: `isAccessibleForFree: false` in the page's JSON-LD or microdata, a wall overlay element, or wall wording or a password field on a page with little readable text.
+A page that only mentions the property, in its text or in other scripts, is not a wall.
 
 ### Size limits are reported, never silent
 
@@ -85,7 +86,8 @@ Set the user agent with `--user-agent` (on `fetch` and `check-links`). By defaul
 ref fetch --user-agent "Jane Doe jane@example.com" https://www.sec.gov/Archives/edgar/data/... 2>/dev/null | jq .
 ```
 
-Without the option, a 403 adds an alert saying the site may want a declared user agent. The MCP tools `ref_fetch` and `ref_check_links` take it as a `user_agent` parameter, which applies to that call alone.
+Without the option, a 403 adds an alert saying the site may want a declared user agent.
+Over MCP, `ref_fetch` and `ref_check_links` take a `user_agent` parameter that does the same for that call only; other calls on the same server keep Chrome's own user agent.
 
 Extract one element with `--selector`:
 
@@ -141,9 +143,10 @@ ref reads them with your own sessions, which you set up once in a normal Chrome 
 2. In that window, sign in to your sites, accept their cookie banners and pass any "I am human" checks yourself.
 3. Quit that Chrome completely (Cmd-Q on a Mac, or close every window elsewhere).
    Chrome writes cookies to disk every few seconds and on quit; quitting makes sure everything is saved and frees the profile for ref.
-4. Use ref as usual. `ref fetch` (also of a PDF URL) and the MCP browser tools now run headless Chrome with that profile and see those sites signed in.
-   `ref pdf` does not: it downloads a URL without Chrome, so without the profile's cookies (use `ref fetch` on the PDF's URL, or `--cookies`, for a signed-in PDF).
+4. Use ref as usual. `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and the MCP browser tools now run headless Chrome with that profile and see those sites signed in.
    ref prints `Using saved profile <folder>` on stderr, so you can tell which profile a run used.
+   `ref pdf` does not use the profile: it downloads a PDF URL itself, without Chrome or its cookies, so it also works where Chrome is not installed.
+   For a PDF behind a sign-in, use `ref fetch` on its URL: when a page turns out to be a PDF, ref downloads it with the cookies Chrome has for that address (the saved profile's sessions and any `--cookies` file).
 
 ### Later
 
@@ -163,7 +166,7 @@ ref reads them with your own sessions, which you set up once in a normal Chrome 
 - `--profile <folder>` uses another saved profile (for example one per project); `--profile fresh` runs with an empty, temporary profile instead, deleted afterwards.
   `fetch`, `check-links`, `verify-refs`, `refresh-data` and `mcp` take it; without it, the `REF_CHROME_PROFILE` environment variable gives the same choice.
 - With the saved profile, ref sends Chrome's normal user agent, because sessions and human-check passes are often tied to it.
-- ref creates the profile folder readable by its owner only (mode 0700 on macOS and Linux).
+- ref creates the folder (and `.ref`) readable by its owner only (mode 0700) on macOS and Linux; a folder that already exists keeps its permissions, so check one made by an older version.
 - Treat the profile folder like a password: it holds your sessions.
   An agent using ref through MCP browses those sites as you, so only connect agents you trust.
 
@@ -173,8 +176,7 @@ Treat that file like a password too.
 ## MCP Server Mode
 
 `ref mcp` starts a persistent MCP server over stdio.
-AI applications call tools directly.
-The browser tools (`ref_fetch`, `ref_check_links`, `ref_verify_refs`, `ref_refresh_data`) share one Chrome, started on the first call and kept between calls; if it crashes or stops answering, the next call starts a new one.
+AI applications call tools directly. `ref_fetch` reuses one browser between calls; the other browser tools start one per call.
 
 Six tools: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`.
 
@@ -219,23 +221,23 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 ## Security
 
 - Only `http` and `https` URLs are opened; `file://`, `data:` and other schemes are refused.
-- Any `http` or `https` address is opened, including `localhost` and private network addresses (such as `192.168.x.x` and `10.x.x.x`), so an agent using ref can reach services on your machine and network.
-- Browsing signed in to a site is subject to that site's terms of service; some forbid automated access, and that is your call to make.
+  Any `http` or `https` address is opened, including `localhost` and private network addresses, so an agent that can call ref can reach services on your machine and network.
 - Chrome runs with its sandbox unless ref runs as root, `REF_CHROME_NO_SANDBOX=1` is set, or Chrome cannot start with it (ref then retries without it and prints a warning).
 - Without a saved profile, each run uses its own temporary Chrome profile, deleted afterwards (also after Ctrl-C or SIGTERM).
-  `ref mcp` stopped by Ctrl-C or SIGTERM first asks its Chrome to close, and gives it up to 30 seconds to save a saved profile.
   If a run is killed outright (SIGKILL), the next run on Linux stops its leftover Chrome and removes its profile.
   A saved profile (see above) is never deleted.
 - ref turns off Chrome's optional background services (sync, metrics, safe-browsing updates, translation and others).
   Chrome still makes a few calls of its own to Google, such as component update and account checks, that these switches do not stop; block them at your firewall or proxy if that matters to you.
 - With a temporary profile, the user agent is Chrome's own plus `mollendorff-ref/<version>`; with your saved profile it is Chrome's own.
   ref reuses the sessions and checks you completed yourself; it does not solve CAPTCHAs or disguise itself in other ways.
+- Reading a site while signed in is subject to that site's terms of service; check that automated access is allowed before you point ref at it.
 
 ## Limitations
 
 - **Bot walls and CAPTCHAs**: ref does not solve them. With your saved profile, a check you passed in `ref login` usually carries over until it expires; without it, sites that block automated browsers will block ref too, and those pages come back as `dead` or with little content.
 - **Character encoding**: a page that declares no encoding (no `Content-Type` charset and no `<meta charset>`) is decoded the way Chrome guesses, often as Windows-1252, so accented text can come out garbled; ref does not change that.
-- **Content heuristics**: main-content selection (a rendered README, `article.markdown-body`, then `main`, `article`, common class names, then `body`) can miss content on unusual layouts; use `--selector` or `--raw`.
+- **Content heuristics**: main-content selection (`main`, `article`, then common class names, then `body`) can miss content on unusual layouts; use `--selector` or `--raw`.
+  When `main` holds exactly one `article` with at least a third of its text, only the article is kept (a GitHub repository page gives its README, not the file list and sidebar); `--selector main` keeps all of `main`.
 - **Late rendering**: content that appears only after a timer, with no network activity, can be missed; ref waits for the network to go quiet, not for arbitrary scripts.
   In tests, content added 200 ms after load was kept and content added 2.5 s after load was missed.
 - **Web components**: text in open shadow roots is read; closed shadow roots cannot be.
