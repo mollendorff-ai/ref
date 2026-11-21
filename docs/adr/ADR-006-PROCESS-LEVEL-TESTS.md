@@ -1,6 +1,6 @@
 # ADR-006: Process-Level Tests
 
-**Status:** Proposed (2026-11-21)
+**Status:** Accepted (2026-11-21)
 **Date:** 2026-11-21
 **Refines:** [ADR-004](ADR-004-STRICT-QUALITY-RULES.md) (its four rules are unchanged)
 **Author:** Claude (AI assistant, under the maintainer's direction)
@@ -44,7 +44,7 @@ The cases:
 
 - `ref mcp`: send `initialize`, then one tool call, then close the input; the replies are read, the exit code is 0.
 - `ref check-links --stdin`: URLs on real standard input are checked.
-- `ref mcp` and `ref fetch` stopped with SIGTERM: exit code 130.
+- `ref mcp` stopped with SIGTERM: exit code 130 and "Interrupted." on standard error.
 
 ### 2. Every real resource is used for real by at least one test
 
@@ -54,12 +54,12 @@ The list of resources and the test that covers each is kept in this ADR, so a ne
 
 | Resource | Where it is passed | Test |
 | --- | --- | --- |
-| Standard input | `cli::main` | to be filled in when the tests are written |
-| Standard output and error | `cli::main` | |
-| Stop signals (Ctrl-C, SIGTERM) | `cli::main`, `shutdown_signal` | |
-| Chrome program | `browser::StartOptions::found` | |
-| Home folder | saved profile lookup | |
-| GitHub address | `update` | |
+| Standard input | `cli::real` | `mcp_answers_requests_on_real_standard_input_and_exits_0`, `check_links_reads_urls_from_real_standard_input` |
+| Standard output and error | `cli::real` | the same two, and `sigterm_stops_a_running_mcp_server_with_exit_code_130` (error) |
+| Stop signals (Ctrl-C, SIGTERM) | `cli::real`, `shutdown_signal` | `sigterm_stops_a_running_mcp_server_with_exit_code_130` (SIGTERM; Ctrl-C has no process-level test) |
+| Chrome program | `browser::StartOptions::found` | every test that starts Chrome, including the three above |
+| Home folder | saved profile lookup | not yet covered; step 2 of the plan |
+| GitHub address | `update` | not yet covered; step 2 of the plan |
 
 ### 3. The child's coverage counts (checked 2026-11-21)
 

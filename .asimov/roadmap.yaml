@@ -73,6 +73,7 @@ upcoming:
       - "One Chrome method for requests on the browser itself (read lock, attempt, drop the lock, then judge, with the failed-pool check), so the lock order cannot be got wrong at a new call site"
       - "Done 2026-11-17. A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
       - "verify-refs: a test for a tab that dies between opening and navigation, and an error message that says it was the tab"
+      - "Done 2026-11-21 (ADR-006, accepted): process-level tests in src/cli.rs run ref as a child process on real standard input, output, error and SIGTERM (ref mcp end to end, check-links --stdin, exit 130); still to do: a real-use test for the home folder and the GitHub address in update, and a table row for any new seam"
       - "Orphan sweep: remove_dir_retrying waits 600 ms on every leftover folder it cannot remove (for example another user's in a shared /tmp), on a tokio worker at every pool start; wait and retry only after a kill (final review, 2026-11-21)"
       - "A tab is not closed when opening it hits its time limit while Chrome answers, or when the call is cancelled during set-up; matters for the long-lived MCP Chrome (final review, 2026-11-21; older than 06650a5)"
   - summary: "Content detection on GitHub pages"

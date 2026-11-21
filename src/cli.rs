@@ -137,9 +137,16 @@ pub async fn execute(
 /// Ctrl-C or SIGTERM as the stop signal.
 #[must_use]
 pub fn main() -> ExitCode {
+    real(std::env::args_os().collect())
+}
+
+/// [`main`] with the command line given, and everything else real: standard
+/// input, output and error, the stop signals and the async runtime. The
+/// process-level tests run it in a child process.
+fn real(args: Vec<std::ffi::OsString>) -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
-        std::env::args_os().collect(),
+        args,
         &mut real_input(),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
@@ -427,6 +434,149 @@ mod tests {
         let code = format!("{:?}", main());
         let refused = [ExitCode::from(2), ExitCode::SUCCESS].map(|c| format!("{c:?}"));
         assert!(refused.contains(&code), "{code}");
+    }
+
+    // Process-level tests (ADR-006): the test program starts itself again as a
+    // child, which runs `real` with real standard input, output, error and
+    // signals. The child is chosen by full test path with --exact; a short name
+    // would match no test, so every parent test also checks the child's output.
+
+    const CHILD_ARGS: &str = "REF_TEST_CHILD_ARGS";
+
+    /// The child half: run `real` with the command line in `CHILD_ARGS` (joined
+    /// by newlines) and end the process with its exit code. A normal test run
+    /// has no such variable, and this does nothing.
+    #[test]
+    fn child_runs_the_real_program() {
+        let Ok(line) = std::env::var(CHILD_ARGS) else {
+            return;
+        };
+        let args = line.split('\n').map(Into::into).collect();
+        let code = real(args);
+        let n = (0..=u8::MAX).find(|n| ExitCode::from(*n) == code);
+        std::process::exit(i32::from(n.unwrap_or(u8::MAX)));
+    }
+
+    /// The child process; killed when the test ends, however it ends
+    struct RefProcess(std::process::Child);
+
+    impl Drop for RefProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    /// Start the child as `ref <args>` with piped standard input, output and error
+    fn spawn_ref(args: &[&str]) -> RefProcess {
+        let line = std::iter::once("ref").chain(args.iter().copied());
+        RefProcess(
+            std::process::Command::new(std::env::current_exe().expect("test program"))
+                .args([
+                    "cli::tests::child_runs_the_real_program",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD_ARGS, line.collect::<Vec<_>>().join("\n"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("start the child"),
+        )
+    }
+
+    /// The child's output lines, read on a thread so a child that says nothing
+    /// fails its test after a time limit instead of hanging it
+    fn output_lines(out: std::process::ChildStdout) -> std::sync::mpsc::Receiver<String> {
+        let (sent, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                let _ = sent.send(line);
+            }
+        });
+        lines
+    }
+
+    /// Wait for the JSON-RPC reply with `id` (the harness's own lines are skipped)
+    fn reply_with_id(lines: &std::sync::mpsc::Receiver<String>, id: u64) -> serde_json::Value {
+        loop {
+            let line = lines
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a reply within 30 seconds");
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+            if value["id"] == id {
+                return value;
+            }
+        }
+    }
+
+    const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+
+    #[test]
+    fn mcp_answers_requests_on_real_standard_input_and_exits_0() {
+        let page = crate::test_server::serve();
+        let mut child = spawn_ref(&["mcp", "--profile", "fresh"]);
+        let mut input = child.0.stdin.take().expect("stdin");
+        let out = output_lines(child.0.stdout.take().expect("stdout"));
+        let call = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"ref_fetch","arguments":{"urls":[format!("{page}/")]}}});
+        writeln!(input, "{INITIALIZE}").expect("send");
+        let init = reply_with_id(&out, 1);
+        assert_eq!(init["result"]["serverInfo"]["name"], "ref");
+        writeln!(
+            input,
+            r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+        )
+        .expect("send");
+        writeln!(input, "{call}").expect("send");
+        let fetched = reply_with_id(&out, 2);
+        let text = fetched["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains(&page), "{text}");
+        drop(input);
+        assert_eq!(child.0.wait().expect("wait").code(), Some(0));
+    }
+
+    #[test]
+    fn check_links_reads_urls_from_real_standard_input() {
+        let page = crate::test_server::serve();
+        let mut child = spawn_ref(&["check-links", "--profile", "fresh", "--stdin"]);
+        let mut input = child.0.stdin.take().expect("stdin");
+        let out = output_lines(child.0.stdout.take().expect("stdout"));
+        writeln!(input, "{page}/").expect("send");
+        drop(input);
+        // The test harness prints its own "running 1 test" line first
+        let report = loop {
+            let line = out
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a report within 30 seconds");
+            if line.starts_with('{') {
+                break serde_json::from_str::<serde_json::Value>(&line).expect("JSON");
+            }
+        };
+        assert_eq!(report["results"][0]["url"], format!("{page}/"));
+        assert!(child.0.wait().expect("wait").code().is_some_and(|c| c <= 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_stops_a_running_mcp_server_with_exit_code_130() {
+        let mut child = spawn_ref(&["mcp", "--profile", "fresh"]);
+        let mut input = child.0.stdin.take().expect("stdin");
+        let out = output_lines(child.0.stdout.take().expect("stdout"));
+        writeln!(input, "{INITIALIZE}").expect("send");
+        reply_with_id(&out, 1);
+        let sent = std::process::Command::new("kill")
+            .args(["-TERM", &child.0.id().to_string()])
+            .status()
+            .expect("kill");
+        assert!(sent.success());
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(&mut child.0.stderr.take().expect("stderr"), &mut stderr)
+            .expect("read");
+        assert_eq!(child.0.wait().expect("wait").code(), Some(130));
+        assert!(stderr.contains("Interrupted."), "{stderr}");
     }
 
     #[test]
