@@ -216,8 +216,12 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
             dir.display()
         );
     }
+    let existed = dir.exists();
     std::fs::create_dir_all(dir)
         .with_context(|| format!("Cannot create the profile folder {}", dir.display()))?;
+    if !existed {
+        owner_only(dir)?;
+    }
     if let Some(pid) = profile_in_use(dir) {
         anyhow::bail!(
             "The profile {} is open in another Chrome (process {pid}): a `ref login` window, \
@@ -226,6 +230,23 @@ pub(crate) fn prepare_saved_profile(dir: &Path, home: Option<&Path>) -> Result<(
             dir.display()
         );
     }
+    Ok(())
+}
+
+/// Make a folder ref just created readable by its owner only: a saved profile
+/// holds sign-ins. A folder that already existed is the user's, and is left as it is.
+#[cfg(unix)]
+fn owner_only(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Not `with_context`: its closure would be a line no test reaches
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).context(format!(
+        "Cannot restrict the profile folder {}",
+        dir.display()
+    ))
+}
+
+#[cfg(not(unix))]
+fn owner_only(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -436,6 +457,22 @@ mod tests {
             .to_string();
         let open = format!("is open in another Chrome (process {})", std::process::id());
         assert!(err.contains(&open), "{err}");
+    }
+
+    #[test]
+    fn a_new_saved_profile_folder_is_for_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let mode = |dir: &Path| std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        let new = temp.path().join("new");
+        prepare_saved_profile(&new, None).unwrap();
+        assert_eq!(mode(&new), 0o700);
+        // A folder that was there already is the user's: left as it is
+        let old = temp.path().join("old");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        prepare_saved_profile(&old, None).unwrap();
+        assert_eq!(mode(&old), 0o755);
     }
 
     #[test]

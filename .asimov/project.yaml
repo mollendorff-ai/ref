@@ -2,7 +2,7 @@ identity:
   name: "ref"
   type: rust
 
-description: "CLI and MCP server for fetching web pages (via headless Chrome) and extracting structured content from PDFs — tables, headings, text. Single static binary; needs Chrome or Chromium installed."
+description: "Renders web pages and PDFs into compact JSON for LLM agents"
 
 stack:
   - "chromiumoxide (headless Chrome)"

@@ -141,7 +141,8 @@ ref reads them with your own sessions, which you set up once in a normal Chrome 
 2. In that window, sign in to your sites, accept their cookie banners and pass any "I am human" checks yourself.
 3. Quit that Chrome completely (Cmd-Q on a Mac, or close every window elsewhere).
    Chrome writes cookies to disk every few seconds and on quit; quitting makes sure everything is saved and frees the profile for ref.
-4. Use ref as usual. `ref fetch`, `ref pdf` and the MCP tools now run headless Chrome with that profile and see those sites signed in.
+4. Use ref as usual. `ref fetch` (also of a PDF URL) and the MCP browser tools now run headless Chrome with that profile and see those sites signed in.
+   `ref pdf` does not: it downloads a URL without Chrome, so without the profile's cookies (use `ref fetch` on the PDF's URL, or `--cookies`, for a signed-in PDF).
    ref prints `Using saved profile <folder>` on stderr, so you can tell which profile a run used.
 
 ### Later
@@ -162,6 +163,7 @@ ref reads them with your own sessions, which you set up once in a normal Chrome 
 - `--profile <folder>` uses another saved profile (for example one per project); `--profile fresh` runs with an empty, temporary profile instead, deleted afterwards.
   `fetch`, `check-links`, `verify-refs`, `refresh-data` and `mcp` take it; without it, the `REF_CHROME_PROFILE` environment variable gives the same choice.
 - With the saved profile, ref sends Chrome's normal user agent, because sessions and human-check passes are often tied to it.
+- ref creates the profile folder readable by its owner only (mode 0700 on macOS and Linux).
 - Treat the profile folder like a password: it holds your sessions.
   An agent using ref through MCP browses those sites as you, so only connect agents you trust.
 
@@ -217,6 +219,8 @@ Whether to forbid other tools entirely is your call; check that ref works for th
 ## Security
 
 - Only `http` and `https` URLs are opened; `file://`, `data:` and other schemes are refused.
+- Any `http` or `https` address is opened, including `localhost` and private network addresses (such as `192.168.x.x` and `10.x.x.x`), so an agent using ref can reach services on your machine and network.
+- Browsing signed in to a site is subject to that site's terms of service; some forbid automated access, and that is your call to make.
 - Chrome runs with its sandbox unless ref runs as root, `REF_CHROME_NO_SANDBOX=1` is set, or Chrome cannot start with it (ref then retries without it and prints a warning).
 - Without a saved profile, each run uses its own temporary Chrome profile, deleted afterwards (also after Ctrl-C or SIGTERM).
   `ref mcp` stopped by Ctrl-C or SIGTERM first asks its Chrome to close, and gives it up to 30 seconds to save a saved profile.

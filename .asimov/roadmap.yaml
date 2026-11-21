@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: EVAL_FIXES
+current: MCP_USER_AGENT
 
 shipped:
   - version: "1.5.1"
@@ -82,14 +82,14 @@ upcoming:
     deliverables:
       - "Done 2026-11-21. No false paywall: the cause was not the 'You must be signed in' wording (phrases count only on short pages) but the repo's own README quoting isAccessibleForFree: false; the signal is now read only from JSON-LD and itemprop/property elements"
       - "Done 2026-11-21. Main content: the README (article.markdown-body) wins over repository navigation, About, Stars, Forks and other sidebar sections; checked on the live page: status ok, 19 sections from the README title to License"
-  - summary: "Evaluation fixes (Ref Evaluation, 2026-11-16, grade A-)"
+  - summary: "Evaluation fixes (Ref Evaluation, 2026-11-16, grade A-) (done 2026-11-21, except the two outside descriptions)"
     goal: "EVAL_FIXES"
     deliverables:
-      - "Create the saved-profile folder readable by the owner only (0700); today src/browser.rs creates it with default permissions"
-      - "README: say that ref fetch opens localhost and private addresses"
-      - "README: one line on sites' terms of service for signed-in browsing"
-      - "README: 'ref pdf' does not use the saved profile (URLs are downloaded without Chrome or its cookies); only ref fetch of a PDF URL is signed in. Fix the sentence under First time, step 4, or give ref pdf the profile's cookies"
-      - "One description everywhere: README and Cargo.toml say 'compact JSON', the GitHub About says 'token-optimized JSON', mollendorff.ai says 'clean JSON', .asimov/project.yaml has its own"
+      - "Done 2026-11-21. Create the saved-profile folder readable by the owner only (0700); today src/browser.rs creates it with default permissions"
+      - "Done 2026-11-21. README: say that ref fetch opens localhost and private addresses"
+      - "Done 2026-11-21. README: one line on sites' terms of service for signed-in browsing"
+      - "Done 2026-11-21. README: 'ref pdf' does not use the saved profile (URLs are downloaded without Chrome or its cookies); only ref fetch of a PDF URL is signed in. Fix the sentence under First time, step 4, or give ref pdf the profile's cookies"
+      - "Done 2026-11-21 for the repository (README, Cargo.toml, project.yaml, MCP all say compact JSON); the GitHub About and mollendorff.ai are outside the repo and still to change by the maintainer. One description everywhere: README and Cargo.toml say 'compact JSON', the GitHub About says 'token-optimized JSON', mollendorff.ai says 'clean JSON', .asimov/project.yaml has its own"
   - summary: "--user-agent in the MCP server"
     goal: "MCP_USER_AGENT"
     deliverables:

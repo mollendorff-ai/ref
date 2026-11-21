@@ -51,6 +51,8 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- A saved-profile folder that ref creates is readable by its owner only (mode 0700 on macOS and Linux); one that already exists is left as it is.
+- README: `ref pdf` does not use the saved profile; local and private addresses are opened; a line on sites' terms of service.
 - **GitHub pages**: `ref fetch https://github.com/<owner>/<repo>` came back as `paywall`, because the signal `isAccessibleForFree: false` was searched for in the whole HTML and this repository's README quotes it.
   It is now read only where publishers put it: JSON-LD (also nested), and `itemprop` or `property` elements; JSON-LD that does not parse is still read as text.
   The README (`article.markdown-body`) is also chosen over the rest of `<main>`, so the repository navigation, About, Stars and Forks no longer come first and repeat after it.
