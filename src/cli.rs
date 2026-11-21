@@ -140,10 +140,18 @@ pub fn main() -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
         std::env::args_os().collect(),
-        &mut std::io::stdin().lock(),
+        &mut real_input(),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
     )
+}
+
+/// Standard input for `check-links --stdin`, locked only while each read runs.
+/// Holding the lock for the whole run would block every other reader of
+/// standard input for good: `ref mcp` reads its requests through tokio, which
+/// takes the same lock on another thread.
+fn real_input() -> std::io::BufReader<std::io::Stdin> {
+    std::io::BufReader::new(std::io::stdin())
 }
 
 /// [`main`] with its parts given, so the runtime failing to start can be tested
@@ -419,6 +427,19 @@ mod tests {
         let code = format!("{:?}", main());
         let refused = [ExitCode::from(2), ExitCode::SUCCESS].map(|c| format!("{c:?}"));
         assert!(refused.contains(&code), "{code}");
+    }
+
+    #[test]
+    fn the_real_input_leaves_standard_input_unlocked() {
+        // ref mcp reads standard input on another thread while main holds its
+        // input; that thread must be able to take the lock
+        let _input = real_input();
+        let (sent, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(std::io::stdin().lock());
+            let _ = sent.send(());
+        });
+        assert!(got.recv_timeout(std::time::Duration::from_secs(5)).is_ok());
     }
 
     #[cfg(unix)]

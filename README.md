@@ -171,7 +171,8 @@ Treat that file like a password too.
 ## MCP Server Mode
 
 `ref mcp` starts a persistent MCP server over stdio.
-AI applications call tools directly. `ref_fetch` reuses one browser between calls; the other browser tools start one per call.
+AI applications call tools directly.
+The browser tools (`ref_fetch`, `ref_check_links`, `ref_verify_refs`, `ref_refresh_data`) share one Chrome, started on the first call and kept between calls; if it crashes or stops answering, the next call starts a new one.
 
 Six tools: `ref_fetch`, `ref_pdf`, `ref_check_links`, `ref_scan`, `ref_verify_refs`, `ref_refresh_data`.
 

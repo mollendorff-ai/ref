@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: CHROME_LIFECYCLE
+current: CHROME_LIFECYCLE_FOLLOWUP
 
 shipped:
   - version: "1.5.1"
@@ -62,6 +62,7 @@ upcoming:
       - "Done 2026-11-17. Decided 2026-11-17 (ADR-005 rule 3): in verify-refs, a tab that cannot be opened or set up while Chrome answers ends the run and writes nothing; the other commands keep it as that URL's error"
       - "Done 2026-11-17. Last review (fe2d1a7..06650a5), to fix here: new_page checks for a failed pool again after waiting for a tab slot; remove_dir_retrying stops as soon as the folder is gone and retries whenever it is not (a crashed Chrome's helpers may still write), so the final clean-up no longer waits per folder; goto clears the read budget when it starts"
       - "Stopping rule (2026-11-17): after these fixes, one more review; then anything that is not a real bug goes to the roadmap and work moves to STRICT_RULES step 4"
+      - "Done 2026-11-21. Final review (06650a5..ec2e81e): one real bug, fixed: cli::main held the standard-input lock for the whole run, so ref mcp never read a request (a regression from moving main into cli, never released); two minor findings moved to CHROME_LIFECYCLE_FOLLOWUP"
   - summary: "Chrome lifecycle: what the last review left (not regressions)"
     goal: "CHROME_LIFECYCLE_FOLLOWUP"
     source: "Final review on 2026-11-17 (fe2d1a7..06650a5), sorted under the stopping rule: three small regressions are fixed in CHROME_LIFECYCLE, the rest is here"
@@ -72,6 +73,8 @@ upcoming:
       - "One Chrome method for requests on the browser itself (read lock, attempt, drop the lock, then judge, with the failed-pool check), so the lock order cannot be got wrong at a new call site"
       - "Done 2026-11-17. A test that runs run_mcp itself (with STRICT_RULES: mcp in-process), so the graceful stop at its end is covered"
       - "verify-refs: a test for a tab that dies between opening and navigation, and an error message that says it was the tab"
+      - "Orphan sweep: remove_dir_retrying waits 600 ms on every leftover folder it cannot remove (for example another user's in a shared /tmp), on a tokio worker at every pool start; wait and retry only after a kill (final review, 2026-11-21)"
+      - "A tab is not closed when opening it hits its time limit while Chrome answers, or when the call is cancelled during set-up; matters for the long-lived MCP Chrome (final review, 2026-11-21; older than 06650a5)"
   - summary: "Content detection on GitHub pages"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
