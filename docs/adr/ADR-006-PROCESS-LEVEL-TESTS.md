@@ -61,10 +61,12 @@ The list of resources and the test that covers each is kept in this ADR, so a ne
 | Home folder | saved profile lookup | |
 | GitHub address | `update` | |
 
-### 3. What is not decided here
+### 3. The child's coverage counts (checked 2026-11-21)
 
-Whether the child's coverage reaches the gate is checked before this ADR is accepted: `cargo llvm-cov` must count lines run in a re-executed test program.
-If it does not, the cases in rule 1 still run and still fail on a regression, but any line only they reach would show as uncovered; in that case this ADR is revised, not the gate.
+`cargo llvm-cov` counts lines run in a re-executed test program.
+A probe test started the test program again as a child, ran a function that nothing else calls, and `cargo llvm-cov --text` showed every line of it as run.
+The child must be given its test by full path (`cli::probe::probe_child`, not `probe_child`) with `--exact`; a short name matches nothing, the child runs no test, and the test still passes.
+The parent test therefore also checks the child's output, never only its exit code.
 
 ## Consequences
 
