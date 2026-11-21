@@ -507,8 +507,11 @@ fn detect_status(html: &str) -> PageStatus {
 }
 
 pub(crate) fn extract_main_content(doc: &Html) -> String {
-    // Priority: main > article > [role=main] > body
+    // Priority: a rendered README or wiki page (GitHub's `article.markdown-body`,
+    // where `main` also holds repository navigation, About, Stars and Forks,
+    // which come first and repeat after it) > main > article > [role=main] > body
     let selectors = [
+        "article.markdown-body",
         "main",
         "article",
         "[role='main']",
@@ -761,6 +764,43 @@ mod tests {
         let page = parse_page(html, "https://site.example/", &raw);
         assert!(page.links.iter().any(|l| l.url.ends_with("/menu")));
         assert!(parsed(html).links.is_empty());
+    }
+
+    #[test]
+    fn a_github_readme_wins_over_the_repository_sidebar() {
+        // Shaped like github.com/<owner>/<repo> (found 2026-11-16): the README
+        // is inside <main>, with navigation before it and the sidebar around it
+        let sidebar = "<h2>About</h2><p>Renders web pages.</p><h3>Stars</h3><p>1</p>";
+        let html = format!(
+            "<html><head><title>GitHub - o/r</title></head><body><main>\
+             <h2>Repository navigation</h2><ul><li>Code</li><li>Issues</li></ul>\
+             <p>You must be signed in to star a repository</p>{sidebar}\
+             <article class='markdown-body entry-content' itemprop='text'>\
+             <h1>The README</h1><p>What the project does.</p><h2>Install</h2><p>Run it.</p>\
+             <p>A paywall is <code>isAccessibleForFree: false</code> in JSON-LD.</p></article>\
+             {sidebar}</main></body></html>"
+        );
+        let page = parsed(&html);
+        assert_eq!(page.status, PageStatus::Ok);
+        let headings: Vec<&str> = page.sections.iter().map(|s| s.heading.as_str()).collect();
+        assert_eq!(headings, ["The README", "Install"]);
+        // Without the README, the page is read as before
+        let plain = html.replace("markdown-body", "other");
+        let headings: Vec<String> = parsed(&plain)
+            .sections
+            .iter()
+            .map(|s| s.heading.clone())
+            .collect();
+        assert!(
+            headings.contains(&"Repository navigation".to_string()),
+            "{headings:?}"
+        );
+        // Comments on an issue are not a README: the whole page is kept
+        let issue = "<html><body><main><div class='markdown-body'><p>Issue text.</p></div>\
+                     <div class='markdown-body'><p>A comment.</p></div></main></body></html>";
+        let issue = parsed(issue);
+        let text: Vec<&str> = issue.sections.iter().map(|s| s.content.as_str()).collect();
+        assert!(text.join(" ").contains("A comment."), "{text:?}");
     }
 
     #[test]

@@ -51,6 +51,9 @@ All notable changes to Möllendorff Ref.
 
 ### Fixed
 
+- **GitHub pages**: `ref fetch https://github.com/<owner>/<repo>` came back as `paywall`, because the signal `isAccessibleForFree: false` was searched for in the whole HTML and this repository's README quotes it.
+  It is now read only where publishers put it: JSON-LD (also nested), and `itemprop` or `property` elements; JSON-LD that does not parse is still read as text.
+  The README (`article.markdown-body`) is also chosen over the rest of `<main>`, so the repository navigation, About, Stars and Forks no longer come first and repeat after it.
 - **MCP with a saved profile**: `ref_check_links`, `ref_refresh_data` and `ref_verify_refs` failed once `ref_fetch` had run, because each started a second Chrome on the profile the server's browser already held.
   They now share the server's browser.
 - The "profile is open in another Chrome" error names the possible holders (`ref login`, a running `ref mcp`, another ref command) instead of only `ref login`.

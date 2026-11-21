@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: GITHUB_CONTENT
+current: EVAL_FIXES
 
 shipped:
   - version: "1.5.1"
@@ -76,12 +76,12 @@ upcoming:
       - "Done 2026-11-21 (ADR-006, accepted): process-level tests in src/cli.rs run ref as a child process on real standard input, output, error and SIGTERM (ref mcp end to end, check-links --stdin, exit 130); step 2 done the same day: every real resource in the ADR table has a test of the real wiring (the home folder through a child with its own HOME, update's real addresses); gaps accepted in the ADR: ref login with the real Chrome, a real request to GitHub; a new seam must add a table row"
       - "Done 2026-11-21. Orphan sweep: remove_dir_retrying waits 600 ms on every leftover folder it cannot remove (for example another user's in a shared /tmp), on a tokio worker at every pool start; wait and retry only after a kill (final review, 2026-11-21)"
       - "Done 2026-11-21 (the opening runs on a task that closes a tab nobody waits for; a tab closes on drop during set-up). A tab is not closed when opening it hits its time limit while Chrome answers, or when the call is cancelled during set-up; matters for the long-lived MCP Chrome (final review, 2026-11-21; older than 06650a5)"
-  - summary: "Content detection on GitHub pages"
+  - summary: "Content detection on GitHub pages (done 2026-11-21)"
     goal: "GITHUB_CONTENT"
     source: "Live test on 2026-11-16: ref fetch https://github.com/mollendorff-ai/ref"
     deliverables:
-      - "No false paywall: a public repo page (13,046 readable chars) comes back as status paywall, likely from GitHub's 'You must be signed in to...' button wording"
-      - "Main content: the README (article.markdown-body) should win over repository navigation, About, Stars, Forks and other sidebar sections, which come first and repeat after it"
+      - "Done 2026-11-21. No false paywall: the cause was not the 'You must be signed in' wording (phrases count only on short pages) but the repo's own README quoting isAccessibleForFree: false; the signal is now read only from JSON-LD and itemprop/property elements"
+      - "Done 2026-11-21. Main content: the README (article.markdown-body) wins over repository navigation, About, Stars, Forks and other sidebar sections; checked on the live page: status ok, 19 sections from the README title to License"
   - summary: "Evaluation fixes (Ref Evaluation, 2026-11-16, grade A-)"
     goal: "EVAL_FIXES"
     deliverables:
