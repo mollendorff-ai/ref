@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: MCP_USER_AGENT
+current: MACOS_CHECK
 
 shipped:
   - version: "1.5.1"
@@ -90,11 +90,11 @@ upcoming:
       - "Done 2026-11-21. README: one line on sites' terms of service for signed-in browsing"
       - "Done 2026-11-21. README: 'ref pdf' does not use the saved profile (URLs are downloaded without Chrome or its cookies); only ref fetch of a PDF URL is signed in. Fix the sentence under First time, step 4, or give ref pdf the profile's cookies"
       - "Done 2026-11-21 for the repository (README, Cargo.toml, project.yaml, MCP all say compact JSON); the GitHub About and mollendorff.ai are outside the repo and still to change by the maintainer. One description everywhere: README and Cargo.toml say 'compact JSON', the GitHub About says 'token-optimized JSON', mollendorff.ai says 'clean JSON', .asimov/project.yaml has its own"
-  - summary: "--user-agent in the MCP server"
+  - summary: "--user-agent in the MCP server (done 2026-11-21)"
     goal: "MCP_USER_AGENT"
     deliverables:
-      - "user_agent parameter on ref_fetch and ref_check_links (src/mcp.rs passes None today)"
-      - "Try --user-agent against sec.gov (www.sec.gov is allowed in the cloud environment)"
+      - "Done 2026-11-21. user_agent parameter on ref_fetch and ref_check_links, per call and per tab, so the shared browser is not changed for other calls"
+      - "Done 2026-11-21. Tried --user-agent against sec.gov: 403 'Undeclared Automated Tool' without it, normal answers with a declared name and email"
   - summary: "macOS check (manual, on Luis's Mac)"
     goal: "MACOS_CHECK"
     deliverables:

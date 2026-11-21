@@ -82,6 +82,9 @@ pub struct FetchOptions {
     pub max_chars: usize,
     /// Sections per page (0 = no limit)
     pub max_sections: usize,
+    /// This user agent, exactly, for this page and its PDF download, in place
+    /// of the browser's (already checked by `validate_user_agent`)
+    pub user_agent: Option<String>,
 }
 
 impl Default for FetchOptions {
@@ -92,6 +95,7 @@ impl Default for FetchOptions {
             selector: None,
             max_chars: DEFAULT_MAX_CHARS,
             max_sections: DEFAULT_MAX_SECTIONS,
+            user_agent: None,
         }
     }
 }
@@ -192,6 +196,7 @@ pub async fn run_fetch(args: FetchArgs, out: &mut dyn std::io::Write) -> Result<
         selector: args.selector,
         max_chars: args.max_chars,
         max_sections: args.max_sections,
+        user_agent: None,
     });
 
     // Spawn parallel fetch tasks
@@ -256,7 +261,8 @@ pub(crate) async fn fetch_one(
 async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Result<Page> {
     crate::guard::check_web_url(url).map_err(|e| anyhow!(e))?;
 
-    let page = pool.new_page().await?;
+    let agent = options.user_agent.as_deref();
+    let page = pool.new_page_as(agent).await?;
     let nav = page.goto(url, options.timeout).await?;
 
     if let Some(error) = nav.error {
@@ -271,7 +277,7 @@ async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Re
     if nav.mime.as_deref() == Some("application/pdf") && nav.status.is_some_and(|c| c < 400) {
         drop(page);
         // Same user agent and cookies as Chrome, so a signed-in PDF downloads too
-        let headers = pool.download_headers(url);
+        let headers = pool.download_headers_as(url, agent);
         let mut pdf = crate::pdf::extract_pdf_from_url_with(url, &headers)
             .await
             .base;
@@ -297,7 +303,7 @@ async fn fetch_page(pool: &BrowserPool, url: &str, options: &FetchOptions) -> Re
     let html = page.content().await?;
     let mut parsed = parse_page(&html, url, options);
     apply_http_status(&mut parsed, nav.status);
-    if nav.status == Some(403) && !pool.has_custom_user_agent() {
+    if nav.status == Some(403) && agent.is_none() && !pool.has_custom_user_agent() {
         parsed.alerts.insert(1, USER_AGENT_HINT.to_string());
     }
     Ok(parsed)

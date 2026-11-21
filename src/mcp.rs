@@ -53,6 +53,10 @@ pub struct FetchParams {
     pub max_chars: Option<usize>,
     /// Maximum sections per page (default: 50, 0 = no limit)
     pub max_sections: Option<usize>,
+    /// Send exactly this user agent for these pages, instead of Chrome's own
+    /// with ref's name added. Some sites want a declared name and email, for
+    /// example SEC EDGAR: "Jane Doe jane@example.com"
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -71,6 +75,9 @@ pub struct CheckLinksParams {
     pub timeout: Option<u64>,
     /// Retry count on failure (default: 1)
     pub retries: Option<u8>,
+    /// Send exactly this user agent for these checks, instead of Chrome's own
+    /// with ref's name added (for example "Jane Doe jane@example.com")
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -208,6 +215,13 @@ fn parallelism(
     }
 }
 
+/// A call's `user_agent`, checked before Chrome starts
+fn declared_user_agent(given: Option<&str>) -> std::result::Result<Option<String>, ErrorData> {
+    given
+        .map(|ua| crate::browser::validate_user_agent(ua).map_err(|e| invalid(format!("{e:#}"))))
+        .transpose()
+}
+
 #[allow(clippy::needless_pass_by_value)] // used as map_err callback
 fn invalid(msg: String) -> ErrorData {
     ErrorData::new(ErrorCode::INVALID_PARAMS, msg, None)
@@ -260,6 +274,7 @@ impl RefMcpServer {
         Parameters(params): Parameters<FetchParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let parallel = parallelism(params.parallel, 4, "parallel")?;
+        let user_agent = declared_user_agent(params.user_agent.as_deref())?;
         let options = fetch::FetchOptions {
             timeout: params.timeout.unwrap_or(30_000),
             raw: params.raw.unwrap_or(false),
@@ -268,6 +283,7 @@ impl RefMcpServer {
             max_sections: params
                 .max_sections
                 .unwrap_or(crate::content::DEFAULT_MAX_SECTIONS),
+            user_agent,
         };
 
         // Nothing to fetch: answer without starting Chrome
@@ -324,6 +340,7 @@ impl RefMcpServer {
         Parameters(params): Parameters<CheckLinksParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let concurrency = parallelism(params.concurrency, 5, "concurrency")?;
+        let user_agent = declared_user_agent(params.user_agent.as_deref())?;
         let report = if params.urls.is_empty() {
             check_links::LinkReport::default()
         } else {
@@ -334,6 +351,7 @@ impl RefMcpServer {
                 concurrency,
                 params.timeout.unwrap_or(15000),
                 params.retries.unwrap_or(1),
+                user_agent.as_deref(),
             )
             .await
             .map_err(browser_err)?
@@ -733,6 +751,7 @@ mod tests {
                 selector: None,
                 max_chars: None,
                 max_sections: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -744,6 +763,7 @@ mod tests {
                 concurrency: None,
                 timeout: None,
                 retries: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -793,6 +813,7 @@ mod tests {
                 concurrency: None,
                 timeout: None,
                 retries: None,
+                user_agent: None,
             }))
             .await
             .unwrap_err();
@@ -818,6 +839,7 @@ mod tests {
             concurrency: None,
             timeout: Some(5000),
             retries: Some(0),
+            user_agent: None,
         };
 
         server.ref_check_links(Parameters(check())).await.unwrap();
@@ -861,6 +883,7 @@ mod tests {
             concurrency: None,
             timeout: Some(5000),
             retries: Some(0),
+            user_agent: None,
         };
         server.ref_check_links(Parameters(check)).await.unwrap();
         let pool = running(&server).await.unwrap();
@@ -886,6 +909,7 @@ mod tests {
             concurrency: None,
             timeout: Some(5000),
             retries: Some(0),
+            user_agent: None,
         };
         let refused = server.ref_check_links(Parameters(check)).await.unwrap_err();
         assert!(refused.message.contains("stopping"), "{}", refused.message);
@@ -909,6 +933,7 @@ mod tests {
             selector: None,
             max_chars: None,
             max_sections: None,
+            user_agent: None,
         };
 
         let site = crate::browser::tests::serve_cookie_jar();
@@ -969,6 +994,7 @@ mod tests {
                 selector: None,
                 max_chars: None,
                 max_sections: None,
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -990,6 +1016,7 @@ mod tests {
                 concurrency: None,
                 timeout: Some(5000),
                 retries: Some(0),
+                user_agent: None,
             }))
             .await
             .unwrap();
@@ -1069,6 +1096,7 @@ mod tests {
             selector: None,
             max_chars: None,
             max_sections: None,
+            user_agent: None,
         }
     }
 
@@ -1078,6 +1106,83 @@ mod tests {
             file: file.map(Into::into),
             timeout: Some(5000),
         }
+    }
+
+    #[tokio::test]
+    async fn a_calls_user_agent_is_for_that_call_alone() {
+        // Needs Chrome (ADR-004). /needs-declared-agent refuses anyone without
+        // an email in the user agent, like SEC EDGAR. One shared browser serves
+        // every call here, so a leak would show.
+        let site = crate::test_server::serve();
+        let url = format!("{site}/needs-declared-agent");
+        let dir = tempfile::tempdir().unwrap();
+        let server = RefMcpServer::new(
+            dir.path().canonicalize().unwrap(),
+            Some(ProfileChoice::Fresh),
+        );
+        let fetch = |agent: Option<&str>| {
+            let mut params = fetch_params(vec![url.clone()], None);
+            params.user_agent = agent.map(Into::into);
+            server.ref_fetch(Parameters(params))
+        };
+        let declared = text(&fetch(Some("Jane Doe jane@example.com")).await.unwrap());
+        assert_eq!(declared["status"], "ok", "{declared}");
+
+        // The next call, without one, is refused again, and says what to try
+        let plain = text(&fetch(None).await.unwrap());
+        assert_eq!(plain["status"], "dead", "{plain}");
+        assert!(
+            plain["alerts"].to_string().contains("--user-agent"),
+            "{plain}"
+        );
+
+        // A wrong agent is refused too, without the hint
+        let wrong = text(&fetch(Some("nobody")).await.unwrap());
+        assert_eq!(wrong["status"], "dead", "{wrong}");
+        assert!(
+            !wrong["alerts"].to_string().contains("--user-agent"),
+            "{wrong}"
+        );
+
+        let check = |agent: Option<&str>| {
+            let params = CheckLinksParams {
+                urls: vec![url.clone()],
+                concurrency: None,
+                timeout: Some(5000),
+                retries: Some(0),
+                user_agent: agent.map(Into::into),
+            };
+            server.ref_check_links(Parameters(params))
+        };
+        let declared = text(&check(Some("Jane Doe jane@example.com")).await.unwrap());
+        assert_eq!(declared["results"][0]["status"], 200, "{declared}");
+        let plain = text(&check(None).await.unwrap());
+        assert_eq!(plain["results"][0]["status"], 403, "{plain}");
+    }
+
+    #[tokio::test]
+    async fn a_bad_user_agent_is_refused_before_chrome_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let not_a_folder = root.join("not-a-folder");
+        std::fs::write(&not_a_folder, "").unwrap();
+        let server = RefMcpServer::new(root, Some(ProfileChoice::Folder(not_a_folder)));
+        for agent in ["   ", "a\r\nX-Evil: 1"] {
+            let mut fetch = fetch_params(vec!["http://127.0.0.1:9/".into()], None);
+            fetch.user_agent = Some(agent.into());
+            let err = server.ref_fetch(Parameters(fetch)).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{agent:?}");
+            let check = CheckLinksParams {
+                urls: vec![],
+                concurrency: None,
+                timeout: None,
+                retries: None,
+                user_agent: Some(agent.into()),
+            };
+            let err = server.ref_check_links(Parameters(check)).await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::INVALID_PARAMS, "{agent:?}");
+        }
+        assert!(running(&server).await.is_none(), "Chrome was started");
     }
 
     #[tokio::test]

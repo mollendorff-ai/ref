@@ -405,8 +405,15 @@ impl BrowserPool {
     /// Chrome just loaded: the same user agent and the cookies that apply.
     #[must_use]
     pub fn download_headers(&self, url: &str) -> DownloadHeaders {
+        self.download_headers_as(url, None)
+    }
+
+    /// [`download_headers`](Self::download_headers) for a page opened with
+    /// [`new_page_as`](Self::new_page_as): that tab's user agent
+    #[must_use]
+    pub fn download_headers_as(&self, url: &str, user_agent: Option<&str>) -> DownloadHeaders {
         DownloadHeaders {
-            user_agent: self.user_agent.clone(),
+            user_agent: user_agent.unwrap_or(&self.user_agent).to_string(),
             cookie: url::Url::parse(url)
                 .ok()
                 .and_then(|u| crate::cookies::header_for(&self.cookie_jar, &u)),
@@ -428,6 +435,17 @@ impl BrowserPool {
     /// Returns [`ChromeFailed`] when Chrome failed, or an error when the tab
     /// could not be set up (it is closed then).
     pub async fn new_page(&self) -> Result<BrowserPage> {
+        self.new_page_as(None).await
+    }
+
+    /// [`new_page`](Self::new_page) with `user_agent` for this tab alone, exactly
+    /// as given (already checked by [`validate_user_agent`]), in place of the
+    /// pool's: a call on a shared browser (the MCP server) sets its own without
+    /// changing what other calls send.
+    ///
+    /// # Errors
+    /// The same as [`new_page`](Self::new_page).
+    pub async fn new_page_as(&self, user_agent: Option<&str>) -> Result<BrowserPage> {
         // A failed pool fails at once, also when every tab slot is taken
         if self.chrome.has_failed() {
             return Err(Chrome::failure("opening a tab"));
@@ -449,15 +467,16 @@ impl BrowserPool {
             chrome: Arc::clone(&self.chrome),
             reads_until: std::sync::Mutex::new(None),
         };
-        self.set_up(&tab.page, until).await?;
+        let agent = user_agent.unwrap_or(&self.user_agent);
+        self.set_up(&tab.page, agent, until).await?;
         Ok(tab)
     }
 
-    async fn set_up(&self, page: &Page, until: tokio::time::Instant) -> Result<()> {
+    async fn set_up(&self, page: &Page, agent: &str, until: tokio::time::Instant) -> Result<()> {
         // Each step on one line: a `?` alone on its line counts as a line
         // missed whenever that step happens not to fail
         let chrome = &self.chrome;
-        let agent = page.execute(SetUserAgentOverrideParams::new(&self.user_agent));
+        let agent = page.execute(SetUserAgentOverrideParams::new(agent));
         chrome.ask(until, "setting the user agent", agent).await?;
 
         if !self.cookies.is_empty() {
@@ -1252,6 +1271,19 @@ pub(crate) mod tests {
         wait_for(|| async { open_tabs(&pool).await == tabs_before }).await;
         // The slots were all freed: a tab still opens
         drop(pool.new_page().await.unwrap());
+        pool.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_downloads_user_agent_is_the_tabs_own_when_it_has_one() {
+        // Needs Chrome (ADR-004)
+        let pool = BrowserPool::new(1, FRESH).await.unwrap();
+        let url = "https://example.com/report.pdf";
+        let own = pool.download_headers(url).user_agent;
+        assert!(own.contains("mollendorff-ref/"), "{own}");
+        assert_eq!(pool.download_headers_as(url, None).user_agent, own);
+        let declared = pool.download_headers_as(url, Some("Jane Doe jane@example.com"));
+        assert_eq!(declared.user_agent, "Jane Doe jane@example.com");
         pool.stop().await;
     }
 

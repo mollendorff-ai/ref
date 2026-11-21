@@ -103,6 +103,7 @@ Each page reports `status`, `http` and, when content was cut, `"truncated": true
 | `selector` | string | - | CSS selector to extract a specific element, skipping content heuristics |
 | `max_chars` | number | 5000 | Characters per section before it is cut and marked truncated (0 = no limit) |
 | `max_sections` | number | 50 | Sections per page before the rest are dropped and the page is marked truncated (0 = no limit) |
+| `user_agent` | string | Chrome's own plus ref's name | Exactly this user agent, for this call's pages and PDF downloads only (other calls are not affected). Some sites want a name and an email, for example SEC EDGAR: `Jane Doe jane@example.com` |
 
 ```json
 {
@@ -135,6 +136,7 @@ Validate URL health using headless Chrome.
 | `concurrency` | number | 5 | Parallel tabs (1-20) |
 | `timeout` | number | 15000 | Timeout per URL in ms |
 | `retries` | number | 1 | Retry count on failure |
+| `user_agent` | string | Chrome's own plus ref's name | Exactly this user agent, for this call's checks only |
 
 ```json
 {

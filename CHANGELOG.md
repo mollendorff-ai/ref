@@ -9,8 +9,12 @@ All notable changes to Möllendorff Ref.
 - **`--profile <folder|fresh>`** on `ref fetch`, `ref check-links`, `ref verify-refs`, `ref refresh-data` and `ref mcp`: chooses the Chrome profile for that run.
   Without it, `REF_CHROME_PROFILE` gives the value, as before.
 
+- **`user_agent`** on the MCP tools `ref_fetch` and `ref_check_links`, as `--user-agent` on the command line: exactly that text is sent for that call's pages and PDF downloads, and other calls on the server's shared browser are not affected.
+  Tried against sec.gov: without it a 403 "Undeclared Automated Tool", with a declared name and email normal answers.
+
 ### Changed
 
+- Library: `check_links_with` takes the call's user agent (`Option<&str>`), `FetchOptions` has a `user_agent` field, and `BrowserPool` has `new_page_as` and `download_headers_as` for a tab's own user agent.
 - Library: `cli::run` takes the stop signal and `mcp::run_mcp` takes it too; a command ended by it returns `cli::Interrupted`.
   `BrowserPool::new` takes the profile value, and `CheckLinksConfig` and `RefreshConfig` have a `profile` field; the library no longer reads `REF_CHROME_PROFILE` itself (the command line does).
   The `run_*` command functions write their JSON to a writer they are given.

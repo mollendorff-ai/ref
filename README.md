@@ -85,7 +85,7 @@ Set the user agent with `--user-agent` (on `fetch` and `check-links`). By defaul
 ref fetch --user-agent "Jane Doe jane@example.com" https://www.sec.gov/Archives/edgar/data/... 2>/dev/null | jq .
 ```
 
-Without the option, a 403 adds an alert saying the site may want a declared user agent. The MCP server does not take this option yet.
+Without the option, a 403 adds an alert saying the site may want a declared user agent. The MCP tools `ref_fetch` and `ref_check_links` take it as a `user_agent` parameter, which applies to that call alone.
 
 Extract one element with `--selector`:
 
