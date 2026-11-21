@@ -199,7 +199,12 @@ fn start(
             return ExitCode::from(2);
         }
     };
-    let code = runtime.block_on(execute(args, input, out, err, Box::pin(shutdown_signal())));
+    // Installed now, inside the runtime, not when first polled
+    let stop = {
+        let _inside = runtime.enter();
+        shutdown_signal()
+    };
+    let code = runtime.block_on(execute(args, input, out, err, Box::pin(stop)));
     // Shutting the runtime down drops every task, which kills Chrome; only
     // then can its temporary profile be removed for good.
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
@@ -207,23 +212,34 @@ fn start(
     code
 }
 
-/// Finishes on Ctrl-C or SIGTERM
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        // Without a SIGTERM handler, that branch is off and Ctrl-C still works
-        let mut term = signal(SignalKind::terminate()).ok();
-        let terminated = futures::future::OptionFuture::from(
-            term.as_mut().map(tokio::signal::unix::Signal::recv),
-        );
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            Some(_) = terminated => {}
-        }
+/// Finishes on Ctrl-C or SIGTERM. The handlers are installed when this is
+/// called, which needs a runtime, and not when the result is first polled: for
+/// `ref mcp` that is after the handshake, and a signal in between would get the
+/// default action and end the process with no exit code.
+#[cfg(unix)]
+fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
+    use tokio::signal::unix::{signal, SignalKind};
+    // A signal that cannot be handled is left out; the others still work
+    let handlers = [SignalKind::terminate(), SignalKind::interrupt()]
+        .into_iter()
+        .filter_map(|kind| signal(kind).ok());
+    // Never empty, which `select_all` needs
+    let mut waits: Vec<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>> =
+        vec![Box::pin(std::future::pending())];
+    waits.extend(handlers.map(|mut handler| {
+        let wait: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+            handler.recv().await;
+        });
+        wait
+    }));
+    async move {
+        futures::future::select_all(waits).await;
     }
-    #[cfg(not(unix))]
-    {
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
+    async {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
@@ -629,6 +645,22 @@ mod tests {
             .expect("read");
         assert_eq!(child.0.wait().expect("wait").code(), Some(130));
         assert!(stderr.contains("Interrupted."), "{stderr}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_signal_before_the_first_poll_is_not_lost() {
+        // The window a slow machine hit (CI, 2026-11-21): SIGTERM between
+        // creating the stop signal and polling it must end the wait, not kill
+        // the process with the default action
+        let stop = shutdown_signal();
+        let sent = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let done = tokio::time::timeout(std::time::Duration::from_secs(5), stop).await;
+        assert!(done.is_ok(), "SIGTERM before the first poll was lost");
     }
 
     #[cfg(unix)]
