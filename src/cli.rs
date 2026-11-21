@@ -168,9 +168,16 @@ pub async fn execute(
 /// Ctrl-C or SIGTERM as the stop signal.
 #[must_use = "the exit code is the result of the program"]
 pub fn main() -> ExitCode {
+    real(std::env::args_os().collect())
+}
+
+/// [`main`] with the command line given, and everything else real: standard
+/// input, output and error, the stop signals and the async runtime. The
+/// process-level tests run it in a child process (ADR-006).
+fn real(args: Vec<std::ffi::OsString>) -> ExitCode {
     start(
         tokio::runtime::Runtime::new(),
-        std::env::args_os().collect(),
+        args,
         Box::new(std::io::BufReader::new(std::io::stdin())),
         &mut std::io::stdout(),
         &mut std::io::stderr(),
@@ -192,7 +199,12 @@ fn start(
             return ExitCode::from(2);
         }
     };
-    let code = runtime.block_on(execute(args, input, out, err, Box::pin(shutdown_signal())));
+    // Installed now, inside the runtime, not when first polled
+    let stop = {
+        let _inside = runtime.enter();
+        shutdown_signal()
+    };
+    let code = runtime.block_on(execute(args, input, out, err, Box::pin(stop)));
     // Shutting the runtime down drops every task, which kills Chrome; only
     // then can its temporary profile be removed for good.
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
@@ -200,23 +212,34 @@ fn start(
     code
 }
 
-/// Finishes on Ctrl-C or SIGTERM
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        // Without a SIGTERM handler, that branch is off and Ctrl-C still works
-        let mut term = signal(SignalKind::terminate()).ok();
-        let terminated = futures::future::OptionFuture::from(
-            term.as_mut().map(tokio::signal::unix::Signal::recv),
-        );
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            Some(_) = terminated => {}
-        }
+/// Finishes on Ctrl-C or SIGTERM. The handlers are installed when this is
+/// called, which needs a runtime, and not when the result is first polled: for
+/// `ref mcp` that is after the handshake, and a signal in between would get the
+/// default action and end the process with no exit code.
+#[cfg(unix)]
+fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
+    use tokio::signal::unix::{signal, SignalKind};
+    // A signal that cannot be handled is left out; the others still work
+    let handlers = [SignalKind::terminate(), SignalKind::interrupt()]
+        .into_iter()
+        .filter_map(|kind| signal(kind).ok());
+    // Never empty, which `select_all` needs
+    let mut waits: Vec<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>> =
+        vec![Box::pin(std::future::pending())];
+    waits.extend(handlers.map(|mut handler| {
+        let wait: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+            handler.recv().await;
+        });
+        wait
+    }));
+    async move {
+        futures::future::select_all(waits).await;
     }
-    #[cfg(not(unix))]
-    {
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl Future<Output = ()> + Send + 'static {
+    async {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
@@ -450,6 +473,209 @@ mod tests {
         let code = format!("{:?}", main());
         let refused = [ExitCode::from(2), ExitCode::SUCCESS].map(|c| format!("{c:?}"));
         assert!(refused.contains(&code), "{code}");
+    }
+
+    // Process-level tests (ADR-006): the test program starts itself again as a
+    // child, which runs `real` with real standard input, output, error and
+    // signals. The child is chosen by full test path with --exact; a short name
+    // would match no test, so every parent test also checks the child's output.
+
+    const CHILD_ARGS: &str = "REF_TEST_CHILD_ARGS";
+
+    /// How long a child may take to answer: it starts a real Chrome, on a
+    /// machine that runs many such tests at once. A child that says nothing
+    /// still fails its test after this, instead of hanging it.
+    const REPLY_LIMIT_SECS: u64 = 60;
+
+    /// The child half: run `real` with the command line in `CHILD_ARGS` (joined
+    /// by newlines) and end the process with its exit code. A normal test run
+    /// has no such variable, and this does nothing.
+    #[test]
+    fn child_runs_the_real_program() {
+        let Ok(line) = std::env::var(CHILD_ARGS) else {
+            return;
+        };
+        let args = line.split('\n').map(Into::into).collect();
+        let code = real(args);
+        let n = (0..=u8::MAX).find(|n| ExitCode::from(*n) == code);
+        std::process::exit(i32::from(n.unwrap_or(u8::MAX)));
+    }
+
+    /// The child process; killed when the test ends, however it ends
+    struct RefProcess(std::process::Child);
+
+    impl Drop for RefProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    /// Start the child as `ref <args>` with piped standard input, output and error
+    fn spawn_ref(args: &[&str]) -> RefProcess {
+        spawn_ref_in(args, &[])
+    }
+
+    /// [`spawn_ref`] with environment variables set in the child; the two ref
+    /// reads for the profile are cleared first, so the child sees only these
+    fn spawn_ref_in(args: &[&str], env: &[(&str, &std::path::Path)]) -> RefProcess {
+        let line = std::iter::once("ref").chain(args.iter().copied());
+        RefProcess(
+            std::process::Command::new(std::env::current_exe().expect("test program"))
+                .env_remove(crate::profile::PROFILE_ENV)
+                .envs(env.iter().copied())
+                .args([
+                    "cli::tests::child_runs_the_real_program",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD_ARGS, line.collect::<Vec<_>>().join("\n"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("start the child"),
+        )
+    }
+
+    /// The child's output lines, read on a thread so a child that says nothing
+    /// fails its test after a time limit instead of hanging it
+    fn output_lines(out: std::process::ChildStdout) -> std::sync::mpsc::Receiver<String> {
+        let (sent, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                let _ = sent.send(line);
+            }
+        });
+        lines
+    }
+
+    /// The JSON on a line of the child's output, `Null` when there is none.
+    /// The harness's own text can come first on the same line: with one test
+    /// thread (one CPU, or `--test-threads=1`) it prints `test <name> ... `
+    /// before the test runs, and the child's first output follows it.
+    fn json_in(line: &str) -> serde_json::Value {
+        let json = line.find('{').map_or("", |start| &line[start..]);
+        serde_json::from_str(json).unwrap_or_default()
+    }
+
+    /// Wait for the JSON-RPC reply with `id` (the harness's own lines are skipped)
+    fn reply_with_id(lines: &std::sync::mpsc::Receiver<String>, id: u64) -> serde_json::Value {
+        loop {
+            let line = lines
+                .recv_timeout(std::time::Duration::from_secs(REPLY_LIMIT_SECS))
+                .expect("a reply in time");
+            let value = json_in(&line);
+            if value["id"] == id {
+                return value;
+            }
+        }
+    }
+
+    const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+
+    #[test]
+    fn the_saved_profile_is_found_in_the_real_home_folder() {
+        // No --profile and no REF_CHROME_PROFILE: ref looks for
+        // <home>/.ref/chrome-profile, with the home folder from HOME
+        let page = crate::test_server::serve();
+        let home = tempfile::tempdir().unwrap();
+        let saved = home.path().join(".ref").join("chrome-profile");
+        std::fs::create_dir_all(&saved).unwrap();
+        let mut child = spawn_ref_in(
+            &["fetch", &format!("{page}/report")],
+            &[("HOME", home.path())],
+        );
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(&mut child.0.stderr.take().unwrap(), &mut stderr).unwrap();
+        assert!(child.0.wait().unwrap().success(), "{stderr}");
+        assert!(
+            stderr.contains(&format!("Using saved profile {}", saved.display())),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn mcp_answers_requests_on_real_standard_input_and_exits_0() {
+        let page = crate::test_server::serve();
+        let mut child = spawn_ref(&["mcp", "--profile", "fresh"]);
+        let mut input = child.0.stdin.take().expect("stdin");
+        let out = output_lines(child.0.stdout.take().expect("stdout"));
+        let call = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"ref_fetch","arguments":{"urls":[format!("{page}/")]}}});
+        writeln!(input, "{INITIALIZE}").expect("send");
+        let init = reply_with_id(&out, 1);
+        assert_eq!(init["result"]["serverInfo"]["name"], "ref");
+        writeln!(
+            input,
+            r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+        )
+        .expect("send");
+        writeln!(input, "{call}").expect("send");
+        let fetched = reply_with_id(&out, 2);
+        let text = fetched["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains(&page), "{text}");
+        drop(input);
+        assert_eq!(child.0.wait().expect("wait").code(), Some(0));
+    }
+
+    #[test]
+    fn check_links_reads_urls_from_real_standard_input() {
+        let page = crate::test_server::serve();
+        let mut child = spawn_ref(&["check-links", "--profile", "fresh", "--stdin"]);
+        let mut input = child.0.stdin.take().expect("stdin");
+        let out = output_lines(child.0.stdout.take().expect("stdout"));
+        writeln!(input, "{page}/").expect("send");
+        drop(input);
+        // The test harness prints its own lines first
+        let report = loop {
+            let line = out
+                .recv_timeout(std::time::Duration::from_secs(REPLY_LIMIT_SECS))
+                .expect("a report in time");
+            let value = json_in(&line);
+            if !value.is_null() {
+                break value;
+            }
+        };
+        assert_eq!(report["results"][0]["url"], format!("{page}/"));
+        assert!(child.0.wait().expect("wait").code().is_some_and(|c| c <= 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_stops_a_running_mcp_server_with_exit_code_130() {
+        let mut child = spawn_ref(&["mcp", "--profile", "fresh"]);
+        let mut input = child.0.stdin.take().expect("stdin");
+        let out = output_lines(child.0.stdout.take().expect("stdout"));
+        writeln!(input, "{INITIALIZE}").expect("send");
+        reply_with_id(&out, 1);
+        let sent = std::process::Command::new("kill")
+            .args(["-TERM", &child.0.id().to_string()])
+            .status()
+            .expect("kill");
+        assert!(sent.success());
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(&mut child.0.stderr.take().expect("stderr"), &mut stderr)
+            .expect("read");
+        assert_eq!(child.0.wait().expect("wait").code(), Some(130));
+        assert!(stderr.contains("Interrupted."), "{stderr}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_signal_before_the_first_poll_is_not_lost() {
+        // The window a slow machine hit (CI, 2026-11-21): SIGTERM between
+        // creating the stop signal and polling it must end the wait, not kill
+        // the process with the default action
+        let stop = shutdown_signal();
+        let sent = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let done = tokio::time::timeout(std::time::Duration::from_secs(5), stop).await;
+        assert!(done.is_ok(), "SIGTERM before the first poll was lost");
     }
 
     #[cfg(unix)]

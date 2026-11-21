@@ -273,7 +273,8 @@ impl BrowserPool {
              Please install Chrome or Chromium.",
         )?;
 
-        sweep_orphans();
+        // Reads /proc and removes folders: off the async workers
+        let _ = tokio::task::spawn_blocking(sweep_orphans).await;
         let home = profile::home_dir();
         let default_saved = profile::default_saved_dir(home.as_deref());
         let chosen = profile::choose(profile, default_saved.as_deref(), unique_profile_dir);

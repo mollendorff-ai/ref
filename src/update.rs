@@ -68,13 +68,21 @@ struct Source {
 /// # Errors
 /// Returns an error if the latest release cannot be fetched or the binary cannot be replaced.
 pub async fn run_update(args: UpdateArgs, out: &mut dyn std::io::Write) -> Result<()> {
-    let source = Source {
-        latest_release_url: format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest"),
-        exe: env::current_exe().context("Failed to get current executable path")?,
-        temp_root: env::temp_dir(),
-        limits: GITHUB_LIMITS,
-    };
-    update_from(&source, &args, out).await
+    update_from(&Source::real()?, &args, out).await
+}
+
+impl Source {
+    /// GitHub, the running binary and the system's temporary folder
+    fn real() -> Result<Self> {
+        Ok(Self {
+            latest_release_url: format!(
+                "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            ),
+            exe: env::current_exe().context("Failed to get current executable path")?,
+            temp_root: env::temp_dir(),
+            limits: GITHUB_LIMITS,
+        })
+    }
 }
 
 async fn update_from(source: &Source, args: &UpdateArgs, out: &mut dyn Write) -> Result<()> {
@@ -315,6 +323,19 @@ fn target_triple(os: &str, arch: &str) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_real_source_is_github_this_binary_and_the_system_temp_folder() {
+        // The one place the real addresses are wired in (ADR-006); the other
+        // tests give update a fake GitHub
+        let source = Source::real().unwrap();
+        assert_eq!(
+            source.latest_release_url,
+            "https://api.github.com/repos/mollendorff-ai/ref/releases/latest"
+        );
+        assert_eq!(source.exe, env::current_exe().unwrap());
+        assert_eq!(source.temp_root, env::temp_dir());
+    }
 
     #[test]
     fn test_expected_checksum() {
