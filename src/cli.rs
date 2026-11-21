@@ -468,9 +468,17 @@ mod tests {
 
     /// Start the child as `ref <args>` with piped standard input, output and error
     fn spawn_ref(args: &[&str]) -> RefProcess {
+        spawn_ref_in(args, &[])
+    }
+
+    /// [`spawn_ref`] with environment variables set in the child; the two ref
+    /// reads for the profile are cleared first, so the child sees only these
+    fn spawn_ref_in(args: &[&str], env: &[(&str, &std::path::Path)]) -> RefProcess {
         let line = std::iter::once("ref").chain(args.iter().copied());
         RefProcess(
             std::process::Command::new(std::env::current_exe().expect("test program"))
+                .env_remove(crate::profile::PROFILE_ENV)
+                .envs(env.iter().copied())
                 .args([
                     "cli::tests::child_runs_the_real_program",
                     "--exact",
@@ -511,6 +519,27 @@ mod tests {
     }
 
     const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+
+    #[test]
+    fn the_saved_profile_is_found_in_the_real_home_folder() {
+        // No --profile and no REF_CHROME_PROFILE: ref looks for
+        // <home>/.ref/chrome-profile, with the home folder from HOME
+        let page = crate::test_server::serve();
+        let home = tempfile::tempdir().unwrap();
+        let saved = home.path().join(".ref").join("chrome-profile");
+        std::fs::create_dir_all(&saved).unwrap();
+        let mut child = spawn_ref_in(
+            &["fetch", &format!("{page}/report")],
+            &[("HOME", home.path())],
+        );
+        let mut stderr = String::new();
+        std::io::Read::read_to_string(&mut child.0.stderr.take().unwrap(), &mut stderr).unwrap();
+        assert!(child.0.wait().unwrap().success(), "{stderr}");
+        assert!(
+            stderr.contains(&format!("Using saved profile {}", saved.display())),
+            "{stderr}"
+        );
+    }
 
     #[test]
     fn mcp_answers_requests_on_real_standard_input_and_exits_0() {

@@ -58,8 +58,12 @@ The list of resources and the test that covers each is kept in this ADR, so a ne
 | Standard output and error | `cli::real` | the same two, and `sigterm_stops_a_running_mcp_server_with_exit_code_130` (error) |
 | Stop signals (Ctrl-C, SIGTERM) | `cli::real`, `shutdown_signal` | `sigterm_stops_a_running_mcp_server_with_exit_code_130` (SIGTERM; Ctrl-C has no process-level test) |
 | Chrome program | `browser::StartOptions::found` | every test that starts Chrome, including the three above |
-| Home folder | saved profile lookup | not yet covered; step 2 of the plan |
-| GitHub address | `update` | not yet covered; step 2 of the plan |
+| Home folder (`HOME`) | `profile::home_dir`, used by `BrowserPool::start` and `login` | `the_saved_profile_is_found_in_the_real_home_folder` (a child with its own `HOME`; the `login` use is not run for real, see below) |
+| GitHub address, running binary, temporary folder | `update::Source::real` | `the_real_source_is_github_this_binary_and_the_system_temp_folder` (checks the wiring; no test calls the real GitHub, since that needs the network) |
+| `REF_CHROME_PROFILE` | `profile::resolve` | `profile_option_beats_the_environment_variable` (child processes with the variable set) |
+
+Known gaps, accepted: `ref login` starts a visible Chrome, which needs a display, so no test runs it with the real Chrome program or the real `HOME`; its tests use `true` and `false` in Chrome's place.
+A real request to GitHub is left out because tests must not need the network.
 
 ### 3. The child's coverage counts (checked 2026-11-21)
 
