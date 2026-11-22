@@ -61,6 +61,7 @@ upcoming:
       - "ref update, ref login, sign in to sites, quit Chrome with Cmd-Q, then check that a signed-in page fetches"
       - "After CHROME_LIFECYCLE (ADR-005, untested on macOS): with ref mcp running on the saved profile, kill ref's Chrome and make another call; it should start a new Chrome and succeed"
       - "After CHROME_LIFECYCLE: after such a crash, run ref login, then make an MCP call; the login window must stay open and the call must say the profile is in use"
+      - "After 1.11.1 (untested on macOS and Windows): the clean-up of a killed Chrome's helpers reads /proc, so it works on Linux only; check on the Mac that a fresh profile is not left behind in the temporary folder after a killed Chrome (for example ref fetch --profile fresh, kill its Chrome, look for ref-chrome-* folders), and find a way for macOS and Windows if it is"
 
 backlog:
   - summary: "Reference management"
@@ -69,6 +70,11 @@ backlog:
     deliverables:
       - "Done 2026-11-22, in 1.11.0. Stale reference detection: ref scan drops citations a scanned file no longer has and marks entries cited nowhere stale (kept, skipped by verify-refs)"
       - "Done 2026-11-22, in 1.11.0. Reference deduplication inside ref scan: one entry per URL across case, default port, trailing slash, fragment and utm_* parameters; http and https stay separate"
+  - summary: "Explain the failure of the fetch test that waits for content loaded after the page loads"
+    goal: "FETCH_TEST_FAILURE"
+    deliverables:
+      - "fetch::tests::content_loaded_by_fetch_after_load_is_seen failed once in CI (Unit tests (stable), 2026-11-22, https://github.com/mollendorff-ai/ref/actions/runs/45036606595, pull request #58's first run) and passed on the next runs; it never failed locally (25 of 25 runs on one CPU under load)"
+      - "Not explained: a test with a 900 ms answer ruled out the tab's first about:blank reaching networkIdle during the navigation; look for the cause only if it fails again, and write down what the failing run shows (no \"flake\")"
   - "Proxy support (--proxy)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"
