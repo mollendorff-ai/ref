@@ -4,6 +4,8 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-22
+
 ### Added
 
 - **Duplicate references merged**: `ref scan` (and the MCP tool `ref_scan`) keeps one entry per URL in references.yaml, however it is written.
@@ -12,6 +14,10 @@ All notable changes to Möllendorff Ref.
 - **Stale references**: when a scanned file no longer cites a URL, `ref scan` removes that file from the entry's `cited_in`.
   An entry cited nowhere is kept with the new status `stale`, which `ref verify-refs` skips; a file citing it again sets it back to `pending`.
 - `ref scan`'s output has two new counts, `merged_urls` and `stale_urls`.
+
+### Security
+
+- Updated `url` to 2.5.9 for RUSTSEC-2026-0592 (stack overflow in `Url::origin()` on nested `blob:` URLs).
 
 ## [1.10.1] - 2026-11-21
 
