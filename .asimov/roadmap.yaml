@@ -58,9 +58,10 @@ upcoming:
 backlog:
   - summary: "Reference management"
     goal: "REF_MANAGEMENT"
+    status: done
     deliverables:
-      - "Stale reference detection (not cited anywhere)"
-      - "Reference deduplication"
+      - "Done 2026-11-22, unreleased. Stale reference detection: ref scan drops citations a scanned file no longer has and marks entries cited nowhere stale (kept, skipped by verify-refs)"
+      - "Done 2026-11-22, unreleased. Reference deduplication inside ref scan: one entry per URL across case, default port, trailing slash, fragment and utm_* parameters; http and https stay separate"
   - "Proxy support (--proxy)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"

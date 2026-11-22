@@ -61,6 +61,8 @@ pub enum Status {
     Paywall,
     /// 200 but login required to view content
     Login,
+    /// No scanned file cites it any more; kept for its history, and not verified
+    Stale,
 }
 
 impl std::fmt::Display for Status {
@@ -72,6 +74,7 @@ impl std::fmt::Display for Status {
             Status::Redirect => write!(f, "redirect"),
             Status::Paywall => write!(f, "paywall"),
             Status::Login => write!(f, "login"),
+            Status::Stale => write!(f, "stale"),
         }
     }
 }
@@ -88,6 +91,7 @@ mod tests {
         assert_eq!(Status::Redirect.to_string(), "redirect");
         assert_eq!(Status::Paywall.to_string(), "paywall");
         assert_eq!(Status::Login.to_string(), "login");
+        assert_eq!(Status::Stale.to_string(), "stale");
     }
 
     #[test]

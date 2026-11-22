@@ -123,6 +123,15 @@ Detected tables are in a `tables` array; section text keeps their cells on singl
 
 Exit codes: `0` when everything succeeded, `1` when any URL or file failed, `2` when the command itself failed.
 A Chrome that crashes or stops answering counts as the command failing (exit code `2`, no report), never as a failed URL.
+
+### References file
+
+`ref scan` keeps one entry per URL in references.yaml, however the URL is written.
+URLs that differ only in the case of the scheme or host, a default port, a trailing `/`, a `#fragment` or `utm_*` parameters share an entry, which keeps the first spelling; `http://` and `https://` stay separate.
+Entries that are already duplicates in the file are merged the same way: citations and categories are combined, a real title beats a bare URL, and the worse status is kept.
+When a scanned file no longer cites a URL, that file is removed from the entry's `cited_in`; files not scanned this time are left alone.
+An entry cited nowhere is kept with status `stale`, `ref verify-refs` skips it, and it goes back to `pending` once a file cites it again.
+The JSON output counts these as `merged_urls` and `stale_urls`.
 Progress goes to stderr; JSON goes to stdout.
 
 ## Signed-in pages: your saved profile

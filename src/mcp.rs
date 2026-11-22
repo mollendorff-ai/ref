@@ -359,6 +359,7 @@ impl RefMcpServer {
     }
 
     /// Scan markdown files for URLs and build/update references.yaml.
+    /// Spellings of one URL share an entry; entries no scanned file cites any more are marked stale.
     #[tool(name = "ref_scan")]
     async fn ref_scan(
         &self,

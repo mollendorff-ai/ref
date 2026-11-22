@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod pdf;
 pub mod profile;
 pub mod refresh_data;
+pub(crate) mod refs;
 pub mod scan;
 pub mod schema;
 pub mod task;

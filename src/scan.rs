@@ -1,14 +1,16 @@
 //! scan command: Extract URLs from markdown files
 //!
 //! Scans markdown files, extracts URLs, and creates/updates references.yaml.
+//! Spellings of one URL share an entry, and entries no scanned file cites any more are marked stale.
 
+use crate::refs::RefSet;
 use crate::schema::{Meta, Reference, ReferencesFile, Status};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Args;
 use regex::Regex;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -38,6 +40,10 @@ pub struct ScanOutput {
     pub total_urls: usize,
     pub new_urls: usize,
     pub updated_urls: usize,
+    /// URLs written another way than the entry they were merged into (case, default port, trailing slash, fragment, `utm_*` parameters)
+    pub merged_urls: usize,
+    /// Entries no file cites any more, kept with status `stale`
+    pub stale_urls: usize,
 }
 
 /// A URL found in a markdown file with optional title
@@ -72,6 +78,8 @@ pub(crate) async fn scan_files(args: ScanArgs) -> Result<ScanOutput> {
             total_urls: 0,
             new_urls: 0,
             updated_urls: 0,
+            merged_urls: 0,
+            stale_urls: 0,
         });
     }
 
@@ -85,82 +93,59 @@ pub(crate) async fn scan_files(args: ScanArgs) -> Result<ScanOutput> {
         all_urls.extend(found);
     }
 
-    let mut url_map: HashMap<String, Reference> = HashMap::new();
-
-    for found in &all_urls {
-        let entry = url_map.entry(found.url.clone()).or_insert_with(|| {
-            let categories = infer_categories(&found.source_file);
-            Reference {
-                url: found.url.clone(),
-                title: found.title.clone().unwrap_or_else(|| found.url.clone()),
-                categories,
-                cited_in: Vec::new(),
-                status: Status::Pending,
-                verified: None,
-                notes: None,
-            }
-        });
-
-        if !entry.cited_in.contains(&found.source_file) {
-            entry.cited_in.push(found.source_file.clone());
-        }
-
-        if let Some(title) = &found.title {
-            if entry.title == entry.url && title != &entry.url {
-                entry.title.clone_from(title);
-            }
-        }
-    }
-
-    let (mut refs_file, _existing_count) = if args.merge && args.output.exists() {
+    let mut refs_file = if args.merge && args.output.exists() {
         let content = tokio::fs::read_to_string(&args.output).await?;
-        let existing: ReferencesFile = serde_yaml::from_str(&content)?;
-        let count = existing.references.len();
-        (existing, count)
+        serde_yaml::from_str::<ReferencesFile>(&content)?
     } else {
         let now = Utc::now().format("%Y-%m-%d").to_string();
-        (
-            ReferencesFile {
-                meta: Meta {
-                    created: now,
-                    last_verified: None,
-                    tool: "ref".to_string(),
-                    total_links: 0,
-                },
-                references: Vec::new(),
+        ReferencesFile {
+            meta: Meta {
+                created: now,
+                last_verified: None,
+                tool: "ref".to_string(),
+                total_links: 0,
             },
-            0,
-        )
+            references: Vec::new(),
+        }
     };
 
-    let mut existing_urls: HashMap<String, usize> = HashMap::new();
-    for (i, r) in refs_file.references.iter().enumerate() {
-        existing_urls.insert(r.url.clone(), i);
-    }
-
+    // Entries already in the file; a citation added to one of them is an update
+    let mut set = RefSet::new(std::mem::take(&mut refs_file.references));
+    let existing = set.len();
+    let mut found_in: HashSet<(usize, String)> = HashSet::new();
     let mut new_count = 0;
     let mut updated_count = 0;
 
-    for (url, new_ref) in url_map {
-        if let Some(&idx) = existing_urls.get(&url) {
-            let existing = &mut refs_file.references[idx];
-            for cited in &new_ref.cited_in {
-                if !existing.cited_in.contains(cited) {
-                    existing.cited_in.push(cited.clone());
-                    updated_count += 1;
-                }
-            }
-            if existing.title == existing.url && new_ref.title != new_ref.url {
-                existing.title = new_ref.title;
-            }
+    for found in all_urls {
+        let idx = if let Some(idx) = set.find(&found.url) {
+            idx
         } else {
-            refs_file.references.push(new_ref);
             new_count += 1;
+            set.push(new_reference(&found))
+        };
+        let entry = set.get_mut(idx);
+        if !entry.cited_in.contains(&found.source_file) {
+            entry.cited_in.push(found.source_file.clone());
+            if idx < existing {
+                updated_count += 1;
+            }
         }
+        if let Some(title) = found.title {
+            if entry.title == entry.url && title != entry.url {
+                entry.title = title;
+            }
+        }
+        found_in.insert((idx, found.source_file));
     }
 
+    let scanned: HashSet<String> = files
+        .iter()
+        .map(|f| f.to_string_lossy().to_string())
+        .collect();
+    let stale_count = set.mark_stale(&scanned, &found_in);
+    let merged_count = set.merged();
+    refs_file.references = set.into_sorted();
     refs_file.meta.total_links = refs_file.references.len();
-    refs_file.references.sort_by(|a, b| a.url.cmp(&b.url));
 
     let yaml = serde_yaml::to_string(&refs_file)?;
     crate::guard::write_atomic(&args.output, yaml.as_bytes())
@@ -172,7 +157,22 @@ pub(crate) async fn scan_files(args: ScanArgs) -> Result<ScanOutput> {
         total_urls: refs_file.references.len(),
         new_urls: new_count,
         updated_urls: updated_count,
+        merged_urls: merged_count,
+        stale_urls: stale_count,
     })
+}
+
+/// A new entry for a URL the file does not have
+fn new_reference(found: &FoundUrl) -> Reference {
+    Reference {
+        url: found.url.clone(),
+        title: found.title.clone().unwrap_or_else(|| found.url.clone()),
+        categories: infer_categories(&found.source_file),
+        cited_in: Vec::new(),
+        status: Status::Pending,
+        verified: None,
+        notes: None,
+    }
 }
 
 /// Expand file patterns to actual file paths
@@ -479,6 +479,92 @@ mod tests {
         assert_eq!(refs.references.len(), 1);
         assert_eq!(refs.references[0].title, "The page");
         assert_eq!(refs.references[0].cited_in.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn spellings_of_one_url_become_one_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.md"), dir.path().join("b.md"));
+        std::fs::write(
+            &a,
+            "https://Example.com/page/ and http://example.com/page\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &b,
+            "[The page](https://example.com/page?utm_source=feed#top)\n",
+        )
+        .unwrap();
+        let out_file = dir.path().join("references.yaml");
+        let line = [
+            "scan",
+            a.to_str().unwrap(),
+            b.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        let (code, out, _) = ref_cmd(&line).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        let json = scan_json(&out);
+        // http:// stays a URL of its own
+        assert_eq!(json["total_urls"], 2, "{out}");
+        assert_eq!(json["merged_urls"], 1, "{out}");
+        let refs = read_refs(&out_file);
+        let page = refs
+            .references
+            .iter()
+            .find(|r| r.url.starts_with("https://"))
+            .unwrap();
+        assert_eq!(
+            page.url, "https://Example.com/page/",
+            "the first spelling is kept"
+        );
+        assert_eq!(page.title, "The page");
+        assert_eq!(page.cited_in.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_entry_no_scanned_file_cites_goes_stale_and_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, other) = (dir.path().join("a.md"), dir.path().join("other.md"));
+        std::fs::write(&a, "https://example.com/gone https://example.com/shared\n").unwrap();
+        std::fs::write(&other, "https://example.com/shared\n").unwrap();
+        let out_file = dir.path().join("references.yaml");
+        let out = out_file.to_str().unwrap();
+        let both = [
+            "scan",
+            a.to_str().unwrap(),
+            other.to_str().unwrap(),
+            "-o",
+            out,
+        ];
+        assert_eq!(scan_json(&ref_cmd(&both).await.1)["stale_urls"], 0);
+
+        // a.md drops both links; other.md is not scanned this time
+        std::fs::write(&a, "No links now.\n").unwrap();
+        let only_a = ["scan", a.to_str().unwrap(), "-o", out];
+        let (code, stdout, _) = ref_cmd(&only_a).await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(scan_json(&stdout)["stale_urls"], 1, "{stdout}");
+        let refs = read_refs(&out_file);
+        assert_eq!(refs.references.len(), 2, "a stale entry is kept");
+        let by_url = |url: &str| {
+            refs.references
+                .iter()
+                .find(|r| r.url.ends_with(url))
+                .unwrap()
+        };
+        assert_eq!(by_url("/gone").status, Status::Stale);
+        assert!(by_url("/gone").cited_in.is_empty());
+        let shared = by_url("/shared");
+        assert_eq!(shared.status, Status::Pending, "still cited in other.md");
+        assert_eq!(shared.cited_in, [other.to_string_lossy()]);
+
+        // Cited again, it is pending once more
+        std::fs::write(&a, "https://example.com/gone\n").unwrap();
+        let (_, stdout, _) = ref_cmd(&only_a).await;
+        assert_eq!(scan_json(&stdout)["stale_urls"], 0, "{stdout}");
+        assert_eq!(read_refs(&out_file).references[0].status, Status::Pending);
     }
 
     #[tokio::test]
