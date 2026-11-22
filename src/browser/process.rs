@@ -625,31 +625,33 @@ mod tests {
         assert!(again.elapsed() < std::time::Duration::from_millis(250));
     }
 
+    /// A child process that is killed when the test ends, whatever its outcome
+    struct KillOnDrop(std::process::Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
     #[test]
     fn processes_still_writing_to_a_profile_are_ended_before_it_is_removed() {
         // Like a Chrome helper that outlives the main process and keeps writing
         let dir = tempfile::tempdir().unwrap();
         let profile = dir.path().join("profile");
         std::fs::create_dir_all(profile.join("inner")).unwrap();
-        let mut writer = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("d=${0#--user-data-dir=}; while :; do mkdir -p \"$d/inner\"; touch \"$d/inner/f\"; done")
-            .arg(format!("--user-data-dir={}", profile.display()))
-            .spawn()
-            .unwrap();
+        let mut writer = KillOnDrop(
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("d=${0#--user-data-dir=}; while :; do mkdir -p \"$d/inner\"; touch \"$d/inner/f\"; done")
+                .arg(format!("--user-data-dir={}", profile.display()))
+                .spawn()
+                .unwrap(),
+        );
         remove_dir_retrying(&profile);
-        // Ended by a kill; never waits for a writer that was left running
-        let mut ended = None;
-        for _ in 0..100 {
-            ended = writer.try_wait().unwrap();
-            if ended.is_some() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        if ended.is_none() {
-            writer.kill().unwrap();
-        }
+        // Ended by a kill before the removal; it was never waited for, so it is
+        // a zombie now and `try_wait` returns at once
+        let ended = writer.0.try_wait().unwrap();
         assert_eq!(
             ended
                 .as_ref()
