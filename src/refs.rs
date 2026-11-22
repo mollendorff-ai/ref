@@ -321,7 +321,7 @@ mod tests {
         let by_url = |url: &str| refs.iter().find(|r| r.url.ends_with(url)).unwrap();
         assert_eq!(by_url("/kept").cited_in, ["a.md", "other.md"]);
         assert_eq!(by_url("/kept").status, Status::Ok);
-        assert!(by_url("/gone").cited_in.is_empty());
+        assert_eq!(by_url("/gone").cited_in, Vec::<String>::new());
         assert_eq!(by_url("/gone").status, Status::Stale);
         assert_eq!(by_url("/back").status, Status::Pending);
     }

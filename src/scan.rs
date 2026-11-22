@@ -555,7 +555,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(by_url("/gone").status, Status::Stale);
-        assert!(by_url("/gone").cited_in.is_empty());
+        assert_eq!(by_url("/gone").cited_in, Vec::<String>::new());
         let shared = by_url("/shared");
         assert_eq!(shared.status, Status::Pending, "still cited in other.md");
         assert_eq!(shared.cited_in, [other.to_string_lossy()]);
