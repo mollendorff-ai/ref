@@ -34,6 +34,10 @@ shipped:
     date: "2026-11-21"
     summary: "Stop-signal handlers installed at start (ref mcp), faster orphan sweep; process-level tests (ADR-006)"
 
+  - version: "1.11.0"
+    date: "2026-11-22"
+    summary: "Reference management: duplicate URLs merged and uncited references marked stale in ref scan; url 2.5.9 (RUSTSEC-2026-0592)"
+
 upcoming:
   - summary: "Confirm 1.10.0 in CI"
     goal: "CI_CONFIRM"
@@ -60,8 +64,8 @@ backlog:
     goal: "REF_MANAGEMENT"
     status: done
     deliverables:
-      - "Done 2026-11-22, unreleased. Stale reference detection: ref scan drops citations a scanned file no longer has and marks entries cited nowhere stale (kept, skipped by verify-refs)"
-      - "Done 2026-11-22, unreleased. Reference deduplication inside ref scan: one entry per URL across case, default port, trailing slash, fragment and utm_* parameters; http and https stay separate"
+      - "Done 2026-11-22, in 1.11.0. Stale reference detection: ref scan drops citations a scanned file no longer has and marks entries cited nowhere stale (kept, skipped by verify-refs)"
+      - "Done 2026-11-22, in 1.11.0. Reference deduplication inside ref scan: one entry per URL across case, default port, trailing slash, fragment and utm_* parameters; http and https stay separate"
   - "Proxy support (--proxy)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"
