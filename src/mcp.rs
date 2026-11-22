@@ -11,6 +11,7 @@ use crate::fetch;
 use crate::guard;
 use crate::pdf;
 use crate::profile::ProfileChoice;
+use crate::proxy::Proxy;
 use crate::refresh_data::refresh_data_with;
 use crate::scan::{self, ScanArgs};
 use crate::verify_refs::Plan;
@@ -132,6 +133,8 @@ pub struct RefMcpServer {
     root: PathBuf,
     /// `--profile` value every browser of this server runs with
     profile: Option<ProfileChoice>,
+    /// `--proxy` value every browser and download of this server goes through
+    proxy: Option<Proxy>,
     tool_router: ToolRouter<RefMcpServer>,
 }
 
@@ -141,8 +144,15 @@ impl RefMcpServer {
             pool: Arc::new(Mutex::new(PoolSlot::default())),
             root,
             profile,
+            proxy: None,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// This server with every browser and download sent through `proxy`
+    fn with_proxy(mut self, proxy: Option<Proxy>) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     /// The shared browser: started on first use, and started again between
@@ -166,11 +176,12 @@ impl RefMcpServer {
             pool.stop().await;
         }
         slot.pool = None;
-        let pool = BrowserPool::new(MCP_POOL_TABS, self.profile.as_ref())
-            .await
-            .map_err(|e| {
-                ErrorData::internal_error(format!("Browser pool init failed: {e:#}"), None)
-            })?;
+        let pool =
+            BrowserPool::new_with_proxy(MCP_POOL_TABS, self.profile.as_ref(), self.proxy.as_ref())
+                .await
+                .map_err(|e| {
+                    ErrorData::internal_error(format!("Browser pool init failed: {e:#}"), None)
+                })?;
         let pool = Arc::new(pool);
         slot.pool = Some(Arc::clone(&pool));
         Ok(pool)
@@ -314,10 +325,14 @@ impl RefMcpServer {
         Parameters(params): Parameters<PdfParams>,
     ) -> std::result::Result<CallToolResult, ErrorData> {
         let root = self.workspace_root()?;
+        let headers = crate::browser::DownloadHeaders {
+            proxy: self.proxy.clone(),
+            ..Default::default()
+        };
         let mut results = Vec::new();
         for file in &params.files {
             let page = if file.starts_with("http://") || file.starts_with("https://") {
-                pdf::extract_pdf_from_url(file).await
+                pdf::extract_pdf_from_url_with(file, &headers).await
             } else {
                 let path = guard::check_workspace_path(file, &root).map_err(invalid)?;
                 pdf::extract_pdf(&path)
@@ -489,6 +504,7 @@ impl rmcp::handler::server::ServerHandler for RefMcpServer {
 pub async fn run_mcp(
     root: Option<PathBuf>,
     profile: Option<ProfileChoice>,
+    proxy: Option<Proxy>,
     stop: crate::cli::Stop,
 ) -> Result<()> {
     // All log output to stderr (stdout reserved for JSON-RPC). A second
@@ -504,6 +520,7 @@ pub async fn run_mcp(
     serve_mcp(
         root,
         profile,
+        proxy,
         Box::pin(tokio::io::stdin()),
         Box::pin(tokio::io::stdout()),
         stop,
@@ -516,6 +533,7 @@ pub async fn run_mcp(
 async fn serve_mcp(
     root: Option<PathBuf>,
     profile: Option<ProfileChoice>,
+    proxy: Option<Proxy>,
     input: Pin<Box<dyn AsyncRead + Send>>,
     output: Pin<Box<dyn AsyncWrite + Send>>,
     stop: crate::cli::Stop,
@@ -531,7 +549,7 @@ async fn serve_mcp(
         .with_context(|| format!("Workspace folder {} is not available", root.display()))?;
     info!("Workspace for file tools: {}", root.display());
 
-    let server = RefMcpServer::new(root, profile);
+    let server = RefMcpServer::new(root, profile).with_proxy(proxy);
     let browser = Arc::clone(&server.pool);
     let service = server.serve((input, output)).await?;
     let token = service.cancellation_token();
@@ -1274,6 +1292,7 @@ mod tests {
         let served = tokio::spawn(serve_mcp(
             None,
             Some(ProfileChoice::Folder(profile.clone())),
+            None,
             Box::pin(input),
             Box::pin(output),
             Box::pin(async {
@@ -1334,6 +1353,7 @@ mod tests {
         let served = tokio::spawn(serve_mcp(
             None,
             Some(ProfileChoice::Fresh),
+            None,
             Box::pin(input),
             Box::pin(output),
             Box::pin(std::future::pending()),
@@ -1353,6 +1373,53 @@ mod tests {
         assert_eq!(report["failed"], 1, "{report}");
 
         // The input ends: the server stops its Chrome and returns
+        tokio::io::AsyncWriteExt::shutdown(&mut to_server)
+            .await
+            .unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_mins(1), served).await;
+        ended.unwrap().unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_servers_proxy_carries_its_pages_and_its_pdf_downloads() {
+        // Needs Chrome (ADR-004): `ref mcp --proxy`, whole session. The host
+        // name does not exist, so only the proxy can answer for it.
+        let proxy = crate::proxy::parse_proxy(&crate::test_server::serve()).unwrap();
+        let (client, end) = tokio::io::duplex(1 << 20);
+        let (input, output) = tokio::io::split(end);
+        let served = tokio::spawn(serve_mcp(
+            None,
+            Some(ProfileChoice::Fresh),
+            Some(proxy),
+            Box::pin(input),
+            Box::pin(output),
+            Box::pin(std::future::pending()),
+        ));
+        let (from_server, mut to_server) = tokio::io::split(client);
+        let mut from_server = tokio::io::BufReader::new(from_server);
+        handshake(&mut to_server, &mut from_server).await;
+
+        for (id, tool, arguments) in [
+            (
+                2,
+                "ref_fetch",
+                serde_json::json!({"urls": ["http://nowhere.example.test/report"]}),
+            ),
+            (
+                3,
+                "ref_pdf",
+                serde_json::json!({"files": ["http://nowhere.example.test/report.pdf"]}),
+            ),
+        ] {
+            let call = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments}});
+            send(&mut to_server, &call).await;
+            let answer = receive(&mut from_server).await;
+            let page = answer["result"]["content"][0]["text"].as_str().unwrap();
+            let page: serde_json::Value = serde_json::from_str(page).unwrap();
+            assert_eq!(page["status"], "ok", "{tool}: {page}");
+        }
+
         tokio::io::AsyncWriteExt::shutdown(&mut to_server)
             .await
             .unwrap();

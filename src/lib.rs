@@ -17,6 +17,7 @@ pub mod login;
 pub mod mcp;
 pub mod pdf;
 pub mod profile;
+pub mod proxy;
 pub mod refresh_data;
 pub(crate) mod refs;
 pub mod scan;

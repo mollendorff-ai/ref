@@ -7,6 +7,7 @@
 
 use crate::browser::{detect_chrome_path, prepare_saved_profile, running_as_root, want_sandbox};
 use crate::profile::{self, ProfileChoice};
+use crate::proxy::Proxy;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use std::ffi::OsString;
@@ -22,6 +23,9 @@ pub struct LoginArgs {
     /// else ~/.ref/chrome-profile]
     #[arg(long, value_name = "FOLDER", value_parser = profile::parse_profile)]
     pub profile: Option<ProfileChoice>,
+
+    #[command(flatten)]
+    pub proxy: crate::proxy::ProxyArgs,
 }
 
 /// Switches shared with the headless runs, so cookies saved here can be read
@@ -60,9 +64,10 @@ fn login_dir(
 }
 
 /// Chrome's command line for signing in to `dir`, opening `urls`.
-fn login_args(dir: &Path, urls: &[String], sandbox: bool) -> Vec<OsString> {
+fn login_args(dir: &Path, urls: &[String], sandbox: bool, proxy: Option<&Proxy>) -> Vec<OsString> {
     let mut args = vec![OsString::from(format!("--user-data-dir={}", dir.display()))];
     args.extend(LOGIN_SWITCHES.map(OsString::from));
+    args.extend(proxy.map(|p| OsString::from(format!("--proxy-server={}", p.chrome_server()))));
     args.extend(urls.iter().map(OsString::from));
     if !sandbox {
         args.push("--no-sandbox".into());
@@ -85,9 +90,28 @@ fn run_login_with(
     chrome: Option<PathBuf>,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
+    let (dir, mut chrome) = login_command(args, chrome)?;
+    eprintln!("Chrome is opening with ref's saved profile:");
+    eprintln!("  {}", dir.display());
+    eprintln!("Sign in to your sites and pass any checks, then quit Chrome completely.");
+    eprintln!("ref will reuse these sessions from now on.");
+    let status = chrome.status().context("Failed to start Chrome")?;
+
+    let output = serde_json::json!({
+        "profile": dir.display().to_string(),
+        "status": if status.success() { "saved" } else { "chrome_exited_with_error" },
+    });
+    writeln!(out, "{output}")?;
+    Ok(())
+}
+
+/// The profile folder to sign in with, and the Chrome command that opens it
+/// (not started), after everything that can be refused has been checked
+fn login_command(args: &LoginArgs, chrome: Option<PathBuf>) -> Result<(PathBuf, Command)> {
     let home = profile::home_dir();
     let from_env = profile::resolve(None)?;
     let dir = login_dir(args.profile.as_ref(), from_env.as_ref(), home.as_deref())?;
+    let proxy = args.proxy.choice()?;
 
     for url in &args.urls {
         if let Err(e) = crate::guard::check_web_url(url) {
@@ -102,22 +126,9 @@ fn run_login_with(
             .as_deref(),
         running_as_root(),
     );
-
-    eprintln!("Chrome is opening with ref's saved profile:");
-    eprintln!("  {}", dir.display());
-    eprintln!("Sign in to your sites and pass any checks, then quit Chrome completely.");
-    eprintln!("ref will reuse these sessions from now on.");
-    let status = Command::new(chrome)
-        .args(login_args(&dir, &args.urls, sandbox))
-        .status()
-        .context("Failed to start Chrome")?;
-
-    let output = serde_json::json!({
-        "profile": dir.display().to_string(),
-        "status": if status.success() { "saved" } else { "chrome_exited_with_error" },
-    });
-    writeln!(out, "{output}")?;
-    Ok(())
+    let mut command = Command::new(chrome);
+    command.args(login_args(&dir, &args.urls, sandbox, proxy.as_ref()));
+    Ok((dir, command))
 }
 
 #[cfg(test)]
@@ -155,7 +166,7 @@ mod tests {
     #[test]
     fn chrome_opens_the_folder_and_the_pages() {
         let urls = vec!["https://a.example/".to_string()];
-        let sandboxed = login_args(Path::new("/p"), &urls, true);
+        let sandboxed = login_args(Path::new("/p"), &urls, true, None);
         let expected = [
             "--user-data-dir=/p",
             "--no-first-run",
@@ -165,9 +176,32 @@ mod tests {
             "https://a.example/",
         ];
         assert_eq!(sandboxed, expected);
-        let unsandboxed = login_args(Path::new("/p"), &urls, false);
+        let unsandboxed = login_args(Path::new("/p"), &urls, false, None);
         assert_eq!(unsandboxed[..6], expected);
         assert_eq!(unsandboxed[6], "--no-sandbox");
+    }
+
+    #[test]
+    fn chrome_signs_in_through_the_proxy_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = crate::proxy::parse_proxy("socks5h://h:9050").unwrap();
+        let args = LoginArgs {
+            urls: vec!["https://a.example/".to_string()],
+            profile: Some(ProfileChoice::Folder(dir.path().join("profile"))),
+            proxy: crate::proxy::ProxyArgs { proxy: Some(proxy) },
+        };
+        let (folder, command) = login_command(&args, Some("/usr/bin/true".into())).unwrap();
+        assert_eq!(folder, dir.path().join("profile"));
+        let seen: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+        // Chrome knows `socks5`, which has the proxy look names up
+        assert!(
+            seen.contains(&"--proxy-server=socks5://h:9050".into()),
+            "{seen:?}"
+        );
+        let sandboxed = login_args(Path::new("/p"), &[], true, None);
+        assert!(!sandboxed
+            .iter()
+            .any(|a| a.to_string_lossy().contains("proxy")));
     }
 
     /// Sign in to a new folder with `chrome` standing in for Chrome
@@ -176,6 +210,7 @@ mod tests {
         let args = LoginArgs {
             urls: urls.iter().map(ToString::to_string).collect(),
             profile: Some(ProfileChoice::Folder(dir.path().join("profile"))),
+            proxy: crate::proxy::ProxyArgs::default(),
         };
         let mut out = Vec::new();
         let done = run_login_with(&args, chrome.map(PathBuf::from), &mut out);

@@ -62,6 +62,7 @@ upcoming:
       - "After CHROME_LIFECYCLE (ADR-005, untested on macOS): with ref mcp running on the saved profile, kill ref's Chrome and make another call; it should start a new Chrome and succeed"
       - "After CHROME_LIFECYCLE: after such a crash, run ref login, then make an MCP call; the login window must stay open and the call must say the profile is in use"
       - "After 1.11.1 (untested on macOS and Windows): the clean-up of a killed Chrome's helpers reads /proc, so it works on Linux only; check on the Mac that a fresh profile is not left behind in the temporary folder after a killed Chrome (for example ref fetch --profile fresh, kill its Chrome, look for ref-chrome-* folders), and find a way for macOS and Windows if it is"
+      - "After --proxy (ADR-007, run on Linux only): on the Mac, fetch a page and a PDF through a proxy, for example ssh -D 1080 host with --proxy socks5://127.0.0.1:1080, and run ref login --proxy ... to see Chrome's sign-in window use it"
 
 backlog:
   - summary: "Reference management"
@@ -75,6 +76,11 @@ backlog:
     deliverables:
       - "fetch::tests::content_loaded_by_fetch_after_load_is_seen failed once in CI (Unit tests (stable), 2026-11-22, https://github.com/mollendorff-ai/ref/actions/runs/45036606595, pull request #58's first run) and passed on the next runs; it never failed locally (25 of 25 runs on one CPU under load)"
       - "Not explained: a test with a 900 ms answer ruled out the tab's first about:blank reaching networkIdle during the navigation; look for the cause only if it fails again, and write down what the failing run shows (no \"flake\")"
-  - "Proxy support (--proxy)"
+  - summary: "Proxy support (--proxy)"
+    goal: "PROXY"
+    status: done
+    deliverables:
+      - "Done 2026-11-22, not released yet. --proxy and REF_PROXY on fetch, pdf, check-links, verify-refs, refresh-data, login and mcp: http, https, socks5 and socks5h, no credentials, loopback never proxied, a failing proxy named in the page's alert (ADR-007)"
+      - "Not done: proxies that need a user name and a password (Chrome's authentication challenge, ADR-007 decision 2)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"

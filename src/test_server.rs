@@ -23,6 +23,61 @@ pub(crate) fn serve() -> String {
     format!("http://{addr}")
 }
 
+/// What a request asks for. A client that uses this server as its HTTP proxy
+/// asks for the whole address (`http://some.host/report`); the pages are the
+/// same, so only the path counts.
+fn proxied_path(target: &str) -> &str {
+    target
+        .strip_prefix("http://")
+        .and_then(|rest| rest.find('/').map(|at| &rest[at..]))
+        .unwrap_or(target)
+}
+
+/// A SOCKS5 proxy on 127.0.0.1 that forwards every connection to `web`
+/// (the address of a server from [`serve`]) whatever host the client asked for,
+/// so a name that does not exist still reaches the test pages. It speaks only
+/// what Chrome and the download library send: no login, a host name. Returns
+/// the address as `127.0.0.1:port`.
+pub(crate) fn serve_socks5(web: &str) -> String {
+    let web = web.trim_start_matches("http://").to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    thread::spawn(move || {
+        for client in listener.incoming().flatten() {
+            let web = web.clone();
+            thread::spawn(move || socks5_connection(client, &web));
+        }
+    });
+    addr.to_string()
+}
+
+fn socks5_connection(mut client: TcpStream, web: &str) {
+    use std::io::Read;
+    // Greeting: version, number of methods, the methods. Answer: no login
+    let mut greeting = [0u8; 2];
+    client.read_exact(&mut greeting).expect("greeting");
+    let mut methods = vec![0u8; usize::from(greeting[1])];
+    client.read_exact(&mut methods).expect("methods");
+    client.write_all(&[5, 0]).expect("method answer");
+    // Request: version, command, reserved, address type, name length, then the
+    // name and the port
+    let mut head = [0u8; 5];
+    client.read_exact(&mut head).expect("request");
+    let mut rest = vec![0u8; usize::from(head[4]) + 2];
+    client.read_exact(&mut rest).expect("name and port");
+    client
+        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        .expect("request answer");
+    let upstream = TcpStream::connect(web).expect("connect");
+    let (mut from_client, mut to_upstream) = (
+        client.try_clone().expect("clone"),
+        upstream.try_clone().expect("clone"),
+    );
+    thread::spawn(move || std::io::copy(&mut from_client, &mut to_upstream));
+    let (mut from_upstream, mut to_client) = (upstream, client);
+    let _ = std::io::copy(&mut from_upstream, &mut to_client);
+}
+
 fn handle(mut stream: TcpStream) {
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
     // A request that cannot be read is empty, and gets the 404 page
@@ -35,7 +90,8 @@ fn handle(mut stream: TcpStream) {
         headers.push_str(&line.to_ascii_lowercase());
         line.clear();
     }
-    let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+    let target = request_line.split_whitespace().nth(1).unwrap_or("/");
+    let path = proxied_path(target);
     let is_pdf = std::path::Path::new(path)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));

@@ -123,7 +123,7 @@ impl BrowserPage {
 
         let error = match nav_result {
             Ok(Ok(_)) => None,
-            Ok(Err(e)) => Some(describe_error(&e.to_string())),
+            Ok(Err(e)) => Some(describe_error(&e.to_string(), self.chrome.proxy.as_deref())),
             Err(_) => Some("Navigation timeout".to_string()),
         };
         if let Some(error) = error {
@@ -317,8 +317,14 @@ impl PageResult {
     }
 }
 
-/// Turn a Chrome navigation error into a short, stable label plus the raw message.
-fn describe_error(error: &str) -> String {
+/// Turn a Chrome navigation error into a short, stable label plus the raw
+/// message. A failure of the proxy names it (`proxy` is the one ref passed to
+/// Chrome, else Chrome used the environment's), so it is not read as the site's.
+fn describe_error(error: &str, proxy: Option<&str>) -> String {
+    if error.contains("ERR_PROXY") || error.contains("ERR_TUNNEL_CONNECTION_FAILED") {
+        let which = proxy.unwrap_or("from the environment");
+        return format!("PROXY_FAILED: {error} (proxy {which})");
+    }
     let label = if error.contains("ERR_NAME_NOT_RESOLVED") {
         "DNS_FAILED"
     } else if error.contains("ERR_CONNECTION_REFUSED") {
@@ -366,12 +372,12 @@ mod tests {
 
     #[test]
     fn test_describe_error() {
-        assert!(describe_error("net::ERR_NAME_NOT_RESOLVED").starts_with("DNS_FAILED: "));
-        assert!(describe_error("ERR_CONNECTION_REFUSED").starts_with("CONNECTION_REFUSED: "));
-        assert!(describe_error("net::ERR_TIMED_OUT").starts_with("TIMEOUT: "));
-        assert!(describe_error("net::ERR_CERT_DATE_INVALID").starts_with("SSL_ERROR: "));
-        assert!(describe_error("random error").starts_with("NETWORK_ERROR: "));
-        assert!(describe_error("random error").ends_with("random error"));
+        assert!(describe_error("net::ERR_NAME_NOT_RESOLVED", None).starts_with("DNS_FAILED: "));
+        assert!(describe_error("ERR_CONNECTION_REFUSED", None).starts_with("CONNECTION_REFUSED: "));
+        assert!(describe_error("net::ERR_TIMED_OUT", None).starts_with("TIMEOUT: "));
+        assert!(describe_error("net::ERR_CERT_DATE_INVALID", None).starts_with("SSL_ERROR: "));
+        assert!(describe_error("random error", None).starts_with("NETWORK_ERROR: "));
+        assert!(describe_error("random error", None).ends_with("random error"));
     }
 
     fn main_document_status(docs: &[DocumentResponse], main_frame: Option<&str>) -> Option<u16> {

@@ -59,6 +59,9 @@ pub struct McpArgs {
 
     #[command(flatten)]
     pub profile: crate::profile::ProfileArgs,
+
+    #[command(flatten)]
+    pub proxy: crate::proxy::ProxyArgs,
 }
 
 #[derive(Subcommand)]
@@ -105,8 +108,9 @@ pub async fn run(cli: Cli, input: Input, out: &mut dyn Write, stop: Shared<Stop>
         Commands::Update(args) => run_update(args, out).await.map(|()| true),
         Commands::Mcp(args) => {
             let profile = args.profile.choice()?;
+            let proxy = args.proxy.choice()?;
             let stop: Stop = Box::pin(stop);
-            crate::mcp::run_mcp(args.root, profile, stop)
+            crate::mcp::run_mcp(args.root, profile, proxy, stop)
                 .await
                 .map(|()| true)
         }
@@ -616,6 +620,32 @@ mod tests {
             .as_str()
             .expect("text");
         assert!(text.contains(&page), "{text}");
+        drop(input);
+        assert_eq!(child.0.wait().expect("wait").code(), Some(0));
+    }
+
+    #[test]
+    fn mcp_started_with_a_proxy_sends_its_pages_through_it() {
+        // The host name does not exist, so only the proxy can answer for it
+        let proxy = crate::test_server::serve();
+        let mut child = spawn_ref(&["mcp", "--profile", "fresh", "--proxy", &proxy]);
+        let mut input = child.0.stdin.take().expect("stdin");
+        let out = output_lines(child.0.stdout.take().expect("stdout"));
+        let call = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"ref_fetch","arguments":{"urls":["http://nowhere.example.test/report"]}}});
+        writeln!(input, "{INITIALIZE}").expect("send");
+        reply_with_id(&out, 1);
+        writeln!(
+            input,
+            r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+        )
+        .expect("send");
+        writeln!(input, "{call}").expect("send");
+        let fetched = reply_with_id(&out, 2);
+        let text = fetched["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains("Quarterly report"), "{text}");
         drop(input);
         assert_eq!(child.0.wait().expect("wait").code(), Some(0));
     }

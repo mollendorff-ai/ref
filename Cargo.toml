@@ -54,7 +54,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # URL parsing
 url = "2.5"
 sha2 = "0.11"
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls", "socks"] }
 
 # MCP server (Model Context Protocol)
 rmcp = { version = "3.9", features = ["server", "transport-io", "macros"] }
