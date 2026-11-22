@@ -95,12 +95,15 @@ pub fn remove_open_profiles() {
     dirs.retain(|(dir, owner)| owner.upgrade().is_some() || dir.exists());
 }
 
-/// Remove a profile folder. Chrome's helper processes can still write to it for
-/// a moment after a kill or a crash while they exit, so remove, and while the
+/// Remove a profile folder. A kill reaches only Chrome's main process: its
+/// helpers (zygote, GPU, renderers) go on running, and writing to the folder,
+/// until they notice it is gone, which takes longer on a busy machine. So end
+/// every process still using the folder before each removal, and while the
 /// folder is still there wait and remove again (at most 3 times, 300 ms apart).
 /// A folder that is gone costs no waiting.
 pub(super) fn remove_dir_retrying(dir: &Path) {
     for attempt in 0..3 {
+        end_processes_using(dir);
         let _ = std::fs::remove_dir_all(dir);
         if !dir.exists() {
             return;
@@ -108,6 +111,19 @@ pub(super) fn remove_dir_retrying(dir: &Path) {
         if attempt < 2 {
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
+    }
+}
+
+/// Kill the processes using `dir` until none is left (at most 2 s). A process
+/// killed on a busy machine can run on until it is next scheduled, and a Chrome
+/// that is not dead yet can start a helper meanwhile, so one pass is not enough.
+/// A killed process has no command line any more, so the loop ends once all are gone.
+fn end_processes_using(dir: &Path) {
+    for _ in 0..100 {
+        if !kill_chrome_using(dir) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -185,7 +201,8 @@ pub(super) async fn launch(
     // (written with it, Chrome receives "----flag" and silently ignores it).
     let mut builder = BrowserConfig::builder()
         .chrome_executable(chrome_path)
-        .user_data_dir(profile_dir);
+        .user_data_dir(profile_dir)
+        .env(PROFILE_MARK, profile_dir.display().to_string());
     builder = with_chrome_args(builder);
     if !sandbox {
         builder = builder.no_sandbox();
@@ -314,26 +331,45 @@ fn sweep_orphans_in(folder: &Path) {
 #[cfg(not(target_os = "linux"))]
 pub(super) fn sweep_orphans() {}
 
-/// Kill every process whose command line uses `profile` as its user-data-dir;
-/// true when there was one
+/// The environment variable that names the profile folder of the Chrome that
+/// ref starts. Every helper Chrome starts inherits it, also those with no
+/// `--user-data-dir` on their command line (the zygote, utility processes).
+const PROFILE_MARK: &str = "REF_CHROME_DIR";
+
+/// True when one of the NUL-separated entries in the file `name` of the process
+/// at `proc_path` is exactly `wanted` (a file that cannot be read has none)
+#[cfg(target_os = "linux")]
+fn proc_file_has(proc_path: &Path, name: &str, wanted: &str) -> bool {
+    std::fs::read(proc_path.join(name))
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .any(|entry| entry == wanted.as_bytes())
+}
+
+/// Kill every process that uses `profile`: one with it as its user-data-dir on
+/// the command line, or one that inherited ref's [`PROFILE_MARK`] for it from a
+/// Chrome that ref started; true when there was one
 #[cfg(target_os = "linux")]
 fn kill_chrome_using(profile: &Path) -> bool {
-    let needle = format!("--user-data-dir={}", profile.display());
+    let flag = format!("--user-data-dir={}", profile.display());
+    let mark = format!("{PROFILE_MARK}={}", profile.display());
     let mut killed = false;
     for proc_entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Ok(pid) = proc_entry.file_name().to_string_lossy().parse() else {
             continue;
         };
-        let cmdline = std::fs::read(proc_entry.path().join("cmdline")).unwrap_or_default();
-        if cmdline
-            .split(|b| *b == 0)
-            .any(|arg| arg == needle.as_bytes())
-        {
+        let path = proc_entry.path();
+        if proc_file_has(&path, "cmdline", &flag) || proc_file_has(&path, "environ", &mark) {
             kill_process(pid);
             killed = true;
         }
     }
     killed
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_chrome_using(_profile: &Path) -> bool {
+    false
 }
 
 /// The ref process id in a profile folder name `ref-chrome-<pid>-<nanos>`
@@ -587,6 +623,65 @@ mod tests {
         let again = std::time::Instant::now();
         remove_dir_retrying(&profile);
         assert!(again.elapsed() < std::time::Duration::from_millis(250));
+    }
+
+    /// A child process that is killed when the test ends, whatever its outcome
+    struct KillOnDrop(std::process::Child);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    #[test]
+    fn processes_still_writing_to_a_profile_are_ended_before_it_is_removed() {
+        // Like a Chrome helper that outlives the main process and keeps writing
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(profile.join("inner")).unwrap();
+        let mut writer = KillOnDrop(
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("d=${0#--user-data-dir=}; while :; do mkdir -p \"$d/inner\"; touch \"$d/inner/f\"; done")
+                .arg(format!("--user-data-dir={}", profile.display()))
+                .spawn()
+                .unwrap(),
+        );
+        remove_dir_retrying(&profile);
+        // Ended by a kill before the removal; it was never waited for, so it is
+        // a zombie now and `try_wait` returns at once
+        let ended = writer.0.try_wait().unwrap();
+        assert_eq!(
+            ended
+                .as_ref()
+                .and_then(std::os::unix::process::ExitStatusExt::signal),
+            Some(9),
+            "the writer was left running"
+        );
+        assert!(!profile.exists(), "the writer's folder was left behind");
+    }
+
+    #[test]
+    fn a_helper_with_no_profile_on_its_command_line_is_found_by_its_environment() {
+        // Like Chrome's zygote: started by Chrome, so it inherited the mark
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let mut helper = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 60; true")
+            .env(PROFILE_MARK, profile.display().to_string())
+            .spawn()
+            .unwrap();
+        let other = dir.path().join("other");
+        assert!(!kill_chrome_using(&other), "a folder nobody uses");
+        assert!(kill_chrome_using(&profile));
+        let ended = helper.wait().unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&ended),
+            Some(9)
+        );
     }
 
     #[test]

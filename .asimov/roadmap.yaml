@@ -37,6 +37,9 @@ shipped:
   - version: "1.11.0"
     date: "2026-11-22"
     summary: "Reference management: duplicate URLs merged and uncited references marked stale in ref scan; url 2.5.9 (RUSTSEC-2026-0592)"
+  - version: "1.11.1"
+    date: "2026-11-22"
+    summary: "Fresh Chrome profile no longer left behind after a kill (helpers tagged with REF_CHROME_DIR and ended before removal)"
 
 upcoming:
   - summary: "Confirm 1.10.0 in CI"

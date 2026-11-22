@@ -4,6 +4,15 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-11-22
+
+### Fixed
+
+- **A fresh Chrome profile left behind after Chrome was killed**: ref killed only Chrome's main process.
+  Its helpers (the zygote and utility processes, which have no `--user-data-dir` on their command line) went on starting renderers that wrote the profile folder again after ref had removed it.
+  Chrome now starts with `REF_CHROME_DIR=<profile>` in its environment, which every helper inherits, and ref ends every process that has it, or the profile on its command line, until none is left before it removes the folder.
+  This was the cause of CI failing now and then in the Chrome-start and frozen-Chrome tests, and of about 1 run in 100 under heavy CPU load.
+
 ## [1.11.0] - 2026-11-22
 
 ### Added
