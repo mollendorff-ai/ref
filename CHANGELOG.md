@@ -4,6 +4,8 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-22
+
 ### Added
 
 - **`--proxy`**: sends the pages Chrome loads and the PDFs ref downloads itself through one proxy.

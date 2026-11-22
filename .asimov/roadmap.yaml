@@ -40,6 +40,9 @@ shipped:
   - version: "1.11.1"
     date: "2026-11-22"
     summary: "Fresh Chrome profile no longer left behind after a kill (helpers tagged with REF_CHROME_DIR and ended before removal)"
+  - version: "1.12.0"
+    date: "2026-11-22"
+    summary: "--proxy and REF_PROXY: pages and PDF downloads through an http, https or SOCKS5 proxy (ADR-007)"
 
 upcoming:
   - summary: "Confirm 1.10.0 in CI"
@@ -80,7 +83,7 @@ backlog:
     goal: "PROXY"
     status: done
     deliverables:
-      - "Done 2026-11-22, not released yet. --proxy and REF_PROXY on fetch, pdf, check-links, verify-refs, refresh-data, login and mcp: http, https, socks5 and socks5h, no credentials, loopback never proxied, a failing proxy named in the page's alert (ADR-007)"
+      - "Done 2026-11-22, in 1.12.0. --proxy and REF_PROXY on fetch, pdf, check-links, verify-refs, refresh-data, login and mcp: http, https, socks5 and socks5h, no credentials, loopback never proxied, a failing proxy named in the page's alert (ADR-007)"
       - "Not done: proxies that need a user name and a password (Chrome's authentication challenge, ADR-007 decision 2)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"
