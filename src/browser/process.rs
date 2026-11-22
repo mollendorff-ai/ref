@@ -3,6 +3,7 @@
 
 use crate::cookies::Cookie;
 use crate::profile;
+use crate::proxy::Proxy;
 use anyhow::{Context, Result};
 use chromiumoxide::browser::BrowserConfigBuilder;
 use chromiumoxide::cdp::browser_protocol::network::{CookieParam, TimeSinceEpoch};
@@ -196,6 +197,7 @@ pub(super) async fn launch(
     chrome_path: &Path,
     profile_dir: &Path,
     sandbox: bool,
+    proxy: Option<&Proxy>,
 ) -> Result<(Browser, chromiumoxide::Handler)> {
     // chromiumoxide adds the leading "--" itself, so flags are written without it
     // (written with it, Chrome receives "----flag" and silently ignores it).
@@ -206,6 +208,9 @@ pub(super) async fn launch(
     builder = with_chrome_args(builder);
     if !sandbox {
         builder = builder.no_sandbox();
+    }
+    if let Some(proxy) = proxy {
+        builder = builder.arg(("proxy-server", proxy.chrome_server().as_str()));
     }
     let config = builder
         .build()

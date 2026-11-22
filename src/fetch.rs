@@ -61,6 +61,9 @@ pub struct FetchArgs {
 
     #[command(flatten)]
     pub profile: crate::profile::ProfileArgs,
+
+    #[command(flatten)]
+    pub proxy: crate::proxy::ProxyArgs,
 }
 
 /// Default per-section character limit
@@ -183,7 +186,10 @@ pub async fn run_fetch(args: FetchArgs, out: &mut dyn std::io::Write) -> Result<
         .as_deref()
         .map(validate_user_agent)
         .transpose()?;
-    let mut pool = BrowserPool::new(parallel, args.profile.choice()?.as_ref()).await?;
+    let proxy = args.proxy.choice()?;
+    let mut pool =
+        BrowserPool::new_with_proxy(parallel, args.profile.choice()?.as_ref(), proxy.as_ref())
+            .await?;
     if let Some(path) = &args.cookies {
         let text = tokio::fs::read_to_string(path)
             .await

@@ -8,6 +8,7 @@
 
 use crate::cookies::Cookie;
 use crate::profile::{self, Profile, ProfileChoice};
+use crate::proxy::Proxy;
 use anyhow::{Context, Result};
 use chromiumoxide::cdp::browser_protocol::browser::GetVersionReturns;
 use chromiumoxide::cdp::browser_protocol::network::{
@@ -86,6 +87,8 @@ struct Chrome {
     failed: std::sync::atomic::AtomicBool,
     stopped: std::sync::atomic::AtomicBool,
     request_timeout: Duration,
+    /// The proxy it was started with, to name in a page that cannot load through it
+    proxy: Option<String>,
 }
 
 impl Chrome {
@@ -233,6 +236,8 @@ pub struct BrowserPool {
     pub(crate) profile: Profile,
     cookies: Vec<CookieParam>,
     cookie_jar: Vec<Cookie>,
+    /// The proxy Chrome was started with, for the downloads made outside it
+    proxy: Option<Proxy>,
     /// While the pool lives, the final clean-up leaves its fresh profile alone
     _owner: Arc<()>,
 }
@@ -250,7 +255,24 @@ impl BrowserPool {
     /// # Errors
     /// Returns an error if Chrome/Chromium is not found or fails to launch.
     pub async fn new(concurrency: usize, profile: Option<&ProfileChoice>) -> Result<Self> {
-        Self::start(concurrency, profile, StartOptions::found()).await
+        Self::new_with_proxy(concurrency, profile, None).await
+    }
+
+    /// [`new`](Self::new) with every request sent through `proxy`: the pages
+    /// Chrome loads, and the downloads ref makes itself (see [`crate::proxy`]).
+    ///
+    /// # Errors
+    /// Returns an error if Chrome/Chromium is not found or fails to launch.
+    pub async fn new_with_proxy(
+        concurrency: usize,
+        profile: Option<&ProfileChoice>,
+        proxy: Option<&Proxy>,
+    ) -> Result<Self> {
+        let options = StartOptions {
+            proxy: proxy.cloned(),
+            ..StartOptions::found()
+        };
+        Self::start(concurrency, profile, options).await
     }
 
     /// [`new`](Self::new) with the Chrome, sandbox and request budget given
@@ -264,6 +286,7 @@ impl BrowserPool {
             chrome: chrome_path,
             sandbox,
             request_timeout,
+            proxy,
         } = options;
         let chrome_path = chrome_path.context(
             "Chrome/Chromium not found. Searched paths:\n  \
@@ -289,13 +312,13 @@ impl BrowserPool {
         }
         let profile_dir = chosen.path().to_path_buf();
 
-        let launched = match launch(&chrome_path, &profile_dir, sandbox).await {
+        let launched = match launch(&chrome_path, &profile_dir, sandbox, proxy.as_ref()).await {
             Err(e) if sandbox => {
                 eprintln!(
                     "Warning: Chrome did not start with its sandbox ({e:#}); retrying without it. \
                      Set {NO_SANDBOX_ENV}=1 to skip this attempt."
                 );
-                launch(&chrome_path, &profile_dir, false).await
+                launch(&chrome_path, &profile_dir, false, proxy.as_ref()).await
             }
             first => first,
         };
@@ -316,6 +339,7 @@ impl BrowserPool {
             failed: std::sync::atomic::AtomicBool::new(false),
             stopped: std::sync::atomic::AtomicBool::new(false),
             request_timeout,
+            proxy: proxy.as_ref().map(|p| p.as_str().to_string()),
         });
         listen(handler, Arc::downgrade(&chrome));
 
@@ -355,6 +379,7 @@ impl BrowserPool {
             profile: chosen,
             cookies: Vec::new(),
             cookie_jar: Vec::new(),
+            proxy,
             _owner: owner,
         })
     }
@@ -375,6 +400,7 @@ impl BrowserPool {
             cookie: url::Url::parse(url)
                 .ok()
                 .and_then(|u| crate::cookies::header_for(&self.cookie_jar, &u)),
+            proxy: self.proxy.clone(),
         }
     }
 
@@ -526,6 +552,8 @@ pub(crate) struct StartOptions {
     pub(crate) sandbox: bool,
     /// The request budget of rule 6
     pub(crate) request_timeout: Duration,
+    /// Send everything through this proxy
+    pub(crate) proxy: Option<Proxy>,
 }
 
 impl StartOptions {
@@ -539,6 +567,7 @@ impl StartOptions {
                 running_as_root(),
             ),
             request_timeout: CHROME_REQUEST_TIMEOUT,
+            proxy: None,
         }
     }
 }
@@ -608,6 +637,8 @@ impl Drop for BrowserPool {
 pub struct DownloadHeaders {
     pub user_agent: String,
     pub cookie: Option<String>,
+    /// The proxy to download through (else the environment's, as before)
+    pub proxy: Option<Proxy>,
 }
 
 #[cfg(test)]
@@ -904,6 +935,7 @@ pub(crate) mod tests {
             chrome: Some(PathBuf::from("/usr/bin/false")),
             sandbox,
             request_timeout: CHROME_REQUEST_TIMEOUT,
+            proxy: None,
         };
         for sandbox in [true, false] {
             let err = BrowserPool::start(1, FRESH, failing(sandbox)).await;

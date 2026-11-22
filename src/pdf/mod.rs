@@ -33,6 +33,9 @@ pub struct PdfArgs {
     /// PDF files or URLs to extract
     #[arg(required = true)]
     pub files: Vec<String>,
+
+    #[command(flatten)]
+    pub proxy: crate::proxy::ProxyArgs,
 }
 
 fn is_url(path: &str) -> bool {
@@ -53,12 +56,16 @@ pub async fn run_pdf(args: &PdfArgs, out: &mut dyn std::io::Write) -> Result<boo
         if file_count == 1 { "" } else { "s" }
     );
 
+    let headers = crate::browser::DownloadHeaders {
+        proxy: args.proxy.choice()?,
+        ..Default::default()
+    };
     let mut results: Vec<PdfPage> = Vec::new();
 
     for file in &args.files {
         eprintln!("  -> {file}");
         let page = if is_url(file) {
-            extract_pdf_from_url(file).await
+            extract_pdf_from_url_with(file, &headers).await
         } else {
             extract_pdf(&PathBuf::from(file))
         };
@@ -123,10 +130,6 @@ impl DownloadLimits {
     }
 }
 
-pub(crate) async fn extract_pdf_from_url(url: &str) -> PdfPage {
-    extract_pdf_from_url_with(url, &crate::browser::DownloadHeaders::default()).await
-}
-
 /// Download and extract a PDF, sending the given user agent and cookies
 pub(crate) async fn extract_pdf_from_url_with(
     url: &str,
@@ -169,10 +172,17 @@ async fn download_pdf(
     } else {
         headers.user_agent.clone()
     };
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(limits.connect)
         .timeout(limits.total)
-        .user_agent(user_agent)
+        .user_agent(user_agent);
+    if let Some(proxy) = &headers.proxy {
+        let proxy = proxy
+            .for_download()
+            .map_err(|e| format!("Download failed: {e}"))?;
+        builder = builder.proxy(proxy);
+    }
+    let client = builder
         .build()
         .map_err(|e| format!("Download failed: {e}"))?;
     let mut request = client.get(url);
@@ -335,6 +345,18 @@ mod tests {
         let headers = crate::browser::DownloadHeaders {
             user_agent: "bad\nagent".into(),
             cookie: None,
+            proxy: None,
+        };
+        let page = extract_pdf_from_url_within("http://127.0.0.1:9/a.pdf", &headers, &SHORT).await;
+        assert!(alert_of(&page).contains("Download failed"), "{page:?}");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_the_download_library_refuses_is_a_failed_download() {
+        // Checked proxies are always usable; this one skipped the checks
+        let headers = crate::browser::DownloadHeaders {
+            proxy: Some(crate::proxy::Proxy::unchecked("http://not a host:1")),
+            ..Default::default()
         };
         let page = extract_pdf_from_url_within("http://127.0.0.1:9/a.pdf", &headers, &SHORT).await;
         assert!(alert_of(&page).contains("Download failed"), "{page:?}");
@@ -386,7 +408,8 @@ mod tests {
     #[tokio::test]
     async fn a_pdf_from_a_url_is_downloaded_and_extracted() {
         let base = serve();
-        let page = extract_pdf_from_url(&format!("{base}/report.pdf")).await;
+        let headers = crate::browser::DownloadHeaders::default();
+        let page = extract_pdf_from_url_with(&format!("{base}/report.pdf"), &headers).await;
         assert_eq!(page.base.status, PageStatus::Ok);
         assert_eq!(page.base.title.as_deref(), Some("Regional report"));
     }

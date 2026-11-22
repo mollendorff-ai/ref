@@ -46,6 +46,9 @@ pub struct CheckLinksArgs {
 
     #[command(flatten)]
     profile: crate::profile::ProfileArgs,
+
+    #[command(flatten)]
+    proxy: crate::proxy::ProxyArgs,
 }
 
 /// Configuration for check-links
@@ -56,6 +59,8 @@ pub struct CheckLinksConfig {
     pub user_agent: Option<String>,
     /// `--profile` value, or `None` for the default
     pub profile: Option<crate::profile::ProfileChoice>,
+    /// `--proxy` value, or `None` for none
+    pub proxy: Option<crate::proxy::Proxy>,
 }
 
 /// Result for a single link check (compact)
@@ -131,6 +136,7 @@ pub async fn run_check_links(
         retries: args.retries,
         user_agent: args.user_agent.clone(),
         profile: args.profile.choice()?,
+        proxy: args.proxy.choice()?,
     };
 
     let report = check_links(&urls, &config).await?;
@@ -191,7 +197,14 @@ pub async fn check_links(urls: &[String], config: &CheckLinksConfig) -> Result<L
         .as_deref()
         .map(validate_user_agent)
         .transpose()?;
-    let pool = Arc::new(BrowserPool::new(config.concurrency, config.profile.as_ref()).await?);
+    let pool = Arc::new(
+        BrowserPool::new_with_proxy(
+            config.concurrency,
+            config.profile.as_ref(),
+            config.proxy.as_ref(),
+        )
+        .await?,
+    );
     let report = check_links_with(
         &pool,
         urls,
@@ -527,6 +540,7 @@ mod tests {
             retries: 1,
             user_agent: None,
             profile: None,
+            proxy: None,
         };
         assert_eq!(config.concurrency, 5);
         assert_eq!(config.timeout_ms, 15000);

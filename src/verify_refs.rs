@@ -42,6 +42,9 @@ pub struct VerifyRefsArgs {
 
     #[command(flatten)]
     pub profile: crate::profile::ProfileArgs,
+
+    #[command(flatten)]
+    pub proxy: crate::proxy::ProxyArgs,
 }
 
 /// Summary of verification results
@@ -90,7 +93,10 @@ pub(crate) async fn verify_refs_core(args: &VerifyRefsArgs) -> Result<VerifyOutp
         return Ok(plan.nothing_to_verify());
     }
     let profile = args.profile.choice()?;
-    let pool = Arc::new(BrowserPool::new(args.parallel, profile.as_ref()).await?);
+    let proxy = args.proxy.choice()?;
+    let pool = Arc::new(
+        BrowserPool::new_with_proxy(args.parallel, profile.as_ref(), proxy.as_ref()).await?,
+    );
     let output = plan
         .run(&pool, args.parallel, args.timeout, args.dry_run)
         .await;
@@ -526,7 +532,7 @@ pub(crate) mod tests {
     }
 
     /// Write a references file with one entry, at `url`
-    fn write_reference(file: &std::path::Path, url: &str) {
+    pub(crate) fn write_reference(file: &std::path::Path, url: &str) {
         let yaml = format!(
             "meta:\n  created: '2026-01-01'\n  last_verified: null\n  tool: ref\n  total_links: 1\n\
              references:\n- id: one\n  url: {url}\n  title: One\n  categories: [test]\n  \
@@ -545,6 +551,7 @@ pub(crate) mod tests {
             profile: crate::profile::ProfileArgs {
                 profile: Some(crate::profile::ProfileChoice::Fresh),
             },
+            proxy: crate::proxy::ProxyArgs::default(),
         }
     }
 

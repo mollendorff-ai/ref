@@ -31,6 +31,9 @@ pub struct RefreshDataArgs {
 
     #[command(flatten)]
     profile: crate::profile::ProfileArgs,
+
+    #[command(flatten)]
+    proxy: crate::proxy::ProxyArgs,
 }
 
 /// Configuration for refresh-data
@@ -38,6 +41,8 @@ pub struct RefreshConfig {
     pub timeout_ms: u64,
     /// `--profile` value, or `None` for the default
     pub profile: Option<crate::profile::ProfileChoice>,
+    /// `--proxy` value, or `None` for none
+    pub proxy: Option<crate::proxy::Proxy>,
 }
 
 /// Extracted data from a URL (compact)
@@ -85,6 +90,7 @@ pub async fn run_refresh_data(args: RefreshDataArgs, out: &mut dyn std::io::Writ
     let config = RefreshConfig {
         timeout_ms: args.timeout,
         profile: args.profile.choice()?,
+        proxy: args.proxy.choice()?,
     };
 
     let report = refresh_data(&urls, &config).await?;
@@ -123,7 +129,9 @@ async fn get_urls(args: &RefreshDataArgs) -> Result<Vec<String>> {
 /// Returns an error if the browser pool cannot be created, or
 /// [`ChromeFailed`](crate::browser::ChromeFailed) when Chrome fails.
 pub async fn refresh_data(urls: &[String], config: &RefreshConfig) -> Result<RefreshReport> {
-    let pool = Arc::new(BrowserPool::new(1, config.profile.as_ref()).await?);
+    let pool = Arc::new(
+        BrowserPool::new_with_proxy(1, config.profile.as_ref(), config.proxy.as_ref()).await?,
+    );
     let report = refresh_data_with(&pool, urls, config.timeout_ms).await;
     pool.stop().await;
     report
@@ -371,6 +379,7 @@ mod tests {
             profile: crate::profile::ProfileArgs {
                 profile: Some(crate::profile::ProfileChoice::Fresh),
             },
+            proxy: crate::proxy::ProxyArgs::default(),
         };
         let mut out = Vec::new();
         assert!(!run_refresh_data(args, &mut out).await.unwrap());
@@ -399,6 +408,7 @@ mod tests {
         let config = RefreshConfig {
             timeout_ms: 5000,
             profile: Some(crate::profile::ProfileChoice::Fresh),
+            proxy: None,
         };
         let urls = ["http://127.0.0.1:9/".to_string()];
         let report = refresh_data(&urls, &config).await.unwrap();

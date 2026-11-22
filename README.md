@@ -108,6 +108,30 @@ Same JSON structure, plus table detection (columns found from where text sits on
 The title and author come from the PDF's metadata when it has usable ones, else from the text.
 Detected tables are in a `tables` array; section text keeps their cells on single-spaced lines.
 
+### Proxy
+
+`--proxy <URL>` sends everything a command fetches through one proxy: the pages Chrome loads and the PDFs ref downloads itself.
+It is accepted by `ref fetch`, `ref pdf`, `ref check-links`, `ref verify-refs`, `ref refresh-data`, `ref login` and `ref mcp`.
+
+```bash
+ref fetch --proxy http://proxy.example.com:3128 https://example.com 2>/dev/null | jq .
+ref fetch --proxy socks5://127.0.0.1:1080 https://example.com 2>/dev/null | jq .   # for example an SSH tunnel: ssh -D 1080 host
+```
+
+- The address is `scheme://host:port` with the scheme `http`, `https`, `socks5` or `socks5h`; a missing port is `80` for `http` and `443` for `https`, and required for the others.
+- A SOCKS5 proxy always looks names up itself, in Chrome and in the downloads, so `socks5` and `socks5h` mean the same.
+- A user name or password in the address is refused: Chrome cannot take them on its command line, and a password there would be visible to every user of the machine in the process list.
+  Use a proxy that lets this machine in without one, for example an SSH tunnel.
+- `REF_PROXY` gives the proxy when `--proxy` is not given, so `ref mcp` can be set up without a flag; the option wins.
+  Either one wins over the proxy variables (`http_proxy` and the like) that Chrome and the downloads read on their own.
+  Without either, ref chooses no proxy and those defaults stay as they are.
+- Addresses on this machine (`localhost`, `127.0.0.1`, `::1`) never go through the proxy, for pages and downloads alike.
+- A page that cannot load because the proxy cannot be reached is `dead` with an alert like `PROXY_FAILED: net::ERR_PROXY_CONNECTION_FAILED (proxy http://127.0.0.1:3128)`, not a fact about the site.
+- Over MCP the proxy belongs to the server: `ref mcp --proxy ...` sends the pages and PDF downloads of every tool through it.
+  A call cannot choose another one, because the server's Chrome is started once with it.
+- `ref login --proxy ...` opens the sign-in window through the same proxy, since sites often tie a session to the address it was made from.
+- `ref update` and `ref scan` do not use `--proxy`.
+
 ## Commands
 
 | Command | Description |
@@ -241,6 +265,8 @@ Whether to forbid other tools entirely is your call; check that ref works for th
   Chrome still makes a few calls of its own to Google, such as component update and account checks, that these switches do not stop; block them at your firewall or proxy if that matters to you.
 - With a temporary profile, the user agent is Chrome's own plus `mollendorff-ref/<version>`; with your saved profile it is Chrome's own.
   ref reuses the sessions and checks you completed yourself; it does not solve CAPTCHAs or disguise itself in other ways.
+- With a proxy, the proxy sees every address ref opens, and the content of pages and PDFs fetched over plain `http`.
+  Chrome still makes the few calls of its own described above, and those go through the proxy as well.
 - Reading a site while signed in is subject to that site's terms of service; check that automated access is allowed before you point ref at it.
 
 ## Limitations

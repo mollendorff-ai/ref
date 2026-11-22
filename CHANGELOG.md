@@ -4,6 +4,17 @@ All notable changes to Möllendorff Ref.
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-22
+
+### Added
+
+- **`--proxy`**: sends the pages Chrome loads and the PDFs ref downloads itself through one proxy.
+  It works on `ref fetch`, `ref pdf`, `ref check-links`, `ref verify-refs`, `ref refresh-data`, `ref login` and `ref mcp`, and `REF_PROXY` gives it when the option is absent.
+  The address is `scheme://host:port` with `http`, `https`, `socks5` or `socks5h` and no user name or password; a SOCKS5 proxy always looks names up itself, in Chrome and in the downloads.
+  Addresses on this machine are never sent through it.
+  A page that fails because the proxy cannot be reached is `dead` with a `PROXY_FAILED` alert that names the proxy (ADR-007).
+- `BrowserPool::new_with_proxy`, and a `proxy` field in `CheckLinksConfig` and `RefreshConfig`, for programs that use ref as a library.
+
 ## [1.11.1] - 2026-11-22
 
 ### Fixed
