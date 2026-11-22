@@ -177,11 +177,10 @@ async fn download_pdf(
         .timeout(limits.total)
         .user_agent(user_agent);
     if let Some(proxy) = &headers.proxy {
-        builder = builder.proxy(
-            proxy
-                .for_download()
-                .map_err(|e| format!("Download failed: {e}"))?,
-        );
+        let proxy = proxy
+            .for_download()
+            .map_err(|e| format!("Download failed: {e}"))?;
+        builder = builder.proxy(proxy);
     }
     let client = builder
         .build()
@@ -347,6 +346,17 @@ mod tests {
             user_agent: "bad\nagent".into(),
             cookie: None,
             proxy: None,
+        };
+        let page = extract_pdf_from_url_within("http://127.0.0.1:9/a.pdf", &headers, &SHORT).await;
+        assert!(alert_of(&page).contains("Download failed"), "{page:?}");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_the_download_library_refuses_is_a_failed_download() {
+        // Checked proxies are always usable; this one skipped the checks
+        let headers = crate::browser::DownloadHeaders {
+            proxy: Some(crate::proxy::Proxy::unchecked("http://not a host:1")),
+            ..Default::default()
         };
         let page = extract_pdf_from_url_within("http://127.0.0.1:9/a.pdf", &headers, &SHORT).await;
         assert!(alert_of(&page).contains("Download failed"), "{page:?}");

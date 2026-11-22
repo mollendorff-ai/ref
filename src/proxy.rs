@@ -33,6 +33,14 @@ pub struct Proxy {
 }
 
 impl Proxy {
+    /// A proxy that skipped the checks, to see what a failure to use one does
+    #[cfg(test)]
+    pub(crate) fn unchecked(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+        }
+    }
+
     /// The address, as `scheme://host:port`
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -222,6 +230,7 @@ mod tests {
             ("http://h:8080?x=1", "nothing after"),
             ("http://h:8080#top", "nothing after"),
             ("socks5://h", "no port"),
+            ("socks5://", "has no host"),
             ("http://", "is not an address"),
         ] {
             let error = parse_proxy(given).unwrap_err();
@@ -438,6 +447,13 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_address_the_download_library_refuses_is_an_error_not_a_panic() {
+        assert!(Proxy::unchecked("http://not a host:1")
+            .for_download()
+            .is_err());
     }
 
     #[test]
