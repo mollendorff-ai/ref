@@ -130,8 +130,10 @@ impl Plan {
             .references
             .iter()
             .enumerate()
+            // A stale entry is cited nowhere, so it is not checked
             .filter(|(_, r)| {
-                categories.is_none_or(|cats| r.categories.iter().any(|c| cats.contains(c)))
+                r.status != Status::Stale
+                    && categories.is_none_or(|cats| r.categories.iter().any(|c| cats.contains(c)))
             })
             .map(|(i, _)| i)
             .collect();
@@ -246,7 +248,7 @@ fn compute_summary(total: usize, skipped: usize, statuses: &[Status]) -> VerifyS
             Status::Redirect => summary.redirect += 1,
             Status::Paywall => summary.paywall += 1,
             Status::Login => summary.login += 1,
-            Status::Pending => {}
+            Status::Pending | Status::Stale => {}
         }
     }
 
@@ -631,6 +633,19 @@ pub(crate) mod tests {
         assert_eq!(output.summary.total, 1);
         assert_eq!(output.summary.skipped, 1);
         assert_eq!(output.summary.verified, 0);
+    }
+
+    #[tokio::test]
+    async fn a_stale_reference_is_not_verified() {
+        let (_dir, file) = one_reference();
+        let text = std::fs::read_to_string(&file).unwrap();
+        let mut refs: ReferencesFile = serde_yaml::from_str(&text).unwrap();
+        refs.references[0].status = Status::Stale;
+        std::fs::write(&file, serde_yaml::to_string(&refs).unwrap()).unwrap();
+        let plan = Plan::load(&file, None).await.unwrap();
+        assert!(plan.is_empty());
+        let output = plan.nothing_to_verify();
+        assert_eq!((output.summary.total, output.summary.skipped), (1, 1));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 # Agent types: general-purpose (full file read/write/bash access).
 # Spin up with: TeamCreate team_name, then Agent tool with team_name + name.
 
-current: CI_CONFIRM
+current: MACOS_CHECK
 
 shipped:
   - version: "1.5.1"
@@ -37,14 +37,16 @@ shipped:
 upcoming:
   - summary: "Confirm 1.10.0 in CI"
     goal: "CI_CONFIRM"
+    status: done
     deliverables:
       - "Done 2026-11-18. CI green on the 1.10.0 pull request (#52), including the coverage job pinned to Rust 1.99.1; the gate also passes in the container: 100% of 9,737 lines, 370 tests"
       - "Done 2026-11-18. The push to main tagged v1.10.0; the Release workflow built all five targets, published the GitHub release and published mollendorff-ref 1.10.0 to crates.io"
-      - "Done 2026-11-18, to be confirmed by CI on its pull request. The Rust pin (lint, coverage and release jobs) is 1.100.0. In this container the full gate passes on 1.100.0 (fmt, pedantic clippy, 100% of 9,588 lines, 370 tests) when the coverage target folder is clean; an earlier 97% reading came from a test binary left in target/llvm-cov-target by another toolchain, which cargo-llvm-cov 0.9.1 reads with no profile data"
+      - "Done 2026-11-18, confirmed since by CI on main (1.10.1). The Rust pin (lint, coverage and release jobs) is 1.100.0. In this container the full gate passes on 1.100.0 (fmt, pedantic clippy, 100% of 9,588 lines, 370 tests) when the coverage target folder is clean; an earlier 97% reading came from a test binary left in target/llvm-cov-target by another toolchain, which cargo-llvm-cov 0.9.1 reads with no profile data"
+      - "Done 2026-11-21. CI green on main with Rust 1.100.0 for 1.10.1; Auto Release tagged v1.10.1, and the GitHub release (five archives and checksums.txt) and mollendorff-ref 1.10.1 on crates.io are out"
   - summary: "Leftovers outside the code"
     goal: "LEFTOVERS"
     deliverables:
-      - "Try ref fetch --user-agent against www.sec.gov (the container's network refused it on 2026-11-17; the test server's /needs-declared-agent stands in for it in the tests)"
+      - "Done 2026-11-21. ref fetch --user-agent \"Name email\" got past www.sec.gov's 403 'Undeclared Automated Tool' (it answered with normal 404 and 400 pages); the test server's /needs-declared-agent still stands in for it in the tests"
       - "Outside the repository: the GitHub About says 'token-optimized JSON' and mollendorff.ai says 'clean JSON'; the repository's one description is 'Renders web pages and PDFs into compact JSON for LLM agents'"
   - summary: "macOS check (manual, on Luis's Mac)"
     goal: "MACOS_CHECK"
@@ -56,9 +58,10 @@ upcoming:
 backlog:
   - summary: "Reference management"
     goal: "REF_MANAGEMENT"
+    status: done
     deliverables:
-      - "Stale reference detection (not cited anywhere)"
-      - "Reference deduplication"
+      - "Done 2026-11-22, unreleased. Stale reference detection: ref scan drops citations a scanned file no longer has and marks entries cited nowhere stale (kept, skipped by verify-refs)"
+      - "Done 2026-11-22, unreleased. Reference deduplication inside ref scan: one entry per URL across case, default port, trailing slash, fragment and utm_* parameters; http and https stay separate"
   - "Proxy support (--proxy)"
   - "Export to markdown report"
   - "Image/OCR extraction from PDFs"
